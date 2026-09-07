@@ -41,6 +41,7 @@ button { cursor: pointer; background: var(--primary-2); color: #fff; border-colo
 button.secondary { background: #fff; color: var(--primary-2); }
 button.danger { background: #fff; color: var(--bad); border-color: var(--bad); }
 button.small { padding: 3px 8px; font-size: 12px; }
+button.secondary.active { background: #e0e7ff; }
 button:disabled { opacity: 0.5; cursor: default; }
 
 table { width: 100%; border-collapse: collapse; background: #fff; }

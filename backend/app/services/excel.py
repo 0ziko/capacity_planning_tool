@@ -19,6 +19,7 @@ from app.models import (
     Employee,
     ImportLog,
     Item,
+    Machine,
     Order,
     PlanLine,
     ProductionActual,
@@ -51,9 +52,24 @@ TEMPLATES: dict[str, dict] = {
             ("is_planned", "Planlanıyor (E/H)", ["planlaniyor", "pilot"]),
             ("capacity_unit_hours", "Birim Saat", ["kapasitebirimi", "birim"]),
             ("default_efficient_hours", "Kişi Başı Verimli Saat", ["verimlisaat", "verimlisure"]),
+            ("area_code", "Alan Kodu", ["alan", "alankodu", "grupkodu"]),
+            ("area_name", "Alan Adı", ["alanadi", "grup", "grupadi"]),
+            ("capacity_source", "Kapasite Kaynağı (İM/Makine)", ["kapasitekaynagi", "kaynak"]),
         ],
-        "example": ["TZG-A", "A Tezgahı", "", "E", "E", 10, 4],
+        "example": ["PRESHANE 1", "PRESHANE 1", "", "E", "E", 10, 4, "PRS", "PRESHANELER", "İM"],
         "required": ["code", "name"],
+    },
+    "machines": {
+        "title": "Makineler",
+        "columns": [
+            ("wc_code", "İş Merkezi Kodu", ["ismerkezi", "ismerkezikodu"]),
+            ("code", "Makine Kodu", ["makine", "makinekodu", "tezgahkodu", "kod"]),
+            ("name", "Makine Adı", ["makineadi", "ad", "adi"]),
+            ("description", "Açıklama", []),
+            ("is_active", "Aktif (E/H)", ["aktif"]),
+        ],
+        "example": ["PRESHANE 1", "PRS1-EKS-01", "Eksantrik Pres 60t", "", "E"],
+        "required": ["wc_code", "code"],
     },
     "shifts": {
         "title": "Vardiyalar",
@@ -75,9 +91,10 @@ TEMPLATES: dict[str, dict] = {
             ("code", "Sicil No", ["sicil", "kod", "personelkodu"]),
             ("name", "Ad Soyad", ["ad", "adsoyad", "personel"]),
             ("wc_code", "İş Merkezi Kodu", ["ismerkezi", "ismerkezikodu"]),
+            ("machine_code", "Makine Kodu", ["makine", "makinekodu", "tezgah"]),
             ("is_active", "Aktif (E/H)", ["aktif"]),
         ],
-        "example": ["1001", "Ahmet Yılmaz", "TZG-A", "E"],
+        "example": ["1001", "Ahmet Yılmaz", "PRESHANE 1", "PRS1-EKS-01", "E"],
         "required": ["code", "name"],
     },
     "items": {
@@ -333,8 +350,46 @@ def import_workcenters(db: Session, rows: list[dict]) -> tuple[int, int, list[st
             wc.is_planned = _bool(r.get("is_planned"), wc.is_planned or False)
             wc.capacity_unit_hours = _float(r.get("capacity_unit_hours"), wc.capacity_unit_hours or 10.0)
             wc.default_efficient_hours = _float(r.get("default_efficient_hours"), wc.default_efficient_hours or 4.0)
+            if _str(r.get("area_code")) or _str(r.get("area_name")):
+                wc.area_code = _str(r.get("area_code"))
+                wc.area_name = _str(r.get("area_name"))
+            src = norm(_str(r.get("capacity_source")))
+            if src:
+                wc.capacity_source = "machines" if src.startswith("makin") or src == "machines" else "work_center"
         except Exception as e:  # noqa: BLE001
             errs.append(f"Satir {r['_row']}: {e}")
+    return ins, upd, errs
+
+
+def import_machines(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
+    """Makine kodu benzersizdir; varsa gunceller (is merkezi degisebilir), yoksa ekler."""
+    ins = upd = 0
+    errs = []
+    wcs = _wc_lookup(db)
+    existing = {m.code.upper(): m for m in db.query(Machine).all()}
+    for r in rows:
+        try:
+            wc = wcs.get(_str(r.get("wc_code")).upper())
+            if not wc:
+                raise ValueError(f"Is merkezi bulunamadi: {r.get('wc_code')}")
+            code = _str(r.get("code"))
+            if not code:
+                raise ValueError("Makine kodu bos")
+            m = existing.get(code.upper())
+            if not m:
+                m = Machine(code=code, work_center=wc)
+                db.add(m)
+                existing[code.upper()] = m
+                ins += 1
+            else:
+                m.work_center_id = wc.id
+                upd += 1
+            m.name = _str(r.get("name")) or m.name or code
+            m.description = _str(r.get("description"))
+            m.is_active = _bool(r.get("is_active"), True)
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"Satir {r['_row']}: {e}")
+    db.flush()
     return ins, upd, errs
 
 
@@ -371,6 +426,7 @@ def import_employees(db: Session, rows: list[dict]) -> tuple[int, int, list[str]
     ins = upd = 0
     errs = []
     wcs = _wc_lookup(db)
+    machines = {m.code.upper(): m for m in db.query(Machine).all()}
     existing = {e.code.upper(): e for e in db.query(Employee).all()}
     for r in rows:
         try:
@@ -392,6 +448,17 @@ def import_employees(db: Session, rows: list[dict]) -> tuple[int, int, list[str]
                 if not wc:
                     raise ValueError(f"Is merkezi bulunamadi: {wc_code}")
                 emp.work_center_id = wc.id
+            m_code = _str(r.get("machine_code"))
+            if m_code:
+                m = machines.get(m_code.upper())
+                if not m:
+                    raise ValueError(f"Makine bulunamadi: {m_code}")
+                if emp.work_center_id and emp.work_center_id != m.work_center_id:
+                    raise ValueError(f"Makine {m.code} personelin is merkezine ait degil")
+                emp.machine_id = m.id
+                emp.work_center_id = m.work_center_id
+            elif "machine_code" in r:
+                emp.machine_id = None  # kolon var ama bos => atama kaldirildi
             emp.is_active = _bool(r.get("is_active"), True)
         except Exception as e:  # noqa: BLE001
             errs.append(f"Satir {r['_row']}: {e}")
@@ -591,6 +658,7 @@ def import_downtime(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]
 
 IMPORTERS: dict[str, Callable[[Session, list[dict]], tuple[int, int, list[str]]]] = {
     "workcenters": import_workcenters,
+    "machines": import_machines,
     "shifts": import_shifts,
     "employees": import_employees,
     "items": import_items,
@@ -640,11 +708,14 @@ def build_backup(db: Session) -> bytes:
     item_code = {i.id: i.code for i in db.query(Item).all()}
 
     _ws_from_rows(wb, "İş Merkezleri", [c[1] for c in TEMPLATES["workcenters"]["columns"]],
-                  [[w.code, w.name, w.description, "E" if w.is_active else "H", "E" if w.is_planned else "H", w.capacity_unit_hours, w.default_efficient_hours] for w in db.query(WorkCenter).order_by(WorkCenter.code)])
+                  [[w.code, w.name, w.description, "E" if w.is_active else "H", "E" if w.is_planned else "H", w.capacity_unit_hours, w.default_efficient_hours, w.area_code, w.area_name, "Makine" if w.capacity_source == "machines" else "İM"] for w in db.query(WorkCenter).order_by(WorkCenter.code)])
+    machine_code = {m.id: m.code for m in db.query(Machine).all()}
+    _ws_from_rows(wb, "Makineler", [c[1] for c in TEMPLATES["machines"]["columns"]],
+                  [[wc_code.get(m.work_center_id), m.code, m.name, m.description, "E" if m.is_active else "H"] for m in db.query(Machine).order_by(Machine.work_center_id, Machine.code)])
     _ws_from_rows(wb, "Vardiyalar", [c[1] for c in TEMPLATES["shifts"]["columns"]],
                   [[wc_code.get(s.work_center_id), s.name, s.weekdays, s.start_time, s.end_time, s.headcount, s.efficient_hours_per_person] for s in db.query(WorkCenterShift).order_by(WorkCenterShift.work_center_id, WorkCenterShift.id)])
     _ws_from_rows(wb, "Personel", [c[1] for c in TEMPLATES["employees"]["columns"]],
-                  [[e.code, e.name, wc_code.get(e.work_center_id), "E" if e.is_active else "H"] for e in db.query(Employee).order_by(Employee.code)])
+                  [[e.code, e.name, wc_code.get(e.work_center_id), machine_code.get(e.machine_id), "E" if e.is_active else "H"] for e in db.query(Employee).order_by(Employee.code)])
     _ws_from_rows(wb, "Stok Kodları", [c[1] for c in TEMPLATES["items"]["columns"]],
                   [[i.code, i.name, i.product_group, i.unit] for i in db.query(Item).order_by(Item.code)])
     _ws_from_rows(wb, "BOM", [c[1] for c in TEMPLATES["bom"]["columns"]],

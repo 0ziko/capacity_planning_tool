@@ -89,8 +89,16 @@ export const api = {
 export type Role = "admin" | "poweruser" | "user";
 export interface User { id: number; username: string; full_name: string; role: Role; is_active: boolean }
 export interface Shift { id?: number; work_center_id?: number; name: string; weekdays: string; start_time: string; end_time: string; headcount: number; efficient_hours_per_person: number | null }
-export interface WorkCenter { id: number; code: string; name: string; description: string; is_active: boolean; is_planned: boolean; capacity_unit_hours: number; default_efficient_hours: number; shifts: Shift[]; employee_count: number }
-export interface Employee { id: number; code: string; name: string; work_center_id: number | null; is_active: boolean }
+export type CapacitySource = "work_center" | "machines";
+export interface Machine { id?: number; work_center_id?: number; code: string; name: string; description: string; is_active: boolean; employee_count?: number }
+export interface WorkCenter {
+  id: number; code: string; name: string; description: string; is_active: boolean; is_planned: boolean;
+  capacity_unit_hours: number; default_efficient_hours: number;
+  area_code: string; area_name: string; capacity_source: CapacitySource;
+  shifts: Shift[]; machines: Machine[];
+  employee_count: number; machine_employee_count: number; capacity_headcount: number;
+}
+export interface Employee { id: number; code: string; name: string; work_center_id: number | null; machine_id: number | null; is_active: boolean; machine_code?: string }
 export interface Item { id: number; code: string; name: string; product_group: string; unit: string }
 export interface ItemDetail extends Item { bom_lines: { id: number; component_code: string; component_name: string; quantity: number; unit: string }[]; operations: { id: number; seq: number; operation_name: string; work_center_id: number; cycle_time_sec: number; setup_time_min: number }[] }
 export interface Order { id: number; order_no: string; customer: string; due_date: string; item_id: number; item_code: string; item_name: string; quantity: number; unit_price: number; revenue: number; status: string; merged_into_id: number | null; note: string }

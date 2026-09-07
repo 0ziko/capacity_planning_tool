@@ -55,6 +55,7 @@ _ORPHAN_CHECKS = [
     ("plan_lines", "operation_id", "routing_operations"),
     ("production_actuals", "work_center_id", "work_centers"),
     ("downtimes", "work_center_id", "work_centers"),
+    ("machines", "work_center_id", "work_centers"),
 ]
 
 
@@ -74,4 +75,12 @@ def repair_orphans(engine: Engine) -> dict[str, int]:
             res = conn.execute(text("UPDATE employees SET work_center_id = NULL WHERE work_center_id IS NOT NULL AND work_center_id NOT IN (SELECT id FROM work_centers)"))
             if res.rowcount:
                 removed["employees.work_center_id"] = res.rowcount
+            if insp.has_table("machines"):
+                # silinmis makine ya da baska is merkezine tasinmis makine atamasini kaldir
+                res = conn.execute(text(
+                    "UPDATE employees SET machine_id = NULL WHERE machine_id IS NOT NULL AND machine_id NOT IN "
+                    "(SELECT m.id FROM machines m WHERE m.work_center_id = employees.work_center_id)"
+                ))
+                if res.rowcount:
+                    removed["employees.machine_id"] = res.rowcount
     return removed

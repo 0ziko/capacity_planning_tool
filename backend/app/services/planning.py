@@ -345,7 +345,7 @@ def lead_time(db: Session, req: LeadTimeRequest) -> LeadTimeOut:
     overall_start = None
     for op in ops:
         wc = op.work_center
-        emp = cap.employee_count(db, wc.id)
+        emp = cap.employee_count(db, wc)
         hours_left = op.hours_for(req.quantity)
         wdays_cache: dict[date, int] = {}
         day = cursor.date()
@@ -360,13 +360,13 @@ def lead_time(db: Session, req: LeadTimeRequest) -> LeadTimeOut:
                 if day == cursor.date() and cursor > day_start:
                     # ayni gun icinde daha once biten operasyondan sonra basla
                     frac_used = (cursor - day_start).total_seconds() / 3600.0
-                    nominal = max(cap.daily_nominal_hours(wc, day, emp) / max(cap.shift_headcount(cap.effective_shifts(wc)[0], emp), 1), 1.0)
+                    nominal = max(cap.daily_nominal_hours(wc, day, emp) / max(cap.shift_headcount(cap.effective_shifts(wc)[0], emp, wc), 1), 1.0)
                     free = max(free * (1 - min(frac_used / nominal, 1.0)), 0.0)
                     day_start = cursor
                 if free > 1e-6:
                     take = min(free, hours_left)
                     daily_eff = cap.daily_capacity_hours(wc, day, emp)
-                    nominal_per_day = cap.daily_nominal_hours(wc, day, emp) / max(cap.shift_headcount(cap.effective_shifts(wc)[0], emp), 1)
+                    nominal_per_day = cap.daily_nominal_hours(wc, day, emp) / max(cap.shift_headcount(cap.effective_shifts(wc)[0], emp, wc), 1)
                     # verimli saatleri nominal mesai saatine oranla yay
                     elapsed_nominal = (take / daily_eff) * nominal_per_day if daily_eff > 0 else take
                     if step_start is None:

@@ -3,6 +3,7 @@ from app.models.master import (  # noqa: F401
     BomLine,
     Employee,
     Item,
+    Machine,
     RoutingOperation,
     WorkCenter,
     WorkCenterShift,

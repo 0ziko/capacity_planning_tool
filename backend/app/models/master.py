@@ -22,11 +22,36 @@ class WorkCenter(Base):
     capacity_unit_hours: Mapped[float] = mapped_column(Float, default=10.0)
     # Vardiya satirinda deger yoksa kullanilacak kisi basi verimli saat/gun
     default_efficient_hours: Mapped[float] = mapped_column(Float, default=4.0)
+    # Alan (is merkezi grubu): orn. PRS / PRESHANELER
+    area_code: Mapped[str] = mapped_column(String(32), default="")
+    area_name: Mapped[str] = mapped_column(String(128), default="")
+    # Kapasite kisi sayisi kaynagi:
+    #   work_center -> vardiya kisi sayisi, yoksa is merkezine bagli aktif personel (varsayilan)
+    #   machines    -> bu is merkezinin aktif makinelerine atanmis aktif personel (makine detayi aktif)
+    capacity_source: Mapped[str] = mapped_column(String(16), default="work_center")
 
     shifts: Mapped[list["WorkCenterShift"]] = relationship(
         back_populates="work_center", cascade="all, delete-orphan", order_by="WorkCenterShift.id"
     )
-    employees: Mapped[list["Employee"]] = relationship(back_populates="work_center")
+    employees: Mapped[list["Employee"]] = relationship(back_populates="work_center", foreign_keys="Employee.work_center_id")
+    machines: Mapped[list["Machine"]] = relationship(back_populates="work_center", cascade="all, delete-orphan", order_by="Machine.code")
+
+
+class Machine(Base):
+    """Is merkezi altindaki makine / tezgah. Personel makineye atanabilir; is merkezi
+    capacity_source='machines' ise kapasite bu atamalardan hesaplanir."""
+
+    __tablename__ = "machines"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    work_center_id: Mapped[int] = mapped_column(ForeignKey("work_centers.id", ondelete="CASCADE"), index=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(128), default="")
+    description: Mapped[str] = mapped_column(String(256), default="")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    work_center: Mapped[WorkCenter] = relationship(back_populates="machines")
+    employees: Mapped[list["Employee"]] = relationship(back_populates="machine")
 
 
 class WorkCenterShift(Base):
@@ -68,9 +93,12 @@ class Employee(Base):
     code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(128))
     work_center_id: Mapped[int | None] = mapped_column(ForeignKey("work_centers.id", ondelete="SET NULL"), nullable=True)
+    # Makine atamasi (istege bagli); makine, personelin is merkezine ait olmali
+    machine_id: Mapped[int | None] = mapped_column(ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    work_center: Mapped[WorkCenter | None] = relationship(back_populates="employees")
+    work_center: Mapped[WorkCenter | None] = relationship(back_populates="employees", foreign_keys=[work_center_id])
+    machine: Mapped["Machine | None"] = relationship(back_populates="employees")
 
 
 class Item(Base):

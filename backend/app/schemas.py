@@ -51,6 +51,22 @@ class ShiftOut(ShiftIn, ORM):
     work_center_id: int
 
 
+CapacitySource = Literal["work_center", "machines"]
+
+
+class MachineIn(BaseModel):
+    code: str = Field(min_length=1)
+    name: str = ""
+    description: str = ""
+    is_active: bool = True
+
+
+class MachineOut(MachineIn, ORM):
+    id: int
+    work_center_id: int
+    employee_count: int = 0  # atanmis aktif personel
+
+
 class WorkCenterIn(BaseModel):
     code: str
     name: str
@@ -59,12 +75,18 @@ class WorkCenterIn(BaseModel):
     is_planned: bool = False
     capacity_unit_hours: float = 10.0
     default_efficient_hours: float = 4.0
+    area_code: str = ""
+    area_name: str = ""
+    capacity_source: CapacitySource = "work_center"
 
 
 class WorkCenterOut(WorkCenterIn, ORM):
     id: int
     shifts: list[ShiftOut] = []
-    employee_count: int = 0
+    machines: list[MachineOut] = []
+    employee_count: int = 0  # is merkezine bagli aktif personel
+    machine_employee_count: int = 0  # aktif makinelere atanmis aktif personel
+    capacity_headcount: int = 0  # kapasite hesabinda kullanilan kisi (vardiya kisi sayisi haric)
 
 
 # ---- Employees ----
@@ -72,11 +94,13 @@ class EmployeeIn(BaseModel):
     code: str
     name: str
     work_center_id: int | None = None
+    machine_id: int | None = None
     is_active: bool = True
 
 
 class EmployeeOut(EmployeeIn, ORM):
     id: int
+    machine_code: str = ""
 
 
 # ---- Items / BOM / routing ----

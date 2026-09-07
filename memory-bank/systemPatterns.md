@@ -14,7 +14,7 @@
 backend/app/
   core/    config.py (pydantic-settings), security.py (bcrypt+JWT), deps.py (get_current_user, require_role)
   db/      session.py (Base, engine, SessionLocal, get_db)
-  models/  user.py · master.py (WorkCenter, WorkCenterShift, Employee, Item, BomLine, RoutingOperation)
+  models/  user.py · master.py (WorkCenter, WorkCenterShift, Machine, Employee, Item, BomLine, RoutingOperation)
            planning.py (Order, PlanLine, ProductionActual, Downtime, ImportLog)
   schemas.py   (tüm Pydantic şemaları)
   services/ capacity.py · requirements.py · planning.py · progress.py · analysis.py · excel.py
@@ -27,9 +27,11 @@ frontend/src/
 ```
 
 ## Veri Modeli (özet)
-- **WorkCenter**: code, name, is_active, **is_planned** (pilot), capacity_unit_hours ("1 birim"), default_efficient_hours
+- **WorkCenter**: code, name, is_active, **is_planned** (pilot), capacity_unit_hours ("1 birim"), default_efficient_hours, **area_code / area_name** (alan = İM grubu, örn. PRS / PRESHANELER), **capacity_source** (`work_center` | `machines`)
 - **WorkCenterShift**: weekdays "0,1,2,3,4", start/end, headcount (0 ⇒ personelden), efficient_hours_per_person (null ⇒ iş merkezi varsayılanı)
-- **Employee**: code, name, work_center_id
+- **Machine**: work_center_id (CASCADE), code (benzersiz), name, description, is_active — İM altındaki makine/tezgah; isteğe bağlı detay
+- **Employee**: code, name, work_center_id, **machine_id** (SET NULL; makine personelin İM'sine ait olmalı — API/import doğrular)
+- **Kapasite kişi sayısı kaynağı** (`capacity.employee_count(db, wc)` + `shift_headcount(shift, emp, wc)`): `work_center` ⇒ vardiya headcount>0 ise o, yoksa İM'ye bağlı aktif personel; `machines` ⇒ İM'nin aktif makinelerine atanmış aktif personel, vardiya headcount yok sayılır. Kullanıcı İM satırından anlık değiştirir ("makine detayını istediğimde aktifleştir")
 - **Item** → **BomLine**[] (hammadde) + **RoutingOperation**[] (seq, work_center, cycle_time_sec, setup_time_min)
 - **Order**: order_no, customer, due_date, item, quantity, status(open/closed)
 - **PlanLine**: order, operation, work_center, week_start (Pazartesi), planned_hours, planned_qty, mode(auto/manual)

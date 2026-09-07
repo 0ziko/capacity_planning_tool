@@ -8,12 +8,14 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.deps import require_poweruser, require_user
 from app.db.session import get_db
-from app.models import Downtime, Employee, Item, Order, PlanLine, ProductionActual, RoutingOperation, WorkCenter, WorkCenterShift
+from app.models import Downtime, Employee, Item, Machine, Order, PlanLine, ProductionActual, RoutingOperation, WorkCenter, WorkCenterShift
 from app.schemas import (
     EmployeeIn,
     EmployeeOut,
     ItemDetail,
     ItemOut,
+    MachineIn,
+    MachineOut,
     OrderIn,
     OrderOut,
     ShiftIn,
@@ -21,22 +23,50 @@ from app.schemas import (
     WorkCenterIn,
     WorkCenterOut,
 )
+from app.services import capacity
 from app.services import orders as orders_svc
 
 router = APIRouter(prefix="/api", tags=["master"])
 
 
-def _wc_out(db: Session, wc: WorkCenter) -> WorkCenterOut:
-    cnt = db.query(func.count(Employee.id)).filter(Employee.work_center_id == wc.id, Employee.is_active.is_(True)).scalar() or 0
-    out = WorkCenterOut.model_validate(wc)
-    out.employee_count = cnt
+def _machine_out(db: Session, m: Machine) -> MachineOut:
+    out = MachineOut.model_validate(m)
+    out.employee_count = db.query(func.count(Employee.id)).filter(Employee.machine_id == m.id, Employee.is_active.is_(True)).scalar() or 0
     return out
+
+
+def _wc_out(db: Session, wc: WorkCenter) -> WorkCenterOut:
+    out = WorkCenterOut.model_validate(wc)
+    out.machines = [_machine_out(db, m) for m in wc.machines]
+    out.employee_count = capacity.wc_employee_count(db, wc.id)
+    out.machine_employee_count = capacity.machine_employee_count(db, wc.id)
+    out.capacity_headcount = out.machine_employee_count if wc.capacity_source == "machines" else out.employee_count
+    return out
+
+
+def _employee_out(e: Employee) -> EmployeeOut:
+    out = EmployeeOut.model_validate(e)
+    out.machine_code = e.machine.code if e.machine else ""
+    return out
+
+
+def _check_machine_for_employee(db: Session, data: EmployeeIn) -> None:
+    """Makine atamasi varsa makine, personelin is merkezine ait olmali (is merkezi bos ise makineninki atanir)."""
+    if data.machine_id is None:
+        return
+    m = db.get(Machine, data.machine_id)
+    if not m:
+        raise HTTPException(404, "Makine bulunamadi")
+    if data.work_center_id is None:
+        data.work_center_id = m.work_center_id
+    elif data.work_center_id != m.work_center_id:
+        raise HTTPException(400, f"Makine '{m.code}' başka bir iş merkezine ait; personelin iş merkezi ile makinenin iş merkezi aynı olmalı")
 
 
 # ---- Work centers ----
 @router.get("/workcenters", response_model=list[WorkCenterOut])
 def list_workcenters(db: Session = Depends(get_db), _=Depends(require_user)):
-    wcs = db.query(WorkCenter).options(joinedload(WorkCenter.shifts)).order_by(WorkCenter.code).all()
+    wcs = db.query(WorkCenter).options(joinedload(WorkCenter.shifts), joinedload(WorkCenter.machines)).order_by(WorkCenter.code).all()
     return [_wc_out(db, w) for w in wcs]
 
 
@@ -82,8 +112,58 @@ def delete_workcenter(wc_id: int, db: Session = Depends(get_db), _=Depends(requi
             f"'{wc.code}' silinemez; bağlı kayıtlar var: {', '.join(used)}. "
             "Önce bu kayıtları silin/taşıyın ya da iş merkezini 'Pasif' yapın (Aktif işaretini kaldırın).",
         )
-    db.query(Employee).filter(Employee.work_center_id == wc_id).update({Employee.work_center_id: None}, synchronize_session=False)
-    db.delete(wc)  # vardiyalar cascade ile silinir
+    db.query(Employee).filter(Employee.work_center_id == wc_id).update({Employee.work_center_id: None, Employee.machine_id: None}, synchronize_session=False)
+    db.delete(wc)  # vardiyalar ve makineler cascade ile silinir
+    db.commit()
+
+
+# ---- Machines (is merkezi altindaki makineler) ----
+@router.get("/machines", response_model=list[MachineOut])
+def list_machines(work_center_id: int | None = None, db: Session = Depends(get_db), _=Depends(require_user)):
+    q = db.query(Machine)
+    if work_center_id:
+        q = q.filter(Machine.work_center_id == work_center_id)
+    return [_machine_out(db, m) for m in q.order_by(Machine.work_center_id, Machine.code).all()]
+
+
+@router.post("/workcenters/{wc_id}/machines", response_model=MachineOut, status_code=201)
+def add_machine(wc_id: int, data: MachineIn, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    if not db.get(WorkCenter, wc_id):
+        raise HTTPException(404, "Is merkezi bulunamadi")
+    code = data.code.strip()
+    if db.query(Machine).filter(func.upper(Machine.code) == code.upper()).first():
+        raise HTTPException(400, f"'{code}' makine kodu zaten var")
+    m = Machine(work_center_id=wc_id, **{**data.model_dump(), "code": code})
+    db.add(m)
+    db.commit()
+    db.refresh(m)
+    return _machine_out(db, m)
+
+
+@router.put("/machines/{machine_id}", response_model=MachineOut)
+def update_machine(machine_id: int, data: MachineIn, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    m = db.get(Machine, machine_id)
+    if not m:
+        raise HTTPException(404, "Makine bulunamadi")
+    code = data.code.strip()
+    dup = db.query(Machine).filter(func.upper(Machine.code) == code.upper(), Machine.id != machine_id).first()
+    if dup:
+        raise HTTPException(400, f"'{code}' makine kodu zaten var")
+    for k, v in data.model_dump().items():
+        setattr(m, k, v)
+    m.code = code
+    db.commit()
+    db.refresh(m)
+    return _machine_out(db, m)
+
+
+@router.delete("/machines/{machine_id}", status_code=204)
+def delete_machine(machine_id: int, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    m = db.get(Machine, machine_id)
+    if not m:
+        raise HTTPException(404, "Makine bulunamadi")
+    db.query(Employee).filter(Employee.machine_id == machine_id).update({Employee.machine_id: None}, synchronize_session=False)
+    db.delete(m)
     db.commit()
 
 
@@ -123,21 +203,22 @@ def delete_shift(shift_id: int, db: Session = Depends(get_db), _=Depends(require
 # ---- Employees ----
 @router.get("/employees", response_model=list[EmployeeOut])
 def list_employees(work_center_id: int | None = None, db: Session = Depends(get_db), _=Depends(require_user)):
-    q = db.query(Employee)
+    q = db.query(Employee).options(joinedload(Employee.machine))
     if work_center_id:
         q = q.filter(Employee.work_center_id == work_center_id)
-    return q.order_by(Employee.code).all()
+    return [_employee_out(e) for e in q.order_by(Employee.code).all()]
 
 
 @router.post("/employees", response_model=EmployeeOut, status_code=201)
 def create_employee(data: EmployeeIn, db: Session = Depends(get_db), _=Depends(require_poweruser)):
     if db.query(Employee).filter(Employee.code == data.code).first():
         raise HTTPException(400, "Bu sicil zaten var")
+    _check_machine_for_employee(db, data)
     e = Employee(**data.model_dump())
     db.add(e)
     db.commit()
     db.refresh(e)
-    return e
+    return _employee_out(e)
 
 
 @router.put("/employees/{emp_id}", response_model=EmployeeOut)
@@ -145,11 +226,12 @@ def update_employee(emp_id: int, data: EmployeeIn, db: Session = Depends(get_db)
     e = db.get(Employee, emp_id)
     if not e:
         raise HTTPException(404, "Personel bulunamadi")
+    _check_machine_for_employee(db, data)
     for k, v in data.model_dump().items():
         setattr(e, k, v)
     db.commit()
     db.refresh(e)
-    return e
+    return _employee_out(e)
 
 
 @router.delete("/employees/{emp_id}", status_code=204)

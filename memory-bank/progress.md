@@ -37,7 +37,16 @@
 - [x] İki planlama modu: termine göre / maksimum ciro (`mode`), plan satırında `strategy`
 - [x] Plan karşılaştırma (kaydetmeden simülasyon): senaryo kartları, özet farklar (kaçan terminler / dışarıda kalanlar / kaçan ciro fırsatı), dönemsel ciro yan yana, sipariş bazlı tablo, "Bu planı uygula"
 
+## Çalışan (v0.4 — 2026-09-07, iş merkezi alanları ve makineler)
+- [x] Kullanıcının 17 gerçek iş merkezi tanımlı (alan kodu/adı ile gruplu; PRS3 = PRESHANE 3 kodu korunarak)
+- [x] İş merkezinde Alan Kodu / Alan Adı; İş Merkezleri sayfası alana göre gruplu görünüm
+- [x] Makine tanımları (İM altında; ekle/düzenle/sil; Excel import türü "machines" + şablon + yedek sayfası)
+- [x] Personel → makine ataması (form + Excel "Makine Kodu"); makine İM'si ile personel İM'si tutarlılık denetimi
+- [x] İM bazında kapasite kaynağı: İM personeli (varsayılan, eski davranış) / makine atamaları — anlık değiştirilebilir
+- [x] Test `tests/test_machines.py` → toplam 11/11
+
 ## Yapılacaklar
+- [ ] Makine bazlı kapasite detayı (makine başına vardiya/verimlilik, makine duruşu) — kullanıcı makineleri tanımladıktan sonra
 - [ ] Gerçek Excel formatlarına göre alias/şablon uyarlaması
 - [ ] PostgreSQL kurulumu ve `.env` geçişi (admin/IT)
 - [ ] Alembic migrasyonları

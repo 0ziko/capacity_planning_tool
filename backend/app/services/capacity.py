@@ -10,7 +10,7 @@ from datetime import date, time, timedelta
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models import Employee, WorkCenter, WorkCenterShift
+from app.models import Employee, Machine, WorkCenter, WorkCenterShift
 from app.schemas import CapacityDay, CapacityOut
 
 
@@ -39,7 +39,8 @@ def effective_shifts(wc: WorkCenter) -> list:
     return list(wc.shifts) if wc.shifts else [VirtualShift()]
 
 
-def employee_count(db: Session, wc_id: int) -> int:
+def wc_employee_count(db: Session, wc_id: int) -> int:
+    """Is merkezine dogrudan bagli aktif personel."""
     return (
         db.query(func.count(Employee.id))
         .filter(Employee.work_center_id == wc_id, Employee.is_active.is_(True))
@@ -48,7 +49,33 @@ def employee_count(db: Session, wc_id: int) -> int:
     )
 
 
-def shift_headcount(shift, emp_count: int) -> int:
+def machine_employee_count(db: Session, wc_id: int) -> int:
+    """Is merkezinin aktif makinelerine atanmis aktif personel."""
+    return (
+        db.query(func.count(Employee.id))
+        .join(Machine, Machine.id == Employee.machine_id)
+        .filter(Machine.work_center_id == wc_id, Machine.is_active.is_(True), Employee.is_active.is_(True))
+        .scalar()
+        or 0
+    )
+
+
+def employee_count(db: Session, wc: WorkCenter | int) -> int:
+    """Kapasite hesabinda kullanilacak kisi sayisi (is merkezinin capacity_source ayarina gore)."""
+    if isinstance(wc, int):
+        wc = db.get(WorkCenter, wc)
+        if wc is None:
+            return 0
+    if wc.capacity_source == "machines":
+        return machine_employee_count(db, wc.id)
+    return wc_employee_count(db, wc.id)
+
+
+def shift_headcount(shift, emp_count: int, wc: WorkCenter | None = None) -> int:
+    """Vardiyadaki kisi: makine modunda daima makine atamalari; aksi halde vardiya kisi
+    sayisi (>0) yoksa is merkezi personeli."""
+    if wc is not None and wc.capacity_source == "machines":
+        return emp_count
     return shift.headcount if shift.headcount and shift.headcount > 0 else emp_count
 
 
@@ -64,7 +91,7 @@ def daily_capacity_hours(wc: WorkCenter, day: date, emp_count: int) -> float:
     total = 0.0
     for shift in effective_shifts(wc):
         if day.weekday() in shift.weekday_set():
-            total += shift_headcount(shift, emp_count) * shift_efficient_hours(shift, wc)
+            total += shift_headcount(shift, emp_count, wc) * shift_efficient_hours(shift, wc)
     return total
 
 
@@ -73,7 +100,7 @@ def daily_nominal_hours(wc: WorkCenter, day: date, emp_count: int) -> float:
     total = 0.0
     for shift in effective_shifts(wc):
         if day.weekday() in shift.weekday_set():
-            total += shift_headcount(shift, emp_count) * shift.nominal_hours()
+            total += shift_headcount(shift, emp_count, wc) * shift.nominal_hours()
     return total
 
 
@@ -97,7 +124,7 @@ def first_shift_start(wc: WorkCenter, day: date) -> time:
 
 
 def capacity_for_range(db: Session, wc: WorkCenter, start: date, end: date) -> CapacityOut:
-    emp = employee_count(db, wc.id)
+    emp = employee_count(db, wc)
     days: list[CapacityDay] = []
     total = 0.0
     d = start

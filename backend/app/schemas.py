@@ -380,15 +380,49 @@ class WeekLoad(BaseModel):
     week_start: date
     capacity_hours: float
     planned_hours: float
-    utilization: float
+    utilization: float  # plan / kapasite
+    actual_hours: float = 0.0
+    actual_utilization: float = 0.0  # gerceklesen uretim / kapasite
     capacity_units: float
     planned_units: float
+    actual_units: float = 0.0
 
 
 class WorkCenterLoad(BaseModel):
     work_center_id: int
     work_center_code: str
     weeks: list[WeekLoad]
+
+
+class GanttBar(BaseModel):
+    plan_line_id: int
+    order_id: int
+    order_no: str
+    item_code: str
+    semi_finished_code: str = ""
+    operation_seq: int
+    operation_name: str
+    planned_start: date
+    planned_end: date
+    week_start: date
+    planned_qty: float
+    produced_qty: float
+    remaining_qty: float
+    planned_hours: float
+    earned_hours: float
+    due_date: date
+    status: str  # planned / in_progress / completed
+    last_prod_date: date | None = None
+
+
+class GanttOut(BaseModel):
+    work_center_id: int
+    work_center_code: str
+    range_start: date
+    range_end: date
+    as_of: date
+    timeline_days: list[date]
+    bars: list[GanttBar]
 
 
 class LeadTimeRequest(BaseModel):

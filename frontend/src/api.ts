@@ -122,8 +122,18 @@ export interface OrderProgress {
 }
 export interface MergeGroup { item_id: number; item_code: string; item_name: string; order_count: number; total_qty: number; earliest_due: string; latest_due: string; customers: string[]; has_progress: boolean; orders: Order[] }
 export interface Capacity { work_center_id: number; work_center_code: string; start: string; end: string; capacity_hours: number; capacity_units: number; unit_hours: number; days: { day: string; hours: number }[] }
-export interface WeekLoad { week_start: string; capacity_hours: number; planned_hours: number; utilization: number; capacity_units: number; planned_units: number }
+export interface WeekLoad { week_start: string; capacity_hours: number; planned_hours: number; utilization: number; actual_hours: number; actual_utilization: number; capacity_units: number; planned_units: number; actual_units: number }
 export interface WorkCenterLoad { work_center_id: number; work_center_code: string; weeks: WeekLoad[] }
+export interface GanttBar {
+  plan_line_id: number; order_id: number; order_no: string; item_code: string; semi_finished_code: string;
+  operation_seq: number; operation_name: string; planned_start: string; planned_end: string; week_start: string;
+  planned_qty: number; produced_qty: number; remaining_qty: number; planned_hours: number; earned_hours: number;
+  due_date: string; status: string; last_prod_date: string | null;
+}
+export interface GanttData {
+  work_center_id: number; work_center_code: string; range_start: string; range_end: string; as_of: string;
+  timeline_days: string[]; bars: GanttBar[];
+}
 export interface PlanLine { id: number; order_id: number; order_no: string; customer: string; due_date: string; item_code: string; operation_id: number; operation_seq: number; work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; planned_qty: number; mode: string; strategy: string }
 export interface Progress { work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; expected_hours_to_date: number; actual_hours_to_date: number; remaining_hours: number; remaining_days: number; working_days: number; elapsed_days: number; status: string }
 export interface ImportKind { kind: string; title: string; columns: string[]; required: string[] }

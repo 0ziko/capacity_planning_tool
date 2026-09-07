@@ -114,11 +114,11 @@ export function UtilBadge({ u }: { u: number }) {
   return <span className={`badge ${cls}`}>{Math.round(u * 100)}%</span>;
 }
 
-export function Bar({ ratio }: { ratio: number }) {
-  const cls = ratio > 1.0001 ? "bad" : ratio > 0.9 ? "warn" : "";
+export function Bar({ ratio, cls = "" }: { ratio: number; cls?: string }) {
+  const tone = ratio > 1.0001 ? "bad" : ratio > 0.9 ? "warn" : "";
   return (
-    <div className="bar">
-      <span className={cls} style={{ width: `${Math.min(ratio * 100, 100)}%` }} />
+    <div className={`bar ${cls}`.trim()}>
+      <span className={tone} style={{ width: `${Math.min(ratio * 100, 100)}%` }} />
     </div>
   );
 }

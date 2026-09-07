@@ -8,14 +8,16 @@ import MergePanel from "./planning/MergePanel";
 import OrderProgressPanel from "./planning/OrderProgressPanel";
 import OrderSchedulePanel from "./planning/OrderSchedulePanel";
 import RevenuePanel from "./planning/RevenuePanel";
+import GanttPanel from "./planning/GanttPanel";
 import WcOrdersPanel from "./planning/WcOrdersPanel";
 
 interface AutoResult { created: number; message: string; mode: PlanMode; unplanned: { order_no: string; item_code: string; operation_seq: number; work_center_code: string; hours: number }[]; skipped: { order_no: string; item_code: string; revenue: number; hours: number }[] }
 interface LeadTime { item_code: string; quantity: number; total_hours: number; start: string; end: string; steps: { operation_seq: number; operation_name: string; work_center_code: string; hours: number; start: string; end: string; start_rule: string }[] }
 
-type Tab = "load" | "labor" | "orders" | "wc" | "revenue" | "compare" | "progress" | "merge" | "leadtime";
+type Tab = "load" | "labor" | "gantt" | "orders" | "wc" | "revenue" | "compare" | "progress" | "merge" | "leadtime";
 const TABS: { id: Tab; label: string; hint: string }[] = [
   { id: "load", label: "Haftalık yük & plan satırları", hint: "İş merkezi × hafta doluluk ve tüm plan satırları" },
+  { id: "gantt", label: "Gantt", hint: "İş merkezi bazında sipariş / yarımamül zaman çizelgesi" },
   { id: "labor", label: "Haftalık iş gücü", hint: "İş merkezi × hafta kişi / verimli saat / gün — haftaya özel değişiklikler" },
   { id: "orders", label: "Sipariş bitiş tarihleri", hint: "Plan sonucuna göre her siparişin tahmini üretim bitişi" },
   { id: "wc", label: "İş merkezi bazlı siparişler", hint: "Seçilen iş merkezine planlanmış siparişler" },
@@ -123,6 +125,13 @@ export default function Planning() {
       </div>
 
       {tab === "labor" && <LaborPanel start={start} weeks={weeks} wcs={wcIds.length ? wcs.filter((w) => wcIds.includes(w.id)) : wcs.filter((w) => w.is_planned)} canEdit={can("poweruser")} onChanged={refresh} />}
+      {tab === "gantt" && (
+        <GanttPanel
+          wcs={wcIds.length ? wcs.filter((w) => wcIds.includes(w.id)) : wcs.filter((w) => w.is_planned)}
+          defaultStart={start}
+          defaultEnd={addDays(start, weeks * 7 - 1)}
+        />
+      )}
       {tab === "orders" && <OrderSchedulePanel rows={schedule.data} err={schedule.err} onReload={schedule.reload} />}
       {tab === "wc" && <WcOrdersPanel lines={lines.data} schedule={schedule.data} wcs={wcIds.length ? wcs.filter((w) => wcIds.includes(w.id)) : wcs.filter((w) => w.is_planned)} horizon={`${start} → ${addDays(start, weeks * 7 - 1)}`} />}
       {tab === "revenue" && <RevenuePanel start={start} weeks={weeks} wcIds={wcIds} />}
@@ -131,7 +140,8 @@ export default function Planning() {
       {tab === "merge" && <MergePanel onChanged={() => { refresh(); mergeCount.reload(); }} />}
       {tab === "leadtime" && <LeadTimePanel />}
       {tab === "load" && (<>
-      <h2>Haftalık yük (saat: planlanan / kapasite)</h2>
+      <h2>Haftalık yük (saat: plan / gerçekleşen / kapasite)</h2>
+      <p className="muted" style={{ marginTop: -8 }}>Mavi çubuk = planlanan yük; yeşil çubuk = günlük üretim beyanlarından gelen gerçekleşen saat. Sağdaki yüzdeler: plan % ve gerçekleşen %.</p>
       <div className="table-wrap">
         <table>
           <thead><tr><th>İş Merkezi</th>{weekList.map((w) => (
@@ -144,11 +154,17 @@ export default function Planning() {
               <tr key={wc.work_center_id}>
                 <td><b>{wc.work_center_code}</b></td>
                 {wc.weeks.map((w) => (
-                  <td key={w.week_start} title={`${fmt(w.planned_units)} / ${fmt(w.capacity_units)} birim`}>
-                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                      <span style={{ minWidth: 90 }}>{fmt(w.planned_hours, 0)} / {fmt(w.capacity_hours, 0)}</span>
+                  <td key={w.week_start} title={`Plan: ${fmt(w.planned_hours)} sa · Gerçekleşen: ${fmt(w.actual_hours)} sa · Kapasite: ${fmt(w.capacity_hours)} sa`}>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 130 }}>
+                      <span style={{ fontSize: 12 }}>{fmt(w.planned_hours, 0)} / <b style={{ color: "var(--ok)" }}>{fmt(w.actual_hours, 0)}</b> / {fmt(w.capacity_hours, 0)}</span>
                       <Bar ratio={w.utilization} />
-                      <UtilBadge u={w.utilization} />
+                      <Bar ratio={w.actual_utilization} cls="actual" />
+                      <div style={{ display: "flex", gap: 6, fontSize: 11 }}>
+                        <UtilBadge u={w.utilization} />
+                        <span className="muted">plan</span>
+                        <UtilBadge u={w.actual_utilization} />
+                        <span className="muted">gerç.</span>
+                      </div>
                     </div>
                   </td>
                 ))}

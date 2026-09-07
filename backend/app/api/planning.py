@@ -12,6 +12,7 @@ from app.models import PlanLine, User, WorkCenter
 from app.schemas import (
     AutoPlanRequest,
     CapacityOut,
+    GanttOut,
     LeadTimeOut,
     LeadTimeRequest,
     ManualPlanLineIn,
@@ -29,7 +30,7 @@ from app.schemas import (
     RevenueOut,
     WorkCenterLoad,
 )
-from app.services import analysis, capacity, excel, planning, progress, requirements, revenue
+from app.services import analysis, capacity, excel, gantt, planning, progress, requirements, revenue
 from app.services import orders as orders_svc
 
 router = APIRouter(prefix="/api", tags=["planning"])
@@ -139,6 +140,21 @@ def clear_plan(start: date, mode: str | None = None, work_center_ids: list[int] 
 @router.get("/plan/load", response_model=list[WorkCenterLoad])
 def get_load(start: date, weeks: int = Query(12, ge=1, le=52), work_center_ids: list[int] | None = Query(None), db: Session = Depends(get_db), _=Depends(require_user)):
     return planning.load(db, work_center_ids, start, weeks)
+
+
+@router.get("/plan/gantt", response_model=GanttOut)
+def get_gantt(
+    work_center_id: int = Query(...),
+    start: date = Query(...),
+    end: date = Query(...),
+    as_of: date | None = Query(None),
+    db: Session = Depends(get_db),
+    _=Depends(require_user),
+):
+    try:
+        return gantt.plan_gantt(db, work_center_id, start, end, as_of)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @router.post("/plan/leadtime", response_model=LeadTimeOut)

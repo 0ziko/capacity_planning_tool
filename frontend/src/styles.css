@@ -60,9 +60,24 @@ tr:hover td { background: #f8fafc; }
 .badge.bad { background: #ffebee; color: var(--bad); }
 .badge.muted { background: #eceff1; color: var(--muted); }
 .bar { height: 10px; background: #e3e8ee; border-radius: 5px; overflow: hidden; min-width: 80px; }
-.bar > span { display: block; height: 100%; background: var(--ok); }
+.bar > span { display: block; height: 100%; background: var(--primary-2); }
+.bar.actual > span { background: var(--ok); }
 .bar > span.warn { background: var(--warn); }
 .bar > span.bad { background: var(--bad); }
+
+/* Gantt */
+.gantt-wrap { overflow-x: auto; padding: 0 !important; }
+.gantt-header, .gantt-row { display: flex; border-bottom: 1px solid var(--border); min-width: 720px; }
+.gantt-label-col { flex: 0 0 200px; padding: 8px 10px; font-size: 12px; border-right: 1px solid var(--border); }
+.gantt-timeline { flex: 1; display: flex; }
+.gantt-day { flex: 1; text-align: center; font-size: 10px; color: var(--muted); padding: 6px 2px; border-right: 1px solid #eef2f6; min-width: 28px; }
+.gantt-track { flex: 1; position: relative; height: 44px; background: repeating-linear-gradient(90deg, #fafbfc 0, #fafbfc calc(100% / var(--gantt-days, 5) - 1px), #eef2f6 calc(100% / var(--gantt-days, 5))); }
+.gantt-row .gantt-track { background: #fcfdfe; }
+.gantt-bar { position: absolute; top: 8px; height: 28px; border-radius: 4px; background: #c5d9f0; border: 1px solid #7ba7d7; overflow: hidden; min-width: 4px; }
+.gantt-bar.in_progress { background: #ffe0b2; border-color: #ffb74d; }
+.gantt-bar.completed { background: #c8e6c9; border-color: #81c784; }
+.gantt-done { display: block; height: 100%; background: var(--ok); opacity: 0.85; }
+.gantt-bar-text { position: absolute; left: 4px; right: 4px; top: 50%; transform: translateY(-50%); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
 .muted { color: var(--muted); font-size: 12px; }
 .error { color: var(--bad); font-size: 13px; margin: 6px 0; }
 .success { color: var(--ok); font-size: 13px; margin: 6px 0; }

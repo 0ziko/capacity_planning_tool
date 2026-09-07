@@ -20,6 +20,7 @@ from app.schemas import (
 )
 from app.services import capacity as cap
 from app.services import scenarios as scen
+from app.services.gantt import actual_hours_by_week
 
 
 def _selected_work_centers(db: Session, ids: list[int] | None) -> list[WorkCenter]:
@@ -297,6 +298,7 @@ def load(db: Session, wc_ids: list[int] | None, start: date, weeks: int) -> list
         return []
     wk_list = [start + timedelta(weeks=i) for i in range(weeks)]
     planned = planned_hours_by_week(db, [w.id for w in wcs], start, wk_list[-1])
+    actual = actual_hours_by_week(db, [w.id for w in wcs], start, wk_list[-1])
     result = []
     for w in wcs:
         rows = []
@@ -304,14 +306,18 @@ def load(db: Session, wc_ids: list[int] | None, start: date, weeks: int) -> list
         for wk in wk_list:
             c = cap.week_capacity_hours(db, w, wk)
             p = planned.get((w.id, wk), 0.0)
+            a = actual.get((w.id, wk), 0.0)
             rows.append(
                 WeekLoad(
                     week_start=wk,
                     capacity_hours=round(c, 2),
                     planned_hours=round(p, 2),
                     utilization=round(p / c, 3) if c > 0 else 0.0,
+                    actual_hours=round(a, 2),
+                    actual_utilization=round(a / c, 3) if c > 0 else 0.0,
                     capacity_units=round(c / unit, 2),
                     planned_units=round(p / unit, 2),
+                    actual_units=round(a / unit, 2),
                 )
             )
         result.append(WorkCenterLoad(work_center_id=w.id, work_center_code=w.code, weeks=rows))

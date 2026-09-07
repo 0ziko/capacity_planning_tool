@@ -1,14 +1,29 @@
 import { useState } from "react";
-import { addDays, api, fmt, mondayOf, qs, type ItemDetail, type Order, type PlanLine, type WorkCenterLoad } from "../api";
+import { addDays, api, fmt, mondayOf, qs, type ItemDetail, type Order, type OrderSchedule, type PlanLine, type WorkCenterLoad } from "../api";
 import { useAuth } from "../auth";
 import { Bar, ErrorText, UtilBadge, WcMultiSelect, useAsync, useWorkCenters } from "../components";
+import MergePanel from "./planning/MergePanel";
+import OrderProgressPanel from "./planning/OrderProgressPanel";
+import OrderSchedulePanel from "./planning/OrderSchedulePanel";
+import WcOrdersPanel from "./planning/WcOrdersPanel";
 
 interface AutoResult { created: number; message: string; unplanned: { order_no: string; item_code: string; operation_seq: number; work_center_code: string; hours: number }[] }
 interface LeadTime { item_code: string; quantity: number; total_hours: number; start: string; end: string; steps: { operation_seq: number; operation_name: string; work_center_code: string; hours: number; start: string; end: string }[] }
 
+type Tab = "load" | "orders" | "wc" | "progress" | "merge" | "leadtime";
+const TABS: { id: Tab; label: string; hint: string }[] = [
+  { id: "load", label: "Haftalık yük & plan satırları", hint: "İş merkezi × hafta doluluk ve tüm plan satırları" },
+  { id: "orders", label: "Sipariş bitiş tarihleri", hint: "Plan sonucuna göre her siparişin tahmini üretim bitişi" },
+  { id: "wc", label: "İş merkezi bazlı siparişler", hint: "Seçilen iş merkezine planlanmış siparişler" },
+  { id: "progress", label: "Sipariş ilerleme", hint: "Günlük üretim verisine göre iş emri ilerlemesi" },
+  { id: "merge", label: "Birleştirme önerileri", hint: "Aynı stok kodlu siparişleri birleştir" },
+  { id: "leadtime", label: "Yeni iş terminleme", hint: "Yeni bir iş için mevcut doluluğa göre bitiş" },
+];
+
 export default function Planning() {
   const { can } = useAuth();
   const { wcs } = useWorkCenters();
+  const [tab, setTab] = useState<Tab>("load");
   const [start, setStart] = useState(mondayOf(new Date()));
   const [weeks, setWeeks] = useState(8);
   const [wcIds, setWcIds] = useState<number[]>([]);
@@ -18,7 +33,9 @@ export default function Planning() {
   const [weekFilter, setWeekFilter] = useState("");
   const load = useAsync(() => api.get<WorkCenterLoad[]>(`/api/plan/load${qs({ start, weeks, work_center_ids: wcIds })}`), [start, weeks, wcIds.join(",")]);
   const lines = useAsync(() => api.get<PlanLine[]>(`/api/plan/lines${qs({ start, end: addDays(start, weeks * 7 - 1), work_center_ids: wcIds })}`), [start, weeks, wcIds.join(",")]);
-  const refresh = () => { load.reload(); lines.reload(); };
+  const schedule = useAsync(() => api.get<OrderSchedule[]>(`/api/plan/orders${qs({ work_center_ids: wcIds })}`), [wcIds.join(",")]);
+  const refresh = () => { load.reload(); lines.reload(); schedule.reload(); };
+  const mergeCount = useAsync(() => api.get<unknown[]>("/api/plan/merge-suggestions").then((g) => g.length), [schedule.data?.length]);
 
   const runAuto = async () => {
     if (!confirm("Seçili iş merkezleri için mevcut OTOMATİK plan satırları silinip yeniden oluşturulacak. Manuel satırlar korunur. Devam?")) return;
@@ -62,7 +79,7 @@ export default function Planning() {
       <ErrorText err={err || load.err || lines.err} />
       {result && (
         <div className="panel">
-          <div className="success">{result.message}</div>
+          <div className="success">{result.message} <button className="secondary small" style={{ marginLeft: 8 }} onClick={() => setTab("orders")}>Sipariş bitiş tarihlerini gör →</button></div>
           {result.unplanned.length > 0 && (
             <>
               <div className="error">Ufuk içine sığmayan {result.unplanned.length} operasyon (hafta sayısını artırın veya kapasite ekleyin):</div>
@@ -72,6 +89,22 @@ export default function Planning() {
         </div>
       )}
 
+      <div className="tabs">
+        {TABS.map((t) => (
+          <button key={t.id} className={`tab ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)} title={t.hint}>
+            {t.label}
+            {t.id === "orders" && schedule.data && <span className={`badge ${schedule.data.some((s) => s.plan_status === "late") ? "bad" : "muted"}`}>{schedule.data.filter((s) => s.plan_status === "late").length} geç</span>}
+            {t.id === "merge" && !!mergeCount.data && <span className="badge warn">{mergeCount.data}</span>}
+          </button>
+        ))}
+      </div>
+
+      {tab === "orders" && <OrderSchedulePanel rows={schedule.data} err={schedule.err} onReload={schedule.reload} />}
+      {tab === "wc" && <WcOrdersPanel lines={lines.data} schedule={schedule.data} wcs={wcIds.length ? wcs.filter((w) => wcIds.includes(w.id)) : wcs.filter((w) => w.is_planned)} horizon={`${start} → ${addDays(start, weeks * 7 - 1)}`} />}
+      {tab === "progress" && <OrderProgressPanel wcIds={wcIds} />}
+      {tab === "merge" && <MergePanel onChanged={() => { refresh(); mergeCount.reload(); }} />}
+      {tab === "leadtime" && <LeadTimePanel />}
+      {tab === "load" && (<>
       <h2>Haftalık yük (saat: planlanan / kapasite)</h2>
       <div className="table-wrap">
         <table>
@@ -122,8 +155,7 @@ export default function Planning() {
           </tbody>
         </table>
       </div>
-
-      <LeadTimePanel />
+      </>)}
     </>
   );
 }

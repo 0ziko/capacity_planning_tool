@@ -17,10 +17,14 @@ class Order(Base):
     due_date: Mapped[date] = mapped_column(Date, index=True)
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), index=True)
     quantity: Mapped[float] = mapped_column(Float)
-    status: Mapped[str] = mapped_column(String(16), default="open")  # open / closed
+    status: Mapped[str] = mapped_column(String(16), default="open")  # open / closed / merged
+    # Birlestirilmis siparis: bu siparis hangi birlesik siparise dahil edildi
+    merged_into_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id", ondelete="SET NULL"), nullable=True)
+    note: Mapped[str] = mapped_column(String(256), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     item = relationship("Item")
+    merged_into = relationship("Order", remote_side="Order.id", foreign_keys=[merged_into_id])
     plan_lines: Mapped[list["PlanLine"]] = relationship(back_populates="order", cascade="all, delete-orphan")
 
 

@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import auth, imports, master, planning
 from app.core.config import get_settings
 from app.core.security import hash_password
+from app.db.migrate import ensure_columns
 from app.db.session import Base, SessionLocal, engine
 from app.models import User
 
@@ -24,6 +25,7 @@ def seed_admin() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
+    ensure_columns(engine)
     seed_admin()
     yield
 

@@ -1,7 +1,7 @@
 # Aktif Bağlam
 
 ## Şu Anki Odak
-İlk çalışan sürüm (v0.1) tamamlandı: spec'teki tüm ana kalemler uçtan uca çalışıyor (backend API + React arayüz + testler). Sıradaki adım: **gerçek pilot verisiyle deneme** ve kullanıcı geri bildirimi.
+v0.2: kullanıcı kontrolleri sürüyor; sipariş odaklı planlama görünümleri (bitiş tarihi, İM bazlı, ilerleme, birleştirme) eklendi. Kullanıcı kendi verisini (PRS3 iş merkezi, 6005510 stoku, "Deneme" siparişi) girerek test ediyor. Sıradaki adım: kullanıcının yeni geri bildirimleri.
 
 ## Son Değişiklikler (2026-09-07)
 - Teknoloji kararı alındı: Python/FastAPI + PostgreSQL (yerelde SQLite) + React/Vite SPA, önce localhost.
@@ -13,6 +13,15 @@
 - İlerleme durumu: 0 geçmiş gün varsa "Başlamadı" (not_started) gösterilir.
 - Kullanıcı geri bildirimi (11:06): iş merkezi çoklu seçimi (native <select multiple>) kullanışsızdı → `WcMultiSelect` aranabilir açılır liste + onay kutuları + chip + Tümünü seç/Temizle olarak yeniden yazıldı (Siparişler, Planlama, Günlük İlerleme, Duruş & Çevrim Süresi aynı bileşeni kullanır). Kullanıcı kontrollerine ve kendi verisini girmeye başladı (PRS3 iş merkezi, Deneme siparişi).
 
+- Kullanıcı isteği (11:22, 5 madde) tamamlandı:
+  1. Siparişler sayfasında tekil sipariş formu (ekle/düzenle/sil; stok kodu datalist ile aranır) → `POST/PUT/DELETE /api/orders`.
+  2. Plan sonucu sipariş bitiş tarihleri → `GET /api/plan/orders` (`services/orders.order_schedule`): ihtiyaç/planlanan saat, kapsam %, ilk hafta, tahmini bitiş günü (son haftada İM doluluk sırasına göre gün tahmini), sapma (gün), durum (on_time/late/partial/unplanned/no_ops). Plan Excel'ine "Sipariş Bitiş Tarihleri" sayfası eklendi.
+  3. Planlama sayfası sekmeli yapıya geçti (`pages/planning/*`): Haftalık yük & plan satırları · Sipariş bitiş tarihleri · İş merkezi bazlı siparişler (İM sekmeleri, nihai ürün termini + tahmini bitiş) · Sipariş ilerleme · Birleştirme önerileri · Yeni iş terminleme.
+  4. Sipariş/iş emri ilerlemesi → `GET /api/progress/orders` (+ `.xlsx`): üretim kayıtları sipariş no+stok+operasyon ile eşleşir; sipariş no boşsa aynı stokun açık siparişlerine termin sırasıyla FIFO dağıtılır; sipariş no dolu ama açık sipariş yoksa dağıtılmaz. Butonla tetiklenir, operasyon detayı açılır satırda.
+  5. Birleştirme → `GET /api/plan/merge-suggestions`, `POST /api/plan/merge`, `DELETE /api/plan/merge/{id}`: aynı stok kodlu açık siparişler gruplanır; seçilenler tek siparişte toplanır (miktar toplamı, en erken termin, müşteriler "A + B", not alanında kaynaklar), kaynaklar `status=merged` + `merged_into_id`; plan satırları silinir, geri alınabilir.
+- Şema: `orders.merged_into_id`, `orders.note` eklendi; `db/migrate.ensure_columns` mevcut tablolara eksik kolonları ALTER TABLE ile ekler (Alembic'e kadar).
+- Düzeltme: `DELETE /api/orders?status=` toplu silmede plan satırları artık elle temizleniyor (ORM cascade toplu silmede çalışmıyordu).
+- Testler: `tests/test_orders_flow.py` (3 test) eklendi; toplam 6/6.
 ## Sonraki Adımlar
 1. Kullanıcıdan gerçek Excel dosyalarının kolon yapısını al → `excel.py` TEMPLATES alias listesini genişlet.
 2. Pilot iş merkezleriyle deneme; verimli saat / vardiya tanımlarını gerçek değerlerle doğrula.

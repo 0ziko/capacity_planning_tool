@@ -482,7 +482,7 @@ def import_orders(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
     ins = upd = 0
     errs = []
     items = _item_lookup(db)
-    existing: dict[tuple[str, int], Order] = {(o.order_no.upper(), o.item_id): o for o in db.query(Order).all()}
+    existing: dict[tuple[str, int], Order] = {(o.order_no.upper(), o.item_id): o for o in db.query(Order).filter(Order.status != "merged").all()}
     for r in rows:
         try:
             order_no = _str(r.get("order_no"))

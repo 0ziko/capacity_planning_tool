@@ -21,6 +21,15 @@
 - [x] Testler (uçtan uca akış + rol kontrolü) — 2/2
 - [x] Demo veri scripti (`backend/seed_demo.py`)
 
+## Çalışan (v0.2 — 2026-09-07, kullanıcı geri bildirimi sonrası)
+- [x] İş merkezi çoklu seçimi: aranabilir açılır liste + chip (tüm sayfalarda ortak bileşen)
+- [x] Tekil sipariş ekleme / düzenleme / silme (Siparişler sayfası)
+- [x] Sipariş bazlı tahmini üretim bitiş tarihi ve termine göre durum (Planlama › Sipariş bitiş tarihleri; plan Excel'inde sayfa)
+- [x] İş merkezi bazlı planlanmış siparişler görünümü (Planlama › İş merkezi bazlı)
+- [x] Sipariş / iş emri ilerleme raporu (Planlama › Sipariş ilerleme; butonla tetiklenir; Excel)
+- [x] Aynı stok kodlu siparişleri birleştirme önerisi + birleştir / geri al (Planlama › Birleştirme önerileri)
+- [x] Hafif şema migrasyonu (eksik kolon ekleme) — Alembic'e kadar
+
 ## Yapılacaklar
 - [ ] Gerçek Excel formatlarına göre alias/şablon uyarlaması
 - [ ] PostgreSQL kurulumu ve `.env` geçişi (admin/IT)
@@ -35,6 +44,8 @@ Pilot denemeye hazır. Yerelde çalışıyor: backend :8000, frontend :5173 (SQL
 
 ## Bilinen Sorunlar / Sınırlamalar
 - Terminleme, gün içi ardışıklığı yaklaşık hesaplar (verimli saat → nominal saate oransal).
+- Sipariş bitiş tarihi hafta granüler plandan gün tahminidir (son haftada İM'nin termin sıralı doluluğuna göre); gün bazlı çizelgeleme değildir.
+- Sipariş ilerlemesinde sipariş no'suz üretim FIFO dağıtılır; sipariş no verilmiş ama açık sipariş yoksa (kapalı/birleşik) kayıt hiçbir siparişe yazılmaz.
 - Otomatik plan operasyonları hafta granülerliğinde sıralar; gün bazlı ardışıklık yok.
 - Çevrim süresi önerisi "fiili süre" yoksa günün verimli kapasitesini kazanılan saat oranıyla paylaştırır — kaba bir tahmindir; fiili süre kolonu doldurulursa doğruluk artar.
 - SECRET_KEY varsayılanı kısa; üretimde `.env` içinde uzun rastgele değer verilmeli.

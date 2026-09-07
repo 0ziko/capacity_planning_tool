@@ -110,6 +110,15 @@ class ItemDetail(ItemOut):
 
 
 # ---- Orders ----
+class OrderIn(BaseModel):
+    order_no: str = Field(min_length=1, max_length=64)
+    customer: str = ""
+    due_date: date
+    item_code: str = Field(min_length=1)
+    quantity: float = Field(gt=0)
+    note: str = ""
+
+
 class OrderOut(ORM):
     id: int
     order_no: str
@@ -117,8 +126,80 @@ class OrderOut(ORM):
     due_date: date
     item_id: int
     item_code: str = ""
+    item_name: str = ""
     quantity: float
     status: str
+    merged_into_id: int | None = None
+    note: str = ""
+
+
+class OrderScheduleOut(BaseModel):
+    """Plan sonucuna gore siparisin tahmini uretim bitisi."""
+
+    order_id: int
+    order_no: str
+    customer: str
+    item_code: str
+    item_name: str = ""
+    quantity: float
+    due_date: date
+    required_hours: float  # secili/planlanan is merkezlerindeki toplam ihtiyac
+    planned_hours: float
+    coverage_pct: float
+    planned_start: date | None = None  # ilk plan haftasi (Pazartesi)
+    planned_end_week: date | None = None  # son plan haftasi (Pazartesi)
+    planned_end: date | None = None  # tahmini bitis gunu
+    last_work_center_code: str = ""
+    lateness_days: int | None = None  # + gec, - erken
+    plan_status: str  # unplanned / partial / late / on_time / no_ops
+
+
+class OrderProgressOp(BaseModel):
+    operation_seq: int
+    operation_name: str
+    work_center_code: str
+    required_hours: float
+    planned_hours: float
+    produced_qty: float
+    earned_hours: float
+    pct: float
+
+
+class OrderProgressOut(BaseModel):
+    order_id: int
+    order_no: str
+    customer: str
+    item_code: str
+    quantity: float
+    due_date: date
+    required_hours: float
+    earned_hours: float
+    produced_qty: float  # son operasyondan cikan miktar
+    pct: float
+    status: str  # not_started / in_progress / completed
+    first_prod_date: date | None = None
+    last_prod_date: date | None = None
+    ops: list[OrderProgressOp] = []
+
+
+class MergeGroup(BaseModel):
+    item_id: int
+    item_code: str
+    item_name: str
+    order_count: int
+    total_qty: float
+    earliest_due: date
+    latest_due: date
+    customers: list[str]
+    has_progress: bool  # siparislerden birinde uretim kaydi var (birlestirme dikkat)
+    orders: list[OrderOut]
+
+
+class MergeRequest(BaseModel):
+    order_ids: list[int] = Field(min_length=2)
+    order_no: str | None = None
+    due_date: date | None = None  # None => en erken termin
+    customer: str | None = None
 
 
 # ---- Capacity ----

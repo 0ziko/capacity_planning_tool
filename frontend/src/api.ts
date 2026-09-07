@@ -93,7 +93,19 @@ export interface WorkCenter { id: number; code: string; name: string; descriptio
 export interface Employee { id: number; code: string; name: string; work_center_id: number | null; is_active: boolean }
 export interface Item { id: number; code: string; name: string; product_group: string; unit: string }
 export interface ItemDetail extends Item { bom_lines: { id: number; component_code: string; component_name: string; quantity: number; unit: string }[]; operations: { id: number; seq: number; operation_name: string; work_center_id: number; cycle_time_sec: number; setup_time_min: number }[] }
-export interface Order { id: number; order_no: string; customer: string; due_date: string; item_id: number; item_code: string; quantity: number; status: string }
+export interface Order { id: number; order_no: string; customer: string; due_date: string; item_id: number; item_code: string; item_name: string; quantity: number; status: string; merged_into_id: number | null; note: string }
+export interface OrderIn { order_no: string; customer: string; due_date: string; item_code: string; quantity: number; note: string }
+export interface OrderSchedule {
+  order_id: number; order_no: string; customer: string; item_code: string; item_name: string; quantity: number; due_date: string;
+  required_hours: number; planned_hours: number; coverage_pct: number; planned_start: string | null; planned_end_week: string | null; planned_end: string | null;
+  last_work_center_code: string; lateness_days: number | null; plan_status: "unplanned" | "partial" | "late" | "on_time" | "no_ops";
+}
+export interface OrderProgressOp { operation_seq: number; operation_name: string; work_center_code: string; required_hours: number; planned_hours: number; produced_qty: number; earned_hours: number; pct: number }
+export interface OrderProgress {
+  order_id: number; order_no: string; customer: string; item_code: string; quantity: number; due_date: string; required_hours: number; earned_hours: number; produced_qty: number; pct: number;
+  status: "not_started" | "in_progress" | "completed"; first_prod_date: string | null; last_prod_date: string | null; ops: OrderProgressOp[];
+}
+export interface MergeGroup { item_id: number; item_code: string; item_name: string; order_count: number; total_qty: number; earliest_due: string; latest_due: string; customers: string[]; has_progress: boolean; orders: Order[] }
 export interface Capacity { work_center_id: number; work_center_code: string; start: string; end: string; capacity_hours: number; capacity_units: number; unit_hours: number; days: { day: string; hours: number }[] }
 export interface WeekLoad { week_start: string; capacity_hours: number; planned_hours: number; utilization: number; capacity_units: number; planned_units: number }
 export interface WorkCenterLoad { work_center_id: number; work_center_code: string; weeks: WeekLoad[] }

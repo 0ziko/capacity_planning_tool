@@ -61,3 +61,14 @@ frontend/src/
 - Plan granülerliği **hafta**; ilerleme granülerliği **gün**.
 - Setup süresi planlamada dahil, günlük üretimden "kazanılan saat"te hariç.
 - Pilot: planlanmayan iş merkezleri görünür ama otomatik plana girmez.
+
+
+## Sipariş Birleştirme (v0.2)
+- Aynı `item_id` (dolayısıyla aynı rota) olan açık siparişler öneri grubudur. Birleştirme yeni bir `Order` (status=open) yaratır; kaynaklar `status=merged` ve `merged_into_id` ile bağlanır, plan satırları silinir. Geri alma: kaynaklar yeniden `open`, birleşik sipariş silinir (plan satırları cascade).
+- Import (`import_orders`) merged siparişleri eşleşme anahtarına almaz; böylece aynı sipariş no tekrar yüklenince yeni açık kayıt oluşur.
+
+## Sipariş Bitiş Tarihi Tahmini
+- `order_schedule`: siparişin plan satırları → ilk hafta, son hafta; son haftadaki İM'de satırlar termin sırasıyla kümülatif doldurulur, siparişin payı bittiği noktadaki çalışma günü bitiş günüdür (`ceil(küm/kapasite × gün sayısı)`).
+
+## Planlama Sayfası Yapısı
+- `pages/Planning.tsx` üst filtre paneli (hafta, İM, otomatik plan) + sekmeler; sekme içerikleri `pages/planning/*Panel.tsx` dosyalarında.

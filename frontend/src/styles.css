@@ -67,6 +67,24 @@ tr:hover td { background: #f8fafc; }
 .success { color: var(--ok); font-size: 13px; margin: 6px 0; }
 ul.errors { margin: 6px 0; padding-left: 18px; color: var(--bad); font-size: 12px; max-height: 200px; overflow: auto; }
 
+/* --- Sekmeler (Planlama) --- */
+.tabs { display: flex; gap: 2px; border-bottom: 2px solid var(--border); margin: 14px 0 12px; flex-wrap: wrap; }
+.tab { background: transparent; color: var(--muted); border: none; border-bottom: 2px solid transparent; margin-bottom: -2px; border-radius: 0; padding: 8px 14px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+.tab:hover { color: var(--text); background: #f1f5f9; }
+.tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+.kpi-btn { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 0; min-width: 110px; padding: 6px 12px; background: #fff; color: var(--text); border: 1px solid var(--border); border-left-width: 4px; border-radius: 6px; text-align: left; }
+.kpi-btn .v { font-size: 20px; font-weight: 700; line-height: 1.1; }
+.kpi-btn .l { font-size: 12px; color: var(--muted); }
+.kpi-btn.ok { border-left-color: var(--ok); }
+.kpi-btn.bad { border-left-color: var(--bad); }
+.kpi-btn.warn { border-left-color: var(--warn); }
+.kpi-btn.muted { border-left-color: #94a3b8; }
+.kpi-btn.active { background: #e3f2fd; border-color: var(--primary); }
+.wc-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.wc-tab { background: #fff; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; display: inline-flex; gap: 6px; align-items: center; }
+.wc-tab:hover { border-color: var(--primary-2); }
+.wc-tab.active { background: #e3f2fd; border-color: var(--primary); }
+
 /* --- Çoklu seçim (iş merkezleri) --- */
 .ms { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); position: relative; min-width: 260px; }
 .ms-box { position: relative; }

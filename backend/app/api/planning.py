@@ -15,6 +15,11 @@ from app.schemas import (
     LeadTimeOut,
     LeadTimeRequest,
     ManualPlanLineIn,
+    MergeGroup,
+    MergeRequest,
+    OrderOut,
+    OrderProgressOut,
+    OrderScheduleOut,
     PlanLineOut,
     ProgressOut,
     RequirementLine,
@@ -22,6 +27,7 @@ from app.schemas import (
     WorkCenterLoad,
 )
 from app.services import analysis, capacity, excel, planning, progress, requirements
+from app.services import orders as orders_svc
 
 router = APIRouter(prefix="/api", tags=["planning"])
 
@@ -140,10 +146,63 @@ def get_lead_time(req: LeadTimeRequest, db: Session = Depends(get_db), _=Depends
         raise HTTPException(400, str(e))
 
 
+# ---- Siparis bazli plan sonucu (bitis tarihleri) ----
+@router.get("/plan/orders", response_model=list[OrderScheduleOut])
+def get_order_schedule(work_center_ids: list[int] | None = Query(None), db: Session = Depends(get_db), _=Depends(require_user)):
+    return orders_svc.order_schedule(db, work_center_ids)
+
+
+# ---- Birlestirme ----
+@router.get("/plan/merge-suggestions", response_model=list[MergeGroup])
+def get_merge_suggestions(db: Session = Depends(get_db), _=Depends(require_user)):
+    return orders_svc.merge_suggestions(db)
+
+
+@router.post("/plan/merge", response_model=OrderOut, status_code=201)
+def merge_orders(req: MergeRequest, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
+    try:
+        merged = orders_svc.merge_orders(db, req, user.username)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return orders_svc.order_out(merged)
+
+
+@router.delete("/plan/merge/{merged_id}", response_model=dict)
+def unmerge(merged_id: int, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    try:
+        n = orders_svc.unmerge_order(db, merged_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "reopened": n}
+
+
 # ---- Progress ----
 @router.get("/progress", response_model=list[ProgressOut])
 def get_progress(week: date, as_of: date | None = None, work_center_ids: list[int] | None = Query(None), db: Session = Depends(get_db), _=Depends(require_user)):
     return [progress.week_progress(db, w, week, as_of) for w in _wcs(db, work_center_ids)]
+
+
+@router.get("/progress/orders", response_model=list[OrderProgressOut])
+def get_order_progress(as_of: date | None = None, work_center_ids: list[int] | None = Query(None), db: Session = Depends(get_db), _=Depends(require_user)):
+    return orders_svc.order_progress(db, work_center_ids, as_of)
+
+
+@router.get("/progress/orders.xlsx")
+def order_progress_xlsx(as_of: date | None = None, work_center_ids: list[int] | None = Query(None), db: Session = Depends(get_db), _=Depends(require_user)):
+    rows = orders_svc.order_progress(db, work_center_ids, as_of)
+    content = excel.build_report(
+        {
+            "Sipariş İlerleme": (
+                ["Sipariş No", "Müşteri", "Stok Kodu", "Miktar", "Termin", "İhtiyaç (saat)", "Kazanılan (saat)", "Çıkan Miktar", "İlerleme %", "Durum", "İlk Üretim", "Son Üretim"],
+                [[r.order_no, r.customer, r.item_code, r.quantity, r.due_date, r.required_hours, r.earned_hours, r.produced_qty, r.pct, r.status, r.first_prod_date, r.last_prod_date] for r in rows],
+            ),
+            "Operasyon Detayı": (
+                ["Sipariş No", "Stok Kodu", "Op. Sıra", "Operasyon", "İş Merkezi", "İhtiyaç (saat)", "Planlanan (saat)", "Üretilen Miktar", "Kazanılan (saat)", "İlerleme %"],
+                [[r.order_no, r.item_code, o.operation_seq, o.operation_name, o.work_center_code, o.required_hours, o.planned_hours, o.produced_qty, o.earned_hours, o.pct] for r in rows for o in r.ops],
+            ),
+        }
+    )
+    return _xlsx(content, f"siparis_ilerleme_{as_of or date.today()}.xlsx")
 
 
 @router.get("/progress/daily", response_model=list[dict])
@@ -217,9 +276,14 @@ def cycletime_xlsx(
 def plan_xlsx(start: date, weeks: int = 12, work_center_ids: list[int] | None = Query(None), db: Session = Depends(get_db), _=Depends(require_user)):
     loads = planning.load(db, work_center_ids, start, weeks)
     lines = planning.plan_lines(db, work_center_ids, capacity.week_start(start), capacity.week_start(start) + timedelta(weeks=weeks))
+    sched = orders_svc.order_schedule(db, work_center_ids)
     content = excel.build_report(
         {
             "Haftalık Yük": (["İş Merkezi", "Hafta", "Kapasite (saat)", "Planlanan (saat)", "Doluluk %", "Kapasite (birim)", "Planlanan (birim)"], [[l.work_center_code, w.week_start, w.capacity_hours, w.planned_hours, round(w.utilization * 100, 1), w.capacity_units, w.planned_units] for l in loads for w in l.weeks]),
+            "Sipariş Bitiş Tarihleri": (
+                ["Sipariş No", "Müşteri", "Stok Kodu", "Miktar", "Termin", "İhtiyaç (saat)", "Planlanan (saat)", "Kapsam %", "Plan Başlangıç Haftası", "Tahmini Bitiş", "Son İş Merkezi", "Sapma (gün)", "Durum"],
+                [[s.order_no, s.customer, s.item_code, s.quantity, s.due_date, s.required_hours, s.planned_hours, s.coverage_pct, s.planned_start, s.planned_end, s.last_work_center_code, s.lateness_days, s.plan_status] for s in sched],
+            ),
             "Plan Satırları": (["Hafta", "İş Merkezi", "Sipariş No", "Müşteri", "Termin", "Stok Kodu", "Op. Sıra", "Planlanan Saat", "Planlanan Miktar", "Mod"], [[p.week_start, p.work_center_code, p.order_no, p.customer, p.due_date, p.item_code, p.operation_seq, p.planned_hours, p.planned_qty, p.mode] for p in lines]),
         }
     )

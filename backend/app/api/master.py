@@ -8,18 +8,20 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.deps import require_poweruser, require_user
 from app.db.session import get_db
-from app.models import Employee, Item, Order, WorkCenter, WorkCenterShift
+from app.models import Employee, Item, Order, PlanLine, WorkCenter, WorkCenterShift
 from app.schemas import (
     EmployeeIn,
     EmployeeOut,
     ItemDetail,
     ItemOut,
+    OrderIn,
     OrderOut,
     ShiftIn,
     ShiftOut,
     WorkCenterIn,
     WorkCenterOut,
 )
+from app.services import orders as orders_svc
 
 router = APIRouter(prefix="/api", tags=["master"])
 
@@ -178,12 +180,41 @@ def list_orders(
         q = q.filter(Order.due_date >= due_from)
     if due_to:
         q = q.filter(Order.due_date <= due_to)
-    out = []
-    for o in q.order_by(Order.due_date, Order.order_no).all():
-        row = OrderOut.model_validate(o)
-        row.item_code = o.item.code
-        out.append(row)
-    return out
+    return [orders_svc.order_out(o) for o in q.order_by(Order.due_date, Order.order_no).all()]
+
+
+@router.post("/orders", response_model=OrderOut, status_code=201)
+def create_order(data: OrderIn, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    try:
+        o = orders_svc.create_order(db, data)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return orders_svc.order_out(o)
+
+
+@router.put("/orders/{order_id}", response_model=OrderOut)
+def update_order(order_id: int, data: OrderIn, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    o = db.query(Order).options(joinedload(Order.item)).filter(Order.id == order_id).first()
+    if not o:
+        raise HTTPException(404, "Siparis bulunamadi")
+    if o.status == "merged":
+        raise HTTPException(400, "Birlestirilmis siparis duzenlenemez; once birlestirmeyi geri alin")
+    try:
+        o = orders_svc.update_order(db, o, data)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return orders_svc.order_out(o)
+
+
+@router.delete("/orders/{order_id}", status_code=204)
+def delete_order(order_id: int, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    o = db.get(Order, order_id)
+    if not o:
+        raise HTTPException(404, "Siparis bulunamadi")
+    if db.query(Order).filter(Order.merged_into_id == order_id).first():
+        raise HTTPException(400, "Bu birlesik siparisi silmek icin once birlestirmeyi geri alin")
+    db.delete(o)
+    db.commit()
 
 
 @router.patch("/orders/{order_id}/status", response_model=OrderOut)
@@ -193,14 +224,19 @@ def set_order_status(order_id: int, status: str, db: Session = Depends(get_db), 
         raise HTTPException(404, "Siparis bulunamadi")
     if status not in ("open", "closed"):
         raise HTTPException(400, "Durum open/closed olmali")
+    if o.status == "merged":
+        raise HTTPException(400, "Birlestirilmis siparisin durumu degistirilemez")
     o.status = status
     db.commit()
-    row = OrderOut.model_validate(o)
-    row.item_code = o.item.code
-    return row
+    return orders_svc.order_out(o)
 
 
 @router.delete("/orders", status_code=204)
 def delete_orders(status: str = "closed", db: Session = Depends(get_db), _=Depends(require_poweruser)):
-    db.query(Order).filter(Order.status == status).delete(synchronize_session=False)
+    ids = [i for (i,) in db.query(Order.id).filter(Order.status == status).all()]
+    if ids:
+        # toplu silmede ORM cascade calismaz; plan satirlarini ve birlestirme referanslarini elle temizle
+        db.query(PlanLine).filter(PlanLine.order_id.in_(ids)).delete(synchronize_session=False)
+        db.query(Order).filter(Order.merged_into_id.in_(ids)).update({Order.merged_into_id: None}, synchronize_session=False)
+        db.query(Order).filter(Order.id.in_(ids)).delete(synchronize_session=False)
     db.commit()

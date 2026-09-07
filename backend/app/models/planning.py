@@ -99,7 +99,7 @@ class StockReceipt(Base):
     quantity: Mapped[float] = mapped_column(Float)
     lot: Mapped[str] = mapped_column(String(64), default="")
     note: Mapped[str] = mapped_column(String(256), default="")
-    source: Mapped[str] = mapped_column(String(16), default="manual")  # manual / import
+    source: Mapped[str] = mapped_column(String(16), default="manual")  # manual / import / progress
     created_by: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

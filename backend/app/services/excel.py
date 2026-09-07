@@ -874,6 +874,10 @@ def run_import(db: Session, kind: str, content: bytes, filename: str, username: 
     ins = upd = 0
     if not errs:
         ins, upd, errs = IMPORTERS[kind](db, rows)
+    if kind == "production" and not errs:
+        from app.services.stock import sync_progress_receipts
+
+        sync_progress_receipts(db, username=username)
     db.add(ImportLog(kind=kind, filename=filename, username=username, inserted=ins, updated=upd, errors="\n".join(errs)[:10000]))
     db.commit()
     return ImportResult(kind=kind, inserted=ins, updated=upd, errors=errs)

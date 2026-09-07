@@ -15,10 +15,10 @@ Manuel rezervasyon onceliklidir: serbest stok yetmezse ayni urunun OTOMATIK reze
 from collections import defaultdict
 from datetime import date
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
-from app.models import Item, Order, Reservation, Shipment, StockReceipt
+from app.models import Item, Order, ProductionActual, Reservation, RoutingOperation, Shipment, StockReceipt
 from app.schemas import (
     AutoReserveResult,
     OrderStockRow,
@@ -60,6 +60,7 @@ def order_remaining(db: Session, order: Order) -> float:
 
 
 def stock_summary(db: Session, only_with_stock: bool = False) -> list[StockRow]:
+    sync_progress_receipts(db)
     receipts = _sum_by_item(db, StockReceipt, StockReceipt.quantity)
     shipped = _sum_by_item(db, Shipment, Shipment.quantity)
     reserved = _sum_by_item(db, Reservation, Reservation.quantity)
@@ -149,6 +150,7 @@ def _receipt_out(r: StockReceipt) -> ReceiptOut:
 
 
 def list_receipts(db: Session, item_id: int | None = None, limit: int = 500) -> list[ReceiptOut]:
+    sync_progress_receipts(db)
     q = db.query(StockReceipt).options(joinedload(StockReceipt.item))
     if item_id:
         q = q.filter(StockReceipt.item_id == item_id)
@@ -169,9 +171,113 @@ def delete_receipt(db: Session, receipt_id: int) -> None:
     r = db.get(StockReceipt, receipt_id)
     if not r:
         raise ValueError("Depo girisi bulunamadi")
+    if r.source == "progress":
+        raise ValueError("Uretim beyanindan otomatik olusan depo girisi silinemez; uretim miktarini guncelleyin veya manuel duzeltme yapin")
     if item_free(db, r.item_id) - r.quantity < -1e-9:
         raise ValueError("Bu giris silinirse serbest stok eksiye duser; once rezervasyonlari kaldirin")
     db.delete(r)
+
+
+# ---------------- uretim -> depo (otomatik) ----------------
+
+def _last_operation(db: Session, item_id: int) -> RoutingOperation | None:
+    return (
+        db.query(RoutingOperation)
+        .filter(RoutingOperation.item_id == item_id)
+        .order_by(RoutingOperation.seq.desc())
+        .first()
+    )
+
+
+def _finished_qty_from_production(db: Session, item_id: int) -> float:
+    """Son operasyon (en buyuk sira) uretim beyanlarinin toplami = bitmis urun."""
+    last = _last_operation(db, item_id)
+    if not last:
+        return 0.0
+    conds = []
+    if last.semi_finished_code:
+        conds.append(ProductionActual.semi_finished_code == last.semi_finished_code)
+    conds.append(ProductionActual.operation_seq == last.seq)
+    total = (
+        db.query(func.sum(ProductionActual.quantity))
+        .filter(ProductionActual.item_id == item_id, or_(*conds))
+        .scalar()
+    )
+    return float(total or 0.0)
+
+
+def _progress_receipt_qty(db: Session, item_id: int) -> float:
+    return float(
+        db.query(func.sum(StockReceipt.quantity))
+        .filter(StockReceipt.item_id == item_id, StockReceipt.source == "progress")
+        .scalar()
+        or 0.0
+    )
+
+
+def _trim_progress_receipts(db: Session, item_id: int, amount: float) -> None:
+    """Uretim duzeltmesinde fazla otomatik depo girisini geri alir (rezervasyonu bozmaz)."""
+    if amount <= 1e-9:
+        return
+    on_hand = (
+        db.query(func.sum(StockReceipt.quantity)).filter(StockReceipt.item_id == item_id).scalar() or 0.0
+    ) - (db.query(func.sum(Shipment.quantity)).filter(Shipment.item_id == item_id).scalar() or 0.0)
+    reserved = db.query(func.sum(Reservation.quantity)).filter(Reservation.item_id == item_id).scalar() or 0.0
+    max_trim = min(amount, _progress_receipt_qty(db, item_id), max(on_hand - reserved, 0.0))
+    if max_trim <= 1e-9:
+        return
+    rows = (
+        db.query(StockReceipt)
+        .filter(StockReceipt.item_id == item_id, StockReceipt.source == "progress")
+        .order_by(StockReceipt.receipt_date.desc(), StockReceipt.id.desc())
+        .all()
+    )
+    left = max_trim
+    for r in rows:
+        if left <= 1e-9:
+            break
+        take = min(r.quantity, left)
+        if take >= r.quantity - 1e-9:
+            db.delete(r)
+        else:
+            r.quantity = round(r.quantity - take, 3)
+        left -= take
+    db.flush()
+
+
+def sync_progress_receipts(db: Session, item_ids: list[int] | None = None, username: str = "system") -> dict:
+    """Son operasyon uretim beyanlarini bitmis urun depo girisine yansitir (source=progress)."""
+    if item_ids:
+        ids = list(item_ids)
+    else:
+        ids = [i for (i,) in db.query(ProductionActual.item_id).distinct().all()]
+    added = adjusted = 0
+    for iid in ids:
+        if not _last_operation(db, iid):
+            continue
+        target = _finished_qty_from_production(db, iid)
+        current = _progress_receipt_qty(db, iid)
+        delta = round(target - current, 3)
+        if abs(delta) < 1e-9:
+            continue
+        if delta > 0:
+            db.add(
+                StockReceipt(
+                    item_id=iid,
+                    receipt_date=date.today(),
+                    quantity=delta,
+                    lot="",
+                    note="otomatik: son operasyon uretim beyani",
+                    source="progress",
+                    created_by=username,
+                )
+            )
+            added += 1
+        else:
+            _trim_progress_receipts(db, iid, -delta)
+            adjusted += 1
+        db.flush()
+    return {"added": added, "adjusted": adjusted}
 
 
 # ---------------- rezervasyon ----------------

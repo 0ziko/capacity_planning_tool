@@ -50,7 +50,8 @@ export default function Stock() {
     <>
       <h1>Stok & Rezervasyon</h1>
       <p className="muted" style={{ marginTop: -6 }}>
-        Sipariş plana <b>termini</b> verir; üretim siparişten bağımsız ilerler ve bitmiş ürün <b>depoya girer</b>. Depodaki ürün siparişe <b>rezerve</b> edilir:
+        Sipariş plana <b>termini</b> verir; üretim siparişten bağımsız ilerler. Son operasyon (ör. paketleme) üretim beyanı otomatik olarak <b>depoya girer</b>;
+        ek olarak manuel depo girişi/çıkışı yapabilirsiniz. Depodaki ürün siparişe <b>rezerve</b> edilir:
         önce takip etmek istediğiniz kritik siparişleri <b>manuel</b> rezerve edin, kalanı için <b>otomatik rezervasyon</b> serbest stoğu termin sırasıyla dağıtır.
         Manuel rezervasyon önceliklidir (yer açmak için otomatik rezervasyonlar çözülür, manuel olanlara dokunulmaz). Sevk ile stoktan düşer; sipariş tamamen sevk edilince kapanır.
       </p>
@@ -324,7 +325,7 @@ function Receipts({ canEdit, onChanged }: { canEdit: boolean; onChanged: () => v
   };
   return (
     <>
-      <p className="muted" style={{ margin: "8px 0" }}>Bitmiş ürünün depoya girişi (üretim tamamlandı). Siparişten bağımsızdır; hangi siparişe gideceği rezervasyonla belirlenir. Toplu: Excel Import → “Depo Girişi”.</p>
+      <p className="muted" style={{ margin: "8px 0" }}>Bitmiş ürün depoya girişi: son operasyon üretim beyanı otomatik kayıt oluşturur (<b>Üretim</b> kaynağı). İsteğe bağlı manuel giriş/Excel de kullanılabilir. Siparişe hangi stok gideceği rezervasyonla belirlenir.</p>
       <ErrorText err={err || rows.err} />
       <div className="table-wrap">
         <table>
@@ -333,8 +334,8 @@ function Receipts({ canEdit, onChanged }: { canEdit: boolean; onChanged: () => v
             {rows.data?.map((r) => (
               <tr key={r.id}>
                 <td>{r.receipt_date}</td><td><b>{r.item_code}</b></td><td>{r.item_name}</td><td className="num">{fmt(r.quantity, 0)}</td>
-                <td>{r.lot}</td><td className="muted">{r.note}</td><td className="muted">{r.source === "import" ? "Excel" : "manuel"}</td><td className="muted">{r.created_by}</td>
-                <td>{canEdit && <button className="danger small" onClick={() => remove(r)}>Sil</button>}</td>
+                <td>{r.lot}</td>                <td className="muted">{r.note}</td><td className="muted">{r.source === "progress" ? "Üretim" : r.source === "import" ? "Excel" : "Manuel"}</td><td className="muted">{r.created_by}</td>
+                <td>{canEdit && r.source !== "progress" && <button className="danger small" onClick={() => remove(r)}>Sil</button>}</td>
               </tr>
             ))}
             {rows.data && rows.data.length === 0 && <tr><td colSpan={9} className="muted">Depo girişi yok.</td></tr>}

@@ -218,3 +218,25 @@ def test_stock_reservations_and_shipping(client, auth):
     wb = load_workbook(BytesIO(client.get("/api/backup.xlsx", headers=auth).content))
     for name in ("Haftalık İş Gücü", "Senaryo Kuralları", "Depo Girişi", "Rezervasyonlar", "Sevkler"):
         assert name in wb.sheetnames, wb.sheetnames
+
+
+def test_production_creates_finished_stock(client, auth):
+    """Son operasyon uretim beyani otomatik depo girisi olusturur."""
+    wk = _monday()
+    _upload(client, auth, "workcenters", ["İş Merkezi Kodu", "İş Merkezi Adı", "Planlanıyor (E/H)", "Kişi Başı Verimli Saat"], [["STK-1", "Stok IM", "E", 8]])
+    _upload(client, auth, "employees", ["Sicil No", "Ad Soyad", "İş Merkezi Kodu"], [["S1", "A", "STK-1"]])
+    _upload(client, auth, "items", ["Stok Kodu", "Ürün Grubu"], [["STK-M", "GN"]])
+    _upload(
+        client, auth, "routing",
+        ["Stok Kodu", "Sıra", "Operasyon", "İş Merkezi Kodu", "Çevrim Süresi (sn)", "Yarımamül Kodu"],
+        [["STK-M", 10, "OP1", "STK-1", 36, "STK-M-10"], ["STK-M", 20, "OP2", "STK-1", 36, "STK-M-20"]],
+    )
+    _upload(client, auth, "production", ["Tarih", "Yarımamül Kodu", "Miktar"], [[wk, "STK-M-10", 50]])
+    rows = client.get("/api/stock/summary", headers=auth).json()
+    assert not any(x["item_code"] == "STK-M" for x in rows)
+    _upload(client, auth, "production", ["Tarih", "Yarımamül Kodu", "Miktar"], [[wk, "STK-M-20", 40]])
+    row = next(x for x in client.get("/api/stock/summary", headers=auth).json() if x["item_code"] == "STK-M")
+    assert row["on_hand"] == 40 and row["free"] == 40
+    rcpts = client.get("/api/stock/receipts", headers=auth, params={"item_id": row["item_id"]}).json()
+    assert len(rcpts) == 1 and rcpts[0]["source"] == "progress" and rcpts[0]["quantity"] == 40
+    assert client.delete(f"/api/stock/receipts/{rcpts[0]['id']}", headers=auth).status_code == 400

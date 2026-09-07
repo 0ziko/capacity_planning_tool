@@ -154,9 +154,9 @@ export default function Planning() {
               <tr key={wc.work_center_id}>
                 <td><b>{wc.work_center_code}</b></td>
                 {wc.weeks.map((w) => (
-                  <td key={w.week_start} title={`Plan: ${fmt(w.planned_hours)} sa · Gerçekleşen: ${fmt(w.actual_hours)} sa · Kalan: ${fmt(w.remaining_hours)} sa · Kalan iş gün: ${fmt(w.remaining_days)} · Atıl: ${w.idle_hours > 0.5 ? fmt(w.idle_hours) + " sa" : "yok"}`}>
+                  <td key={w.week_start} title={`Plan: ${fmt(w.planned_hours)} sa · Gerçekleşen: ${fmt(w.actual_hours)} sa · Kalan: ${fmt(w.remaining_hours)} sa · Kalan iş gün: ${fmt(w.remaining_days, 2)} · Atıl: ${w.idle_hours > 0.5 ? fmt(w.idle_hours) + " sa" : "yok"}`}>
                     <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 155 }}>
-                      <span style={{ fontSize: 12 }}>{fmt(w.planned_hours, 0)} / <b style={{ color: "var(--ok)" }}>{fmt(w.actual_hours, 0)}</b> / {fmt(w.remaining_hours, 0)} / <span title="Kalan iş gün">{fmt(w.remaining_days, 0)}</span></span>
+                      <span style={{ fontSize: 12 }}>{fmt(w.planned_hours, 0)} / <b style={{ color: "var(--ok)" }}>{fmt(w.actual_hours, 0)}</b> / {fmt(w.remaining_hours, 0)} / <span title="Kalan iş gün">{fmt(w.remaining_days, 2)}</span></span>
                       <span style={{ fontSize: 11 }} className="muted">Atıl: {w.idle_hours > 0.5 ? <b>{fmt(w.idle_hours, 0)} sa</b> : "yok"}</span>
                       <Bar ratio={w.utilization} />
                       <Bar ratio={w.actual_utilization} cls="actual" />

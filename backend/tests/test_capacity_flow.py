@@ -83,6 +83,14 @@ def test_full_flow(client, auth):
         assert r.status_code == 200 and r.content[:2] == b"PK", url
 
 
+def test_all_templates_download(client, auth):
+    kinds = [k["kind"] for k in client.get("/api/imports/kinds", headers=auth).json()]
+    assert "routing" in kinds
+    for kind in kinds:
+        r = client.get(f"/api/imports/template/{kind}", headers=auth)
+        assert r.status_code == 200 and r.content[:2] == b"PK", kind
+
+
 def test_roles(client, auth):
     r = client.post("/api/users", headers=auth, json={"username": "izleyici", "password": "123456", "role": "user"})
     assert r.status_code == 201

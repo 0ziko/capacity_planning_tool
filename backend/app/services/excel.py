@@ -157,6 +157,12 @@ TEMPLATES: dict[str, dict] = {
 }
 
 
+def sheet_title(title: str) -> str:
+    """Excel sayfa adi kurallari: max 31 karakter, [] : * ? / \\ yasak."""
+    cleaned = re.sub(r"[\[\]:*?/\\]", "-", title).strip()
+    return (cleaned or "Sayfa")[:31]
+
+
 def _autosize(ws) -> None:
     for i, col in enumerate(ws.columns, start=1):
         width = max((len(str(c.value)) if c.value is not None else 0) for c in col)
@@ -173,7 +179,7 @@ def build_template(kind: str) -> bytes:
     t = TEMPLATES[kind]
     wb = Workbook()
     ws = wb.active
-    ws.title = t["title"][:31]
+    ws.title = sheet_title(t["title"])
     ws.append([c[1] for c in t["columns"]])
     ws.append(t["example"])
     _style_header(ws)
@@ -607,7 +613,7 @@ def run_import(db: Session, kind: str, content: bytes, filename: str, username: 
 # ---- Export ----
 
 def _ws_from_rows(wb: Workbook, title: str, header: list[str], rows: list[list[Any]]) -> None:
-    ws = wb.create_sheet(title[:31])
+    ws = wb.create_sheet(sheet_title(title))
     ws.append(header)
     for r in rows:
         ws.append([v.isoformat() if isinstance(v, (date, datetime)) else (v.strftime("%H:%M") if isinstance(v, time) else v) for v in r])

@@ -109,6 +109,35 @@ ul.errors { margin: 6px 0; padding-left: 18px; color: var(--bad); font-size: 12p
 .ms-code { font-weight: 700; min-width: 64px; }
 .ms-name { flex: 1; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* ciro ve plan karsilastirma */
+.kpi.ok .v { color: var(--ok); }
+.kpi.warn .v { color: var(--warn); }
+.kpi.bad .v { color: var(--bad); }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.seg button { background: #fff; color: var(--text); border: 0; border-radius: 0; padding: 6px 12px; }
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button.active { background: var(--primary); color: #fff; }
+.rev-bars { display: flex; flex-direction: column; gap: 2px; }
+.rev-bar { height: 6px; border-radius: 3px; min-width: 0; }
+.rev-bar.c { background: var(--primary); }
+.rev-bar.e { background: #90caf9; }
+.compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 12px; }
+.scenario { border-top: 4px solid var(--primary); }
+.scenario.revenue { border-top-color: #f9a825; }
+.scen-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 16px; margin-top: 10px; }
+.scen-grid .l { display: block; font-size: 12px; color: var(--muted); }
+.scen-grid .v { display: block; font-size: 20px; font-weight: 700; }
+.scen-grid .v.ok { color: var(--ok); }
+.scen-grid .v.bad { color: var(--bad); }
+.scen-grid .v.warn { color: var(--warn); }
+.delta { font-size: 12px; font-weight: 600; margin-left: 4px; padding: 1px 6px; border-radius: 10px; }
+.delta.good { background: #e8f5e9; color: var(--ok); }
+.delta.bad { background: #ffebee; color: var(--bad); }
+.diff-list { margin: 0; padding-left: 18px; line-height: 1.8; }
+th.grp.due, td.grp.due { background: #f1f6fb; }
+th.grp.rev, td.grp.rev { background: #fff8e1; }
+tr.sub th { font-weight: 500; font-size: 12px; color: var(--muted); }
+
 .login { min-height: 100vh; display: grid; place-items: center; }
 .login .panel { width: 340px; }
 .login form { display: flex; flex-direction: column; gap: 10px; }

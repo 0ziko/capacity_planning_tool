@@ -20,13 +20,16 @@ from app.schemas import (
     OrderOut,
     OrderProgressOut,
     OrderScheduleOut,
+    PlanCompareOut,
+    PlanCompareRequest,
     PlanLineOut,
     ProgressOut,
     RequirementLine,
     RequirementQuery,
+    RevenueOut,
     WorkCenterLoad,
 )
-from app.services import analysis, capacity, excel, planning, progress, requirements
+from app.services import analysis, capacity, excel, planning, progress, requirements, revenue
 from app.services import orders as orders_svc
 
 router = APIRouter(prefix="/api", tags=["planning"])
@@ -144,6 +147,17 @@ def get_lead_time(req: LeadTimeRequest, db: Session = Depends(get_db), _=Depends
         return planning.lead_time(db, req)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+# ---- Ciro ve plan karsilastirma ----
+@router.get("/plan/revenue", response_model=RevenueOut)
+def get_revenue(start: date, weeks: int = Query(12, ge=1, le=52), work_center_ids: list[int] | None = Query(None), db: Session = Depends(get_db), _=Depends(require_user)):
+    return revenue.revenue_report(db, work_center_ids, start, weeks)
+
+
+@router.post("/plan/compare", response_model=PlanCompareOut)
+def compare_plans(req: PlanCompareRequest, db: Session = Depends(get_db), _=Depends(require_user)):
+    return revenue.compare(db, req)
 
 
 # ---- Siparis bazli plan sonucu (bitis tarihleri) ----
@@ -277,13 +291,16 @@ def plan_xlsx(start: date, weeks: int = 12, work_center_ids: list[int] | None = 
     loads = planning.load(db, work_center_ids, start, weeks)
     lines = planning.plan_lines(db, work_center_ids, capacity.week_start(start), capacity.week_start(start) + timedelta(weeks=weeks))
     sched = orders_svc.order_schedule(db, work_center_ids)
+    rev = revenue.revenue_report(db, work_center_ids, start, weeks, sched=sched)
     content = excel.build_report(
         {
             "Haftalık Yük": (["İş Merkezi", "Hafta", "Kapasite (saat)", "Planlanan (saat)", "Doluluk %", "Kapasite (birim)", "Planlanan (birim)"], [[l.work_center_code, w.week_start, w.capacity_hours, w.planned_hours, round(w.utilization * 100, 1), w.capacity_units, w.planned_units] for l in loads for w in l.weeks]),
             "Sipariş Bitiş Tarihleri": (
-                ["Sipariş No", "Müşteri", "Stok Kodu", "Miktar", "Termin", "İhtiyaç (saat)", "Planlanan (saat)", "Kapsam %", "Plan Başlangıç Haftası", "Tahmini Bitiş", "Son İş Merkezi", "Sapma (gün)", "Durum"],
-                [[s.order_no, s.customer, s.item_code, s.quantity, s.due_date, s.required_hours, s.planned_hours, s.coverage_pct, s.planned_start, s.planned_end, s.last_work_center_code, s.lateness_days, s.plan_status] for s in sched],
+                ["Sipariş No", "Müşteri", "Stok Kodu", "Miktar", "Birim Fiyat", "Ciro", "Termin", "İhtiyaç (saat)", "Planlanan (saat)", "Kapsam %", "Plan Başlangıç Haftası", "Tahmini Bitiş", "Son İş Merkezi", "Sapma (gün)", "Durum"],
+                [[s.order_no, s.customer, s.item_code, s.quantity, s.unit_price, s.revenue, s.due_date, s.required_hours, s.planned_hours, s.coverage_pct, s.planned_start, s.planned_end, s.last_work_center_code, s.lateness_days, s.plan_status] for s in sched],
             ),
+            "Ciro (Haftalık)": (["Hafta", "Tamamlanan Ciro", "Tamamlanan Sipariş", "Oransal Ciro", "Kümülatif Tamamlanan", "Kümülatif Oransal"], [[w.period, w.completed_revenue, w.completed_orders, w.earned_revenue, w.cumulative_completed, w.cumulative_earned] for w in rev.weeks]),
+            "Ciro (Aylık)": (["Ay", "Tamamlanan Ciro", "Tamamlanan Sipariş", "Oransal Ciro", "Kümülatif Tamamlanan", "Kümülatif Oransal"], [[m.period, m.completed_revenue, m.completed_orders, m.earned_revenue, m.cumulative_completed, m.cumulative_earned] for m in rev.months]),
             "Plan Satırları": (["Hafta", "İş Merkezi", "Sipariş No", "Müşteri", "Termin", "Stok Kodu", "Op. Sıra", "Planlanan Saat", "Planlanan Miktar", "Mod"], [[p.week_start, p.work_center_code, p.order_no, p.customer, p.due_date, p.item_code, p.operation_seq, p.planned_hours, p.planned_qty, p.mode] for p in lines]),
         }
     )

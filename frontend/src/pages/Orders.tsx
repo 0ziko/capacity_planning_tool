@@ -59,7 +59,7 @@ export default function Orders() {
           <h2>{STATUS_LABEL[status] ?? "Tüm"} siparişler <span className="muted">(satıra tıklayarak ihtiyaç hesabını seçili stoklara daraltın)</span></h2>
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Sipariş</th><th>Müşteri</th><th>Termin</th><th>Stok</th><th className="num">Miktar</th><th>Not</th><th></th></tr></thead>
+              <thead><tr><th>Sipariş</th><th>Müşteri</th><th>Termin</th><th>Stok</th><th className="num">Miktar</th><th className="num">Birim fiyat</th><th className="num">Ciro</th><th>Not</th><th></th></tr></thead>
               <tbody>
                 {orders.data?.map((o) => (
                   <tr key={o.id} onClick={() => toggleCode(o.item_code)} style={{ cursor: "pointer", background: selCodes.includes(o.item_code) ? "#e3f2fd" : undefined }}>
@@ -71,6 +71,8 @@ export default function Orders() {
                     <td>{o.customer}</td><td>{o.due_date}</td>
                     <td><b>{o.item_code}</b> <span className="muted">{o.item_name}</span></td>
                     <td className="num">{fmt(o.quantity, 0)}</td>
+                    <td className="num" style={{ color: o.unit_price ? undefined : "var(--muted)" }} title={o.unit_price ? "" : "Birim fiyat girilmedi; ciro hesabına 0 olarak girer"}>{o.unit_price ? fmt(o.unit_price, 2) : "—"}</td>
+                    <td className="num">{o.revenue ? fmt(o.revenue, 0) : "—"}</td>
                     <td className="muted" title={o.note}>{o.note.length > 40 ? o.note.slice(0, 40) + "…" : o.note}</td>
                     <td onClick={(e) => e.stopPropagation()} style={{ whiteSpace: "nowrap" }}>
                       {can("poweruser") && o.status !== "merged" && (
@@ -85,11 +87,13 @@ export default function Orders() {
                     </td>
                   </tr>
                 ))}
-                {orders.data?.length === 0 && <tr><td colSpan={7} className="muted">Sipariş yok.</td></tr>}
+                {orders.data?.length === 0 && <tr><td colSpan={9} className="muted">Sipariş yok.</td></tr>}
               </tbody>
             </table>
           </div>
-          <p className="muted">{orders.data?.length ?? 0} sipariş</p>
+          <p className="muted">{orders.data?.length ?? 0} sipariş · toplam ciro <b>{fmt(orders.data?.reduce((s, o) => s + (o.revenue || 0), 0), 0)}</b>
+            {!!orders.data?.some((o) => !o.unit_price) && <> · <span style={{ color: "var(--warn)" }}>{orders.data.filter((o) => !o.unit_price).length} siparişte birim fiyat yok</span></>}
+          </p>
         </div>
         <div>
           <h2>İş merkezi bazlı ihtiyaç</h2>
@@ -121,6 +125,7 @@ function OrderForm({ initial, onSaved, onCancel }: { initial: Order | null; onSa
     due_date: initial?.due_date ?? "",
     item_code: initial?.item_code ?? "",
     quantity: initial?.quantity ?? 0,
+    unit_price: initial?.unit_price ?? 0,
     note: initial?.note ?? "",
   });
   const [err, setErr] = useState("");
@@ -154,6 +159,8 @@ function OrderForm({ initial, onSaved, onCancel }: { initial: Order | null; onSa
           <datalist id="order-item-codes">{items.map((i) => <option key={i.id} value={i.code}>{i.name}</option>)}</datalist>
         </label>
         <label>Miktar *<input type="number" min={0} step="1" value={form.quantity || ""} onChange={(e) => set("quantity", Number(e.target.value))} /></label>
+        <label title="Birim satış fiyatı; ciro = miktar × birim fiyat">Birim fiyat<input type="number" min={0} step="0.01" value={form.unit_price || ""} onChange={(e) => set("unit_price", Number(e.target.value))} placeholder="0" /></label>
+        <label>Ciro<input value={form.quantity && form.unit_price ? fmt(form.quantity * form.unit_price, 2) : "—"} readOnly style={{ background: "#f5f5f5", width: 110 }} /></label>
         <label>Termin *<input type="date" value={form.due_date} onChange={(e) => set("due_date", e.target.value)} /></label>
         <label style={{ minWidth: 220 }}>Not<input value={form.note} onChange={(e) => set("note", e.target.value)} /></label>
         <button onClick={submit} disabled={!valid || busy}>{initial ? "Kaydet" : "Ekle"}</button>

@@ -124,8 +124,9 @@ TEMPLATES: dict[str, dict] = {
             ("due_date", "Termin", ["termintarihi", "teslimtarihi", "tarih"]),
             ("item_code", "Stok Kodu", ["stokkodu", "malzeme"]),
             ("quantity", "Miktar", ["adet"]),
+            ("unit_price", "Birim Fiyat", ["fiyat", "birimfiyat", "satisfiyati", "birimsatisfiyati"]),
         ],
-        "example": ["SIP-2026-001", "ABC Otel", "2026-10-15", "MAM-0001", 40],
+        "example": ["SIP-2026-001", "ABC Otel", "2026-10-15", "MAM-0001", 40, 1250],
         "required": ["order_no", "due_date", "item_code", "quantity"],
     },
     "production": {
@@ -503,6 +504,9 @@ def import_orders(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
             o.customer = _str(r.get("customer")) or o.customer
             o.due_date = _date(r.get("due_date"))
             o.quantity = qty
+            price = _float(r.get("unit_price"), None)
+            if price is not None:
+                o.unit_price = price
             o.status = "open"
         except Exception as e:  # noqa: BLE001
             errs.append(f"Satir {r['_row']}: {e}")
@@ -648,7 +652,7 @@ def build_backup(db: Session) -> bytes:
     _ws_from_rows(wb, "Rota", [c[1] for c in TEMPLATES["routing"]["columns"]],
                   [[item_code.get(o.item_id), o.seq, o.operation_name, wc_code.get(o.work_center_id), o.cycle_time_sec, o.setup_time_min] for o in db.query(RoutingOperation).order_by(RoutingOperation.item_id, RoutingOperation.seq)])
     _ws_from_rows(wb, "Siparişler", [c[1] for c in TEMPLATES["orders"]["columns"]] + ["Durum"],
-                  [[o.order_no, o.customer, o.due_date, item_code.get(o.item_id), o.quantity, o.status] for o in db.query(Order).order_by(Order.due_date, Order.order_no)])
+                  [[o.order_no, o.customer, o.due_date, item_code.get(o.item_id), o.quantity, o.unit_price, o.status] for o in db.query(Order).order_by(Order.due_date, Order.order_no)])
     _ws_from_rows(wb, "Plan", ["Hafta", "İş Merkezi Kodu", "Sipariş No", "Stok Kodu", "Operasyon Id", "Planlanan Saat", "Planlanan Miktar", "Mod", "Oluşturan"],
                   [[p.week_start, wc_code.get(p.work_center_id), p.order.order_no, item_code.get(p.order.item_id), p.operation_id, p.planned_hours, p.planned_qty, p.mode, p.created_by] for p in db.query(PlanLine).order_by(PlanLine.week_start, PlanLine.work_center_id)])
     _ws_from_rows(wb, "Günlük Üretim", [c[1] for c in TEMPLATES["production"]["columns"]] + ["Kazanılan Saat"],

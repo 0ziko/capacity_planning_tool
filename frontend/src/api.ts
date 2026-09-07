@@ -93,10 +93,17 @@ export interface WorkCenter { id: number; code: string; name: string; descriptio
 export interface Employee { id: number; code: string; name: string; work_center_id: number | null; is_active: boolean }
 export interface Item { id: number; code: string; name: string; product_group: string; unit: string }
 export interface ItemDetail extends Item { bom_lines: { id: number; component_code: string; component_name: string; quantity: number; unit: string }[]; operations: { id: number; seq: number; operation_name: string; work_center_id: number; cycle_time_sec: number; setup_time_min: number }[] }
-export interface Order { id: number; order_no: string; customer: string; due_date: string; item_id: number; item_code: string; item_name: string; quantity: number; status: string; merged_into_id: number | null; note: string }
-export interface OrderIn { order_no: string; customer: string; due_date: string; item_code: string; quantity: number; note: string }
+export interface Order { id: number; order_no: string; customer: string; due_date: string; item_id: number; item_code: string; item_name: string; quantity: number; unit_price: number; revenue: number; status: string; merged_into_id: number | null; note: string }
+export interface OrderIn { order_no: string; customer: string; due_date: string; item_code: string; quantity: number; unit_price: number; note: string }
+export type PlanMode = "due_date" | "revenue";
+export interface PeriodRevenue { period: string; completed_revenue: number; completed_orders: number; earned_revenue: number; cumulative_completed: number; cumulative_earned: number }
+export interface RevenueReport { start: string; end: string; total_open_revenue: number; planned_revenue: number; partial_revenue: number; unplanned_revenue: number; no_price_orders: number; weeks: PeriodRevenue[]; months: PeriodRevenue[] }
+export interface PlanScenario { mode: PlanMode; label: string; created_lines: number; planned_revenue: number; on_time: number; late: number; partial: number; unplanned: number; total_lateness_days: number; utilization_pct: number; orders: OrderSchedule[]; revenue: RevenueReport }
+export type CompareDiff = "same" | "rev_misses_due" | "rev_drops" | "due_drops" | "rev_earlier" | "rev_later" | "other";
+export interface CompareRow { order_id: number; order_no: string; customer: string; item_code: string; quantity: number; revenue: number; due_date: string; due_status: OrderSchedule["plan_status"]; due_end: string | null; due_lateness: number | null; rev_status: OrderSchedule["plan_status"]; rev_end: string | null; rev_lateness: number | null; diff: CompareDiff }
+export interface PlanCompare { due: PlanScenario; revenue: PlanScenario; rows: CompareRow[]; rev_misses_due: string[]; rev_drops: string[]; due_drops: string[] }
 export interface OrderSchedule {
-  order_id: number; order_no: string; customer: string; item_code: string; item_name: string; quantity: number; due_date: string;
+  order_id: number; order_no: string; customer: string; item_code: string; item_name: string; quantity: number; unit_price: number; revenue: number; due_date: string;
   required_hours: number; planned_hours: number; coverage_pct: number; planned_start: string | null; planned_end_week: string | null; planned_end: string | null;
   last_work_center_code: string; lateness_days: number | null; plan_status: "unplanned" | "partial" | "late" | "on_time" | "no_ops";
 }
@@ -109,7 +116,7 @@ export interface MergeGroup { item_id: number; item_code: string; item_name: str
 export interface Capacity { work_center_id: number; work_center_code: string; start: string; end: string; capacity_hours: number; capacity_units: number; unit_hours: number; days: { day: string; hours: number }[] }
 export interface WeekLoad { week_start: string; capacity_hours: number; planned_hours: number; utilization: number; capacity_units: number; planned_units: number }
 export interface WorkCenterLoad { work_center_id: number; work_center_code: string; weeks: WeekLoad[] }
-export interface PlanLine { id: number; order_id: number; order_no: string; customer: string; due_date: string; item_code: string; operation_id: number; operation_seq: number; work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; planned_qty: number; mode: string }
+export interface PlanLine { id: number; order_id: number; order_no: string; customer: string; due_date: string; item_code: string; operation_id: number; operation_seq: number; work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; planned_qty: number; mode: string; strategy: string }
 export interface Progress { work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; expected_hours_to_date: number; actual_hours_to_date: number; remaining_hours: number; remaining_days: number; working_days: number; elapsed_days: number; status: string }
 export interface ImportKind { kind: string; title: string; columns: string[]; required: string[] }
 export interface ImportResult { kind: string; inserted: number; updated: number; errors: string[] }

@@ -1,7 +1,7 @@
 # Aktif Bağlam
 
 ## Şu Anki Odak
-v0.2: kullanıcı kontrolleri sürüyor; sipariş odaklı planlama görünümleri (bitiş tarihi, İM bazlı, ilerleme, birleştirme) eklendi. Kullanıcı kendi verisini (PRS3 iş merkezi, 6005510 stoku, "Deneme" siparişi) girerek test ediyor. Sıradaki adım: kullanıcının yeni geri bildirimleri.
+v0.3: kullanıcı kontrolleri sürüyor; sipariş odaklı planlama görünümleri (bitiş tarihi, İM bazlı, ilerleme, birleştirme) + birim fiyat/ciro raporu + iki planlama modu (termin / maksimum ciro) ve karşılaştırma eklendi. Kullanıcı kendi verisini (PRS3 iş merkezi, 6005510 stoku, "Deneme" siparişi — birim fiyat 1850 girildi) girerek test ediyor. Sıradaki adım: kullanıcının yeni geri bildirimleri.
 
 ## Son Değişiklikler (2026-09-07)
 - Teknoloji kararı alındı: Python/FastAPI + PostgreSQL (yerelde SQLite) + React/Vite SPA, önce localhost.
@@ -22,6 +22,12 @@ v0.2: kullanıcı kontrolleri sürüyor; sipariş odaklı planlama görünümler
 - Şema: `orders.merged_into_id`, `orders.note` eklendi; `db/migrate.ensure_columns` mevcut tablolara eksik kolonları ALTER TABLE ile ekler (Alembic'e kadar).
 - Düzeltme: `DELETE /api/orders?status=` toplu silmede plan satırları artık elle temizleniyor (ORM cascade toplu silmede çalışmıyordu).
 - Testler: `tests/test_orders_flow.py` (3 test) eklendi; toplam 6/6.
+
+- Kullanıcı isteği (11:49, 2 madde) tamamlandı (v0.3):
+  1. Birim fiyat → `orders.unit_price` (ciro = miktar × birim fiyat; para birimi tek kabul). Sipariş formu/listesi, sipariş Excel şablonu ("Birim Fiyat" kolonu, alias fiyat/birimfiyat/satisfiyati) ve yedek çıktısı güncellendi. Birleştirmede ağırlıklı ortalama fiyat. Ciro raporu → `GET /api/plan/revenue` (`services/revenue.revenue_report`): haftalık + aylık; **tamamlanan** (siparişin tahmini bitiş günü hangi döneme düşüyorsa tüm cirosu orada) ve **oransal** (plan satırı saat payına göre dağıtım), kümülatifler; toplam açık / ufukta tamamlanan / kısmi / planlanmayan ciro. Planlama › **Ciro** sekmesi; plan Excel'ine "Ciro (Haftalık)" ve "Ciro (Aylık)" sayfaları; Sipariş bitiş tarihleri tablosuna Ciro kolonu.
+  2. İki planlama modu → `AutoPlanRequest.mode`: `due_date` (termin sırası, eski davranış) / `revenue` (ufukta maksimum ciro). Motor `planning.simulate()` olarak kalıcı olmayan hale getirildi; `auto_plan` sonucu yazar (`plan_lines.strategy` kolonu). Ciro modu: siparişler saat başına ciroya (ciro ÷ gereken saat) göre sıralanır, yalnızca ufka **tamamen** sığanlar alınır (ciro teslimde gerçekleşir), kalan kapasite atlananlarla termin sırasıyla kısmen doldurulur; tamamen dışarıda kalanlar `skipped`. Karşılaştırma → `POST /api/plan/compare` (`services/revenue.compare`): iki simülasyon + sipariş çizelgesi + ciro raporu; sipariş bazlı fark sınıfı (`rev_misses_due`: ciro planında termin kaçar · `rev_drops`: ciro planı dışarıda bırakır · `due_drops`: termin planı ufka sığdıramaz, ciro planı bitirir · rev_earlier/rev_later/same). Planlama › **Plan karşılaştır** sekmesi: iki senaryo kartı (ciro, termine uygun, geç, gecikme günü, kısmi/planlanmadı, doluluk; farklar renkli), özet fark listesi, dönemsel ciro yan yana, sipariş tablosu (filtre butonları), "Bu planı uygula" (poweruser). Üst panelde "Planlama modu" seçimi.
+- Şema: `orders.unit_price`, `plan_lines.strategy` (ensure_columns ile eklenir).
+- Testler: `tests/test_revenue_modes.py` (2 test: fiyat import/form; 200 saatlik tek İM'de üç siparişle termin vs ciro modu, karşılaştırma listeleri, ciro raporu, strategy, Excel) → toplam 8/8. tsc temiz. Tarayıcıda Siparişler formu (canlı ciro alanı), Ciro sekmesi ve Plan karşılaştır (geçici test siparişleriyle fark senaryosu) doğrulandı; geçici siparişler silindi.
 ## Sonraki Adımlar
 1. Kullanıcıdan gerçek Excel dosyalarının kolon yapısını al → `excel.py` TEMPLATES alias listesini genişlet.
 2. Pilot iş merkezleriyle deneme; verimli saat / vardiya tanımlarını gerçek değerlerle doğrula.
@@ -46,3 +52,6 @@ v0.2: kullanıcı kontrolleri sürüyor; sipariş odaklı planlama görünümler
 ## Öğrenimler
 - Spec örneği (200 saat / 20 birim / günlük 40 saat) test vakası olarak kodlandı; hesap mantığı değişirse test de güncellenmeli.
 - Otomatik planlamada operasyon sırası: sonraki operasyon, öncekinin başladığı haftadan önce başlayamaz (aynı hafta serbest). Bu, pilot için yeterli kabul edildi.
+- Ciro modunda "ufka tamamen sığma" şartı önemli: kısmi yerleştirilen bir sipariş ciro üretmez, bu yüzden açgözlü sıralama (ciro/saat) + tam sığma denemesi (kapasite kopyası üzerinde) + kalanı termin sırasıyla doldurma yaklaşımı seçildi. Fiyatı 0 olan siparişler ciro modunda en sona düşer.
+- Oransal ciroda pay, tamamen planlanan siparişlerde planlanan toplam saate göre alınır (yuvarlama farkı toplam cirodan sapmasın).
+- Cursor `Read`/`StrReplace` araçları memory-bank .md dosyalarını (UTF-8, BOM'suz olsa da) bozuk okuyor; içerik için `Get-Content -Encoding UTF8` / Grep, düzenleme için küçük bir Python betiği kullan.

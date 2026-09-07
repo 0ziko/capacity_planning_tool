@@ -1,6 +1,7 @@
 """Otomatik / manuel planlama, haftalik yuk ve terminleme (lead time)."""
 
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 from sqlalchemy import func
@@ -40,29 +41,39 @@ def planned_hours_by_week(db: Session, wc_ids: list[int], start: date, end: date
     return {(wc, wk): float(h or 0) for wc, wk, h in q.all()}
 
 
-def auto_plan(db: Session, req: AutoPlanRequest, username: str) -> dict:
-    start = cap.week_start(req.start_week)
-    weeks = [start + timedelta(weeks=i) for i in range(req.weeks)]
-    wcs = _selected_work_centers(db, req.work_center_ids)
-    if not wcs:
-        return {"created": 0, "unplanned": [], "message": "Planlanacak is merkezi secilmedi (is merkezinde 'Planlaniyor' isaretli olmali)."}
-    wc_ids = [w.id for w in wcs]
-    wc_by_id = {w.id: w for w in wcs}
+@dataclass
+class DraftLine:
+    """Kalici olmayan (simulasyon) plan satiri; PlanLine ile ayni alan adlari."""
 
-    if req.replace_existing:
-        db.query(PlanLine).filter(
-            PlanLine.work_center_id.in_(wc_ids), PlanLine.week_start >= start, PlanLine.mode == "auto"
-        ).delete(synchronize_session=False)
-        db.flush()
+    order: Order
+    order_id: int
+    operation_id: int
+    work_center_id: int
+    week_start: date
+    planned_hours: float
+    planned_qty: float
+    mode: str = "auto"
 
-    # kalan kapasite = kapasite - manuel yerlestirilmis saatler
-    manual = planned_hours_by_week(db, wc_ids, start, weeks[-1], mode="manual")
-    remaining: dict[tuple[int, date], float] = {}
-    for w in wcs:
-        for wk in weeks:
-            remaining[(w.id, wk)] = cap.week_capacity_hours(db, w, wk) - manual.get((w.id, wk), 0.0)
 
-    orders = (
+@dataclass
+class Simulation:
+    mode: str
+    start: date
+    weeks: list[date]
+    work_centers: list[WorkCenter]
+    lines: list[DraftLine]
+    unplanned: list[dict]  # ufka sigmayan operasyon kalanlari
+    skipped: list[dict]  # ciro modunda tamamen disarida birakilan siparisler
+    capacity_hours: float  # ufuk icindeki toplam (manuel dusulmus) kapasite
+    orders: list[Order]
+
+    @property
+    def planned_hours(self) -> float:
+        return sum(l.planned_hours for l in self.lines)
+
+
+def _open_orders_with_ops(db: Session) -> list[Order]:
+    return (
         db.query(Order)
         .options(joinedload(Order.item).joinedload(Item.operations))
         .filter(Order.status == "open")
@@ -70,56 +81,135 @@ def auto_plan(db: Session, req: AutoPlanRequest, username: str) -> dict:
         .all()
     )
 
-    created = 0
+
+def _place_order(o: Order, wc_by_id: dict[int, WorkCenter], weeks: list[date], remaining: dict[tuple[int, date], float]) -> tuple[list[DraftLine], list[dict]]:
+    """Bir siparisin operasyonlarini kalan kapasiteye yerlestirir (remaining'i gunceller).
+    Sonraki operasyon, oncekinin basladigi haftadan once baslayamaz."""
+    lines: list[DraftLine] = []
     unplanned: list[dict] = []
-    for o in orders:
-        prev_week_idx = 0  # sonraki operasyon oncekinin basladigi haftadan once baslayamaz
-        for op in o.item.operations:
-            if op.work_center_id not in wc_by_id:
-                continue
-            total_hours = op.hours_for(o.quantity)
-            hours_left = total_hours
-            idx = prev_week_idx
-            first_idx = None
-            while hours_left > 1e-6 and idx < len(weeks):
-                wk = weeks[idx]
-                avail = remaining[(op.work_center_id, wk)]
-                if avail > 1e-6:
-                    take = min(avail, hours_left)
-                    qty = o.quantity * (take / total_hours) if total_hours > 0 else 0
-                    db.add(
-                        PlanLine(
-                            order_id=o.id,
-                            operation_id=op.id,
-                            work_center_id=op.work_center_id,
-                            week_start=wk,
-                            planned_hours=round(take, 3),
-                            planned_qty=round(qty, 2),
-                            mode="auto",
-                            created_by=username,
-                        )
-                    )
-                    created += 1
-                    remaining[(op.work_center_id, wk)] = avail - take
-                    hours_left -= take
-                    if first_idx is None:
-                        first_idx = idx
-                if hours_left > 1e-6:
-                    idx += 1
-            if first_idx is not None:
-                prev_week_idx = first_idx
+    prev_week_idx = 0
+    for op in o.item.operations:
+        if op.work_center_id not in wc_by_id:
+            continue
+        total_hours = op.hours_for(o.quantity)
+        hours_left = total_hours
+        idx = prev_week_idx
+        first_idx = None
+        while hours_left > 1e-6 and idx < len(weeks):
+            wk = weeks[idx]
+            avail = remaining[(op.work_center_id, wk)]
+            if avail > 1e-6:
+                take = min(avail, hours_left)
+                qty = o.quantity * (take / total_hours) if total_hours > 0 else 0
+                lines.append(DraftLine(order=o, order_id=o.id, operation_id=op.id, work_center_id=op.work_center_id, week_start=wk, planned_hours=round(take, 3), planned_qty=round(qty, 2)))
+                remaining[(op.work_center_id, wk)] = avail - take
+                hours_left -= take
+                if first_idx is None:
+                    first_idx = idx
             if hours_left > 1e-6:
-                unplanned.append(
-                    {
-                        "order_no": o.order_no,
-                        "item_code": o.item.code,
-                        "operation_seq": op.seq,
-                        "work_center_code": wc_by_id[op.work_center_id].code,
-                        "hours": round(hours_left, 2),
-                    }
-                )
+                idx += 1
+        if first_idx is not None:
+            prev_week_idx = first_idx
+        if hours_left > 1e-6:
+            unplanned.append({"order_no": o.order_no, "item_code": o.item.code, "operation_seq": op.seq, "work_center_code": wc_by_id[op.work_center_id].code, "hours": round(hours_left, 2)})
+    return lines, unplanned
+
+
+def _order_hours(o: Order, wc_by_id: dict[int, WorkCenter]) -> float:
+    return sum(op.hours_for(o.quantity) for op in o.item.operations if op.work_center_id in wc_by_id)
+
+
+def simulate(db: Session, req: AutoPlanRequest) -> Simulation:
+    """Otomatik plani hesaplar, veritabanina yazmaz.
+
+    due_date: siparisler termin sirasiyla yerlestirilir; sigmayan kisim 'unplanned'.
+    revenue : ufuk icinde maksimum ciro hedeflenir. Siparisler saat basina ciroya
+              (ciro / gereken saat) gore siralanir; yalnizca ufka TAMAMEN sigan siparisler
+              alinir (ciro teslimde gerceklesir), sigmayanlar atlanir. Kalan kapasite,
+              atlanan siparislerle termin sirasiyla kismen doldurulur (sonraki ufka devreder).
+    """
+    start = cap.week_start(req.start_week)
+    weeks = [start + timedelta(weeks=i) for i in range(req.weeks)]
+    wcs = _selected_work_centers(db, req.work_center_ids)
+    orders = _open_orders_with_ops(db)
+    if not wcs:
+        return Simulation(req.mode, start, weeks, [], [], [], [], 0.0, orders)
+    wc_ids = [w.id for w in wcs]
+    wc_by_id = {w.id: w for w in wcs}
+
+    # kalan kapasite = kapasite - manuel yerlestirilmis saatler
+    manual = planned_hours_by_week(db, wc_ids, start, weeks[-1], mode="manual")
+    remaining: dict[tuple[int, date], float] = {}
+    for w in wcs:
+        for wk in weeks:
+            remaining[(w.id, wk)] = max(cap.week_capacity_hours(db, w, wk) - manual.get((w.id, wk), 0.0), 0.0)
+    capacity_total = sum(remaining.values())
+
+    lines: list[DraftLine] = []
+    unplanned: list[dict] = []
+    skipped: list[dict] = []
+
+    if req.mode == "revenue":
+        def density(o: Order) -> float:
+            h = _order_hours(o, wc_by_id)
+            rev = o.quantity * (o.unit_price or 0.0)
+            return rev / h if h > 0 else 0.0
+
+        ranked = sorted(orders, key=lambda o: (-density(o), o.due_date, o.order_no))
+        leftover: list[Order] = []
+        for o in ranked:
+            if _order_hours(o, wc_by_id) <= 1e-6:
+                continue  # bu is merkezlerinde operasyonu yok
+            trial = dict(remaining)
+            ls, un = _place_order(o, wc_by_id, weeks, trial)
+            if un:
+                leftover.append(o)
+                continue
+            remaining = trial
+            lines.extend(ls)
+        # kalan kapasiteyi termin sirasiyla kismen doldur
+        for o in sorted(leftover, key=lambda o: (o.due_date, o.order_no)):
+            ls, un = _place_order(o, wc_by_id, weeks, remaining)
+            lines.extend(ls)
+            unplanned.extend(un)
+            if not ls:
+                skipped.append({"order_no": o.order_no, "item_code": o.item.code, "revenue": round(o.quantity * (o.unit_price or 0.0), 2), "hours": round(_order_hours(o, wc_by_id), 2)})
+    else:
+        for o in orders:
+            ls, un = _place_order(o, wc_by_id, weeks, remaining)
+            lines.extend(ls)
+            unplanned.extend(un)
+
+    return Simulation(req.mode, start, weeks, wcs, lines, unplanned, skipped, capacity_total, orders)
+
+
+def auto_plan(db: Session, req: AutoPlanRequest, username: str) -> dict:
+    sim = simulate(db, req)
+    if not sim.work_centers:
+        return {"created": 0, "unplanned": [], "skipped": [], "mode": req.mode, "message": "Planlanacak is merkezi secilmedi (is merkezinde 'Planlaniyor' isaretli olmali)."}
+    wc_ids = [w.id for w in sim.work_centers]
+    if req.replace_existing:
+        db.query(PlanLine).filter(
+            PlanLine.work_center_id.in_(wc_ids), PlanLine.week_start >= sim.start, PlanLine.mode == "auto"
+        ).delete(synchronize_session=False)
+        db.flush()
+    for l in sim.lines:
+        db.add(
+            PlanLine(
+                order_id=l.order_id,
+                operation_id=l.operation_id,
+                work_center_id=l.work_center_id,
+                week_start=l.week_start,
+                planned_hours=l.planned_hours,
+                planned_qty=l.planned_qty,
+                mode="auto",
+                strategy=req.mode,
+                created_by=username,
+            )
+        )
     db.commit()
-    return {"created": created, "unplanned": unplanned, "message": f"{created} plan satiri olusturuldu."}
+    label = "maksimum ciro" if req.mode == "revenue" else "termine gore"
+    return {"created": len(sim.lines), "unplanned": sim.unplanned, "skipped": sim.skipped, "mode": req.mode, "message": f"{len(sim.lines)} plan satiri olusturuldu ({label})."}
 
 
 def add_manual_line(db: Session, line: ManualPlanLineIn, username: str) -> PlanLine:
@@ -176,6 +266,7 @@ def plan_lines(db: Session, wc_ids: list[int] | None, start: date | None, end: d
                 planned_hours=pl.planned_hours,
                 planned_qty=pl.planned_qty,
                 mode=pl.mode,
+                strategy=pl.strategy or "",
             )
         )
     return out

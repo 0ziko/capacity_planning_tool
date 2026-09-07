@@ -71,4 +71,15 @@ frontend/src/
 - `order_schedule`: siparişin plan satırları → ilk hafta, son hafta; son haftadaki İM'de satırlar termin sırasıyla kümülatif doldurulur, siparişin payı bittiği noktadaki çalışma günü bitiş günüdür (`ceil(küm/kapasite × gün sayısı)`).
 
 ## Planlama Sayfası Yapısı
-- `pages/Planning.tsx` üst filtre paneli (hafta, İM, otomatik plan) + sekmeler; sekme içerikleri `pages/planning/*Panel.tsx` dosyalarında.
+- `pages/Planning.tsx` üst filtre paneli (hafta, İM, planlama modu, otomatik plan) + sekmeler; sekme içerikleri `pages/planning/*Panel.tsx` dosyalarında (OrderSchedule, WcOrders, Revenue, Compare, OrderProgress, Merge).
+
+## Planlama Motoru: Simülasyon + Modlar (v0.3)
+- `planning.simulate(db, req) -> Simulation` kalıcı değildir (`DraftLine` dataclass, PlanLine ile aynı alan adları + `order` referansı); `auto_plan` simülasyonu `PlanLine` olarak yazar (`mode=auto`, `strategy=req.mode`). Manuel satırlar kapasiteden önce düşülür.
+- `_place_order` tek siparişi kalan kapasiteye yerleştirir (operasyon sırası kısıtı korunur) ve `remaining` sözlüğünü günceller.
+- `due_date`: termin sırası, kısmi yerleşim serbest. `revenue`: ciro/saat azalan sıra; her sipariş kapasite kopyası üzerinde denenir, tamamen sığmazsa atlanır; sonra atlananlar termin sırasıyla kısmen yerleştirilir (`skipped` = hiç yerleşemeyenler).
+- `orders.order_schedule(db, wc_ids, lines=None, orders=None)` hem DB hem simülasyon satırlarıyla çalışır → karşılaştırma aynı bitiş tarihi mantığını kullanır.
+
+## Ciro (v0.3)
+- `Order.unit_price`; ciro = quantity × unit_price (tek para birimi). Birleştirilen siparişte ağırlıklı ortalama fiyat.
+- `revenue.revenue_report`: completed (bitiş gününün haftası/ayı, tüm ciro) + earned (satır saat payı × ciro; tamamen planlananda pay planlanan toplam saate göre). Dönem listesi ufuk + ufuk dışına taşan bitişleri kapsar.
+- `revenue.compare`: iki simülasyon → `PlanScenario` (özet KPI + çizelge + ciro) + `CompareOrderRow.diff` sınıflandırması.

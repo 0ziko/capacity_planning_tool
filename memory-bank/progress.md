@@ -30,6 +30,12 @@
 - [x] Aynı stok kodlu siparişleri birleştirme önerisi + birleştir / geri al (Planlama › Birleştirme önerileri)
 - [x] Hafif şema migrasyonu (eksik kolon ekleme) — Alembic'e kadar
 
+## Çalışan (v0.3 — 2026-09-07, ciro ve planlama modları)
+- [x] Siparişte birim fiyat (form, liste, Excel şablonu/yedek); ciro = miktar × fiyat
+- [x] Haftalık / aylık ciro raporu (tamamlanan + oransal, kümülatif) — Planlama › Ciro; plan Excel'inde 2 sayfa
+- [x] İki planlama modu: termine göre / maksimum ciro (`mode`), plan satırında `strategy`
+- [x] Plan karşılaştırma (kaydetmeden simülasyon): senaryo kartları, özet farklar (kaçan terminler / dışarıda kalanlar / kaçan ciro fırsatı), dönemsel ciro yan yana, sipariş bazlı tablo, "Bu planı uygula"
+
 ## Yapılacaklar
 - [ ] Gerçek Excel formatlarına göre alias/şablon uyarlaması
 - [ ] PostgreSQL kurulumu ve `.env` geçişi (admin/IT)
@@ -47,6 +53,8 @@ Pilot denemeye hazır. Yerelde çalışıyor: backend :8000, frontend :5173 (SQL
 - Sipariş bitiş tarihi hafta granüler plandan gün tahminidir (son haftada İM'nin termin sıralı doluluğuna göre); gün bazlı çizelgeleme değildir.
 - Sipariş ilerlemesinde sipariş no'suz üretim FIFO dağıtılır; sipariş no verilmiş ama açık sipariş yoksa (kapalı/birleşik) kayıt hiçbir siparişe yazılmaz.
 - Otomatik plan operasyonları hafta granülerliğinde sıralar; gün bazlı ardışıklık yok.
+- Maksimum ciro modu açgözlü sezgiseldir (ciro/saat sıralı, tam sığma şartı); kesin optimum (knapsack) garanti etmez. Tek para birimi varsayılır (fiyatlar aynı birimde girilmeli).
+- Ciro "tamamlanan" yaklaşımı siparişin tüm cirosunu tahmini bitiş gününün dönemine yazar; kısmi teslimat / parçalı fatura modellenmez.
 - Çevrim süresi önerisi "fiili süre" yoksa günün verimli kapasitesini kazanılan saat oranıyla paylaştırır — kaba bir tahmindir; fiili süre kolonu doldurulursa doğruluk artar.
 - SECRET_KEY varsayılanı kısa; üretimde `.env` içinde uzun rastgele değer verilmeli.
 

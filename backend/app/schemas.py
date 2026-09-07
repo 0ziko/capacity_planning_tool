@@ -1,4 +1,5 @@
 from datetime import date, time
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -116,6 +117,7 @@ class OrderIn(BaseModel):
     due_date: date
     item_code: str = Field(min_length=1)
     quantity: float = Field(gt=0)
+    unit_price: float = Field(default=0.0, ge=0)
     note: str = ""
 
 
@@ -128,6 +130,8 @@ class OrderOut(ORM):
     item_code: str = ""
     item_name: str = ""
     quantity: float
+    unit_price: float = 0.0
+    revenue: float = 0.0  # miktar x birim fiyat
     status: str
     merged_into_id: int | None = None
     note: str = ""
@@ -142,6 +146,8 @@ class OrderScheduleOut(BaseModel):
     item_code: str
     item_name: str = ""
     quantity: float
+    unit_price: float = 0.0
+    revenue: float = 0.0
     due_date: date
     required_hours: float  # secili/planlanan is merkezlerindeki toplam ihtiyac
     planned_hours: float
@@ -239,11 +245,83 @@ class RequirementQuery(BaseModel):
 
 
 # ---- Planning ----
+PlanMode = Literal["due_date", "revenue"]
+
+
 class AutoPlanRequest(BaseModel):
     start_week: date  # herhangi bir gun; pazartesiye yuvarlanir
     weeks: int = 12
     work_center_ids: list[int] | None = None  # None => is_planned olanlar
     replace_existing: bool = True
+    mode: PlanMode = "due_date"  # due_date: termine gore; revenue: ufuk icinde maksimum ciro
+
+
+class PlanCompareRequest(BaseModel):
+    start_week: date
+    weeks: int = 12
+    work_center_ids: list[int] | None = None
+
+
+class PeriodRevenue(BaseModel):
+    period: str  # hafta: Pazartesi tarihi (YYYY-MM-DD); ay: YYYY-MM
+    completed_revenue: float  # o donemde tamamlanan (son operasyonu biten) siparislerin cirosu
+    completed_orders: int
+    earned_revenue: float  # planlanan saat payina gore oransal ciro
+    cumulative_completed: float
+    cumulative_earned: float
+
+
+class RevenueOut(BaseModel):
+    start: date
+    end: date
+    total_open_revenue: float  # tum acik siparisler
+    planned_revenue: float  # ufuk icinde tamamlanan siparisler
+    partial_revenue: float  # kismen planlanan (ufka sigmayan) siparisler
+    unplanned_revenue: float  # hic planlanmayan
+    no_price_orders: int  # fiyati 0 olan siparis sayisi
+    weeks: list[PeriodRevenue]
+    months: list[PeriodRevenue]
+
+
+class PlanScenario(BaseModel):
+    mode: PlanMode
+    label: str
+    created_lines: int
+    planned_revenue: float
+    on_time: int
+    late: int
+    partial: int
+    unplanned: int
+    total_lateness_days: int
+    utilization_pct: float  # ufuk icinde planlanan saat / kapasite
+    orders: list[OrderScheduleOut]
+    revenue: RevenueOut
+
+
+class CompareOrderRow(BaseModel):
+    order_id: int
+    order_no: str
+    customer: str
+    item_code: str
+    quantity: float
+    revenue: float
+    due_date: date
+    due_status: str
+    due_end: date | None
+    due_lateness: int | None
+    rev_status: str
+    rev_end: date | None
+    rev_lateness: int | None
+    diff: str  # same / rev_misses_due / rev_drops / due_drops / rev_earlier / rev_later / other
+
+
+class PlanCompareOut(BaseModel):
+    due: PlanScenario
+    revenue: PlanScenario
+    rows: list[CompareOrderRow]
+    rev_misses_due: list[str]  # ciro planinda termini kacan siparisler (termin planinda uygun)
+    rev_drops: list[str]  # ciro planinin ufuk disina attigi / disarida biraktigi siparisler
+    due_drops: list[str]  # termin planinin ufka sigdiramadigi (ciro planinda sigan) siparisler
 
 
 class ManualPlanLineIn(BaseModel):
@@ -269,6 +347,7 @@ class PlanLineOut(ORM):
     planned_hours: float
     planned_qty: float
     mode: str
+    strategy: str = ""
 
 
 class WeekLoad(BaseModel):

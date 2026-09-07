@@ -26,6 +26,7 @@ def order_out(o: Order) -> OrderOut:
     row = OrderOut.model_validate(o)
     row.item_code = o.item.code
     row.item_name = o.item.name
+    row.revenue = round(o.quantity * (o.unit_price or 0.0), 2)
     return row
 
 
@@ -65,6 +66,7 @@ def create_order(db: Session, data: OrderIn) -> Order:
         due_date=data.due_date,
         item_id=item.id,
         quantity=data.quantity,
+        unit_price=data.unit_price,
         status="open",
         note=data.note.strip(),
     )
@@ -84,6 +86,7 @@ def update_order(db: Session, o: Order, data: OrderIn) -> Order:
     o.due_date = data.due_date
     o.item_id = item.id
     o.quantity = data.quantity
+    o.unit_price = data.unit_price
     o.note = data.note.strip()
     if item_changed:
         # rota degisti; eski plan satirlari gecersiz
@@ -102,7 +105,7 @@ def _end_day_in_week(db: Session, wc: WorkCenter, wk: date, order_id: int, lines
     if not wdays:
         return wk + timedelta(days=4)
     capacity = cap.week_capacity_hours(db, wc, wk)
-    ordered = sorted(lines_in_week, key=lambda p: (p.order.due_date, p.order.order_no, p.order_id, p.id))
+    ordered = sorted(lines_in_week, key=lambda p: (p.order.due_date, p.order.order_no, p.order_id, getattr(p, "id", 0) or 0))
     cum = 0.0
     reached = False
     for p in ordered:
@@ -118,18 +121,21 @@ def _end_day_in_week(db: Session, wc: WorkCenter, wk: date, order_id: int, lines
     return wdays[idx]
 
 
-def order_schedule(db: Session, wc_ids: list[int] | None) -> list[OrderScheduleOut]:
+def order_schedule(db: Session, wc_ids: list[int] | None, lines=None, orders: list[Order] | None = None) -> list[OrderScheduleOut]:
+    """lines verilmezse veritabanindaki plan satirlari kullanilir; verilirse (simulasyon)
+    order_id / work_center_id / week_start / planned_hours / order alanlari olan nesneler beklenir."""
     wcs = _planned_wcs(db, wc_ids)
     wc_by_id = {w.id: w for w in wcs}
-    orders = _open_orders(db)
+    orders = orders if orders is not None else _open_orders(db)
     if not orders:
         return []
-    lines = (
-        db.query(PlanLine)
-        .options(joinedload(PlanLine.order))
-        .filter(PlanLine.order_id.in_([o.id for o in orders]))
-        .all()
-    )
+    if lines is None:
+        lines = (
+            db.query(PlanLine)
+            .options(joinedload(PlanLine.order))
+            .filter(PlanLine.order_id.in_([o.id for o in orders]))
+            .all()
+        )
     if wc_by_id:
         lines = [p for p in lines if p.work_center_id in wc_by_id]
     by_order: dict[int, list[PlanLine]] = defaultdict(list)
@@ -180,6 +186,8 @@ def order_schedule(db: Session, wc_ids: list[int] | None) -> list[OrderScheduleO
                 item_code=o.item.code,
                 item_name=o.item.name,
                 quantity=o.quantity,
+                unit_price=o.unit_price or 0.0,
+                revenue=round(o.quantity * (o.unit_price or 0.0), 2),
                 due_date=o.due_date,
                 required_hours=round(required, 2),
                 planned_hours=round(planned, 2),
@@ -394,12 +402,15 @@ def merge_orders(db: Session, req: MergeRequest, username: str) -> Order:
     order_no = (req.order_no or "").strip() or f"BRL-{item.code}-{due.strftime('%Y%m%d')}"
     if db.query(Order).filter(Order.order_no.ilike(order_no), Order.item_id == item.id, Order.status != "merged").first():
         raise ValueError(f"{order_no} numarali siparis zaten var; farkli bir birlesik siparis no verin")
+    total_qty = sum(o.quantity for o in orders)
+    total_rev = sum(o.quantity * (o.unit_price or 0.0) for o in orders)
     merged = Order(
         order_no=order_no,
         customer=(req.customer or "").strip() or " + ".join(customers),
         due_date=due,
         item_id=item.id,
-        quantity=round(sum(o.quantity for o in orders), 3),
+        quantity=round(total_qty, 3),
+        unit_price=round(total_rev / total_qty, 4) if total_qty else 0.0,  # agirlikli ortalama fiyat
         status="open",
         note="Birlestirildi: " + ", ".join(f"{o.order_no} ({o.quantity:g})" for o in orders) + f" — {username}",
     )

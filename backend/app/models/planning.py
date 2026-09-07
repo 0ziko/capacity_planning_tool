@@ -17,6 +17,8 @@ class Order(Base):
     due_date: Mapped[date] = mapped_column(Date, index=True)
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), index=True)
     quantity: Mapped[float] = mapped_column(Float)
+    # birim satis fiyati (ciro = miktar x birim fiyat); para birimi uygulama genelinde tek kabul edilir
+    unit_price: Mapped[float] = mapped_column(Float, default=0.0)
     status: Mapped[str] = mapped_column(String(16), default="open")  # open / closed / merged
     # Birlestirilmis siparis: bu siparis hangi birlesik siparise dahil edildi
     merged_into_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id", ondelete="SET NULL"), nullable=True)
@@ -41,6 +43,8 @@ class PlanLine(Base):
     planned_hours: Mapped[float] = mapped_column(Float)
     planned_qty: Mapped[float] = mapped_column(Float, default=0.0)
     mode: Mapped[str] = mapped_column(String(8), default="auto")  # auto / manual
+    # otomatik planin stratejisi: due_date (termine gore) / revenue (maksimum ciro); manuelde bos
+    strategy: Mapped[str] = mapped_column(String(16), default="")
     created_by: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

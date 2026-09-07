@@ -11,6 +11,7 @@
 - Testler: `tests/test_capacity_flow.py` spec örneğini doğruluyor (10×4×5 = 200 saat = 20 birim; otomatik plan 200 + 77.8; ilerleme 40/40; fazla duruş 100 dk; terminleme; tüm Excel çıktıları). 2/2 geçiyor.
 - Demo veri (`seed_demo.py`) yüklendi; arayüz tarayıcıda doğrulandı (özet, planlama, terminleme).
 - İlerleme durumu: 0 geçmiş gün varsa "Başlamadı" (not_started) gösterilir.
+- Kullanıcı geri bildirimi (11:06): iş merkezi çoklu seçimi (native <select multiple>) kullanışsızdı → `WcMultiSelect` aranabilir açılır liste + onay kutuları + chip + Tümünü seç/Temizle olarak yeniden yazıldı (Siparişler, Planlama, Günlük İlerleme, Duruş & Çevrim Süresi aynı bileşeni kullanır). Kullanıcı kontrollerine ve kendi verisini girmeye başladı (PRS3 iş merkezi, Deneme siparişi).
 
 ## Sonraki Adımlar
 1. Kullanıcıdan gerçek Excel dosyalarının kolon yapısını al → `excel.py` TEMPLATES alias listesini genişlet.

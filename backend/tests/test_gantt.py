@@ -26,6 +26,8 @@ def test_load_includes_actual_hours(client, auth):
     assert w0["planned_hours"] > 0
     assert w0["actual_hours"] > 0
     assert w0["actual_utilization"] > 0
+    assert w0["remaining_hours"] == round(w0["planned_hours"] - w0["actual_hours"], 2)
+    assert w0["idle_hours"] == round(max(w0["capacity_hours"] - w0["planned_hours"], 0), 2)
 
 
 def test_gantt_bars_with_production(client, auth):
@@ -47,3 +49,28 @@ def test_gantt_bars_with_production(client, auth):
     assert bar["produced_qty"] == 8
     assert bar["remaining_qty"] == 12
     assert bar["status"] == "in_progress"
+
+
+def test_progress_pct_quantity_when_fully_produced(client, auth):
+    """Tum operasyonlar siparis miktari kadar uretildiyse ilerleme %100 (saat/setup farki dusurmez)."""
+    wk = _monday()
+    _upload(client, auth, "workcenters", ["İş Merkezi Kodu", "İş Merkezi Adı", "Planlanıyor (E/H)", "Kişi Başı Verimli Saat"], [["PCT-1", "Pct IM", "E", 8]])
+    _upload(client, auth, "employees", ["Sicil No", "Ad Soyad", "İş Merkezi Kodu"], [["P1", "A", "PCT-1"]])
+    _upload(client, auth, "items", ["Stok Kodu", "Ürün Grubu"], [["PCT-M", "GN"]])
+    _upload(
+        client, auth, "routing",
+        ["Stok Kodu", "Sıra", "Operasyon", "İş Merkezi Kodu", "Çevrim Süresi (sn)", "Setup (dk)", "Yarımamül Kodu"],
+        [["PCT-M", 10, "OP1", "PCT-1", 36, 15, "PCT-M-10"], ["PCT-M", 20, "OP2", "PCT-1", 36, 15, "PCT-M-20"]],
+    )
+    _upload(client, auth, "orders", ["Sipariş No", "Termin", "Stok Kodu", "Miktar"], [["PCT-S1", "2026-12-01", "PCT-M", 100]])
+    _upload(
+        client, auth, "production",
+        ["Tarih", "Yarımamül Kodu", "Miktar", "Sipariş No"],
+        [[wk, "PCT-M-10", 100, "PCT-S1"], [wk, "PCT-M-20", 100, "PCT-S1"]],
+    )
+    prog = client.get("/api/progress/orders", headers=auth, params={"as_of": wk}).json()
+    row = next(p for p in prog if p["order_no"] == "PCT-S1")
+    assert all(o["pct"] == 100 for o in row["ops"])
+    assert row["pct"] == 100
+    assert row["status"] == "completed"
+    assert row["earned_hours"] < row["required_hours"]  # setup gunluk uretimde sayilmaz

@@ -41,7 +41,7 @@ export default function OrderProgressPanel({ wcIds }: { wcIds: number[] }) {
       </div>
       <p className="muted" style={{ marginTop: 0 }}>
         Üretim kayıtları sipariş no + stok kodu + operasyon ile eşleştirilir. Sipariş no boş olan kayıtlar aynı stok kodunun açık siparişlerine termin sırasıyla (FIFO) dağıtılır.
-        İlerleme %, kazanılan saatin (üretilen miktar × çevrim süresi) toplam ihtiyaca oranıdır.
+        İlerleme %, operasyonların <b>üretilen miktar / sipariş miktarı</b> oranına göre hesaplanır (dar boğaz operasyon). Kazanılan saat ayrı gösterilir.
       </p>
       <ErrorText err={err} />
       {rows && (

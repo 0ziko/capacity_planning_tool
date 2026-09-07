@@ -140,8 +140,8 @@ export default function Planning() {
       {tab === "merge" && <MergePanel onChanged={() => { refresh(); mergeCount.reload(); }} />}
       {tab === "leadtime" && <LeadTimePanel />}
       {tab === "load" && (<>
-      <h2>Haftalık yük (saat: plan / gerçekleşen / kapasite)</h2>
-      <p className="muted" style={{ marginTop: -8 }}>Mavi çubuk = planlanan yük; yeşil çubuk = günlük üretim beyanlarından gelen gerçekleşen saat. Sağdaki yüzdeler: plan % ve gerçekleşen %.</p>
+      <h2>Haftalık yük (saat: plan / gerçekleşen / kalan)</h2>
+      <p className="muted" style={{ marginTop: -8 }}>Mavi = planlanan yük; yeşil = üretim beyanı (gerçekleşen). <b>Kalan</b> = plan − gerçekleşen. <b>Atıl kapasite</b> = kapasite − plan (plan kapasiteyi doldurmadıysa).</p>
       <div className="table-wrap">
         <table>
           <thead><tr><th>İş Merkezi</th>{weekList.map((w) => (
@@ -154,9 +154,10 @@ export default function Planning() {
               <tr key={wc.work_center_id}>
                 <td><b>{wc.work_center_code}</b></td>
                 {wc.weeks.map((w) => (
-                  <td key={w.week_start} title={`Plan: ${fmt(w.planned_hours)} sa · Gerçekleşen: ${fmt(w.actual_hours)} sa · Kapasite: ${fmt(w.capacity_hours)} sa`}>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 130 }}>
-                      <span style={{ fontSize: 12 }}>{fmt(w.planned_hours, 0)} / <b style={{ color: "var(--ok)" }}>{fmt(w.actual_hours, 0)}</b> / {fmt(w.capacity_hours, 0)}</span>
+                  <td key={w.week_start} title={`Plan: ${fmt(w.planned_hours)} sa · Gerçekleşen: ${fmt(w.actual_hours)} sa · Kalan: ${fmt(w.remaining_hours)} sa · Atıl: ${w.idle_hours > 0.5 ? fmt(w.idle_hours) + " sa" : "yok"}`}>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 140 }}>
+                      <span style={{ fontSize: 12 }}>{fmt(w.planned_hours, 0)} / <b style={{ color: "var(--ok)" }}>{fmt(w.actual_hours, 0)}</b> / {fmt(w.remaining_hours, 0)}</span>
+                      <span style={{ fontSize: 11 }} className="muted">Atıl: {w.idle_hours > 0.5 ? <b>{fmt(w.idle_hours, 0)} sa</b> : "yok"}</span>
                       <Bar ratio={w.utilization} />
                       <Bar ratio={w.actual_utilization} cls="actual" />
                       <div style={{ display: "flex", gap: 6, fontSize: 11 }}>

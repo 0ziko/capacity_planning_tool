@@ -307,6 +307,8 @@ def load(db: Session, wc_ids: list[int] | None, start: date, weeks: int) -> list
             c = cap.week_capacity_hours(db, w, wk)
             p = planned.get((w.id, wk), 0.0)
             a = actual.get((w.id, wk), 0.0)
+            remaining = max(p - a, 0.0)
+            idle = max(c - p, 0.0)
             rows.append(
                 WeekLoad(
                     week_start=wk,
@@ -315,6 +317,8 @@ def load(db: Session, wc_ids: list[int] | None, start: date, weeks: int) -> list
                     utilization=round(p / c, 3) if c > 0 else 0.0,
                     actual_hours=round(a, 2),
                     actual_utilization=round(a / c, 3) if c > 0 else 0.0,
+                    remaining_hours=round(remaining, 2),
+                    idle_hours=round(idle, 2),
                     capacity_units=round(c / unit, 2),
                     planned_units=round(p / unit, 2),
                     actual_units=round(a / unit, 2),

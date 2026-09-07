@@ -322,7 +322,13 @@ def order_progress(db: Session, wc_ids: list[int] | None, as_of: date | None = N
                 )
             )
         final_qty = op_rows[-1].produced_qty if op_rows else 0.0
-        pct = min(earned_total / req_total * 100, 100.0) if req_total > 0 else 0.0
+        # Ilerleme %: miktar bazli (dar bogaz operasyon); saat farki (setup vb.) tamamlanmayi dusurmez
+        if op_rows:
+            pct = min(r.pct for r in op_rows)
+            if all(r.pct >= 99.5 for r in op_rows):
+                pct = 100.0
+        else:
+            pct = min(final_qty / o.quantity * 100, 100.0) if o.quantity else 0.0
         if not op_rows or earned_total <= 1e-6:
             status = "not_started"
         elif all(r.pct >= 99.5 for r in op_rows):

@@ -1,0 +1,63 @@
+# Sistem Desenleri
+
+## Genel Mimari
+```
+[Excel .xlsx] --import--> [FastAPI /api] <--SQLAlchemy--> [PostgreSQL | SQLite]
+                              ^   |
+        [React SPA (Vite)] ---+   +--export--> [Excel: yedek, plan, duruş, çevrim süresi raporları]
+```
+- Tek backend, tek SPA. Geliştirmede Vite `/api` isteklerini :8000'e proxy'ler; CORS da açık.
+- Hesaplama motoru `app/services/*` içinde, API'den bağımsız; testler doğrudan API üzerinden akışı doğrular.
+
+## Dizin Yapısı
+```
+backend/app/
+  core/    config.py (pydantic-settings), security.py (bcrypt+JWT), deps.py (get_current_user, require_role)
+  db/      session.py (Base, engine, SessionLocal, get_db)
+  models/  user.py · master.py (WorkCenter, WorkCenterShift, Employee, Item, BomLine, RoutingOperation)
+           planning.py (Order, PlanLine, ProductionActual, Downtime, ImportLog)
+  schemas.py   (tüm Pydantic şemaları)
+  services/ capacity.py · requirements.py · planning.py · progress.py · analysis.py · excel.py
+  api/     auth.py (login, users) · master.py (iş merkezi, vardiya, personel, stok, sipariş)
+           planning.py (kapasite, ihtiyaç, plan, yük, terminleme, ilerleme, analiz, raporlar) · imports.py (şablon, upload, log, yedek)
+  main.py  (lifespan: create_all + admin seed; router kaydı)
+frontend/src/
+  api.ts (fetch sarmalayıcı, tipler, tarih yardımcıları) · auth.tsx (context, roller) · components.tsx (ortak parçalar)
+  App.tsx (yan menü + rotalar) · pages/*.tsx (10 sayfa)
+```
+
+## Veri Modeli (özet)
+- **WorkCenter**: code, name, is_active, **is_planned** (pilot), capacity_unit_hours ("1 birim"), default_efficient_hours
+- **WorkCenterShift**: weekdays "0,1,2,3,4", start/end, headcount (0 ⇒ personelden), efficient_hours_per_person (null ⇒ iş merkezi varsayılanı)
+- **Employee**: code, name, work_center_id
+- **Item** → **BomLine**[] (hammadde) + **RoutingOperation**[] (seq, work_center, cycle_time_sec, setup_time_min)
+- **Order**: order_no, customer, due_date, item, quantity, status(open/closed)
+- **PlanLine**: order, operation, work_center, week_start (Pazartesi), planned_hours, planned_qty, mode(auto/manual)
+- **ProductionActual**: prod_date, wc, item, operation_seq, order_no, quantity, earned_hours (CT'den), reported_hours (opsiyonel fiili)
+- **Downtime**: dt_date, wc, reason_code/desc, minutes
+- **ImportLog**, **User**
+
+## Temel Hesaplar (services)
+- **Günlük verimli kapasite** = Σ_vardiya (kişi × kişi başı verimli saat) — `capacity.daily_capacity_hours`
+- **Haftalık kapasite** = Σ günler; **birim** = saat / capacity_unit_hours
+- **Operasyon saati** = miktar × cycle_time_sec / 3600 + setup_min / 60 — `RoutingOperation.hours_for`
+- **İhtiyaç** = açık siparişler (veya verilen miktarlar) × rota — `requirements.requirement_lines`
+- **Otomatik plan**: siparişler termine göre; her operasyon için haftalara sırayla doldur (kalan = kapasite − manuel); sonraki op ≥ önceki op'un ilk haftası; sığmayanlar `unplanned` — `planning.auto_plan`
+- **İlerleme**: beklenen = planlanan × geçen çalışma günü / toplam gün; gerçekleşen = Σ earned_hours (as_of'tan önceki günler); kalan gün = kalan saat / günlük kapasite — `progress.week_progress`
+- **Duruş**: beklenen dk = (nominal − verimli) × kişi × 60; fazla = gerçekleşen − beklenen; sebep payı ile fazla duruş dağıtımı — `analysis.downtime_analysis`
+- **Çevrim süresi önerisi**: etkin CT = reported_hours×3600/qty, yoksa (günlük verimli saat − fazla duruş) × (kazanılan saat payı) × 3600 / qty; medyan; min örnek + sapma eşiği — `analysis.cycle_time_suggestions`
+- **Terminleme**: gün gün boş kapasite (kapasite − haftalık plan/gün sayısı) tüketilir; verimli saat nominal mesai saatine oransal yayılır → saat:dakika — `planning.lead_time`
+
+## Excel Import Deseni (`services/excel.py`)
+- `TEMPLATES[kind]` = sütunlar (key, Türkçe başlık, alias'lar), örnek satır, zorunlu alanlar.
+- Başlık eşleme `norm()` ile (Türkçe karakter + boşluk/noktalama bağımsız).
+- Her tür için `import_<kind>(db, rows)` upsert; hatalar satır numarasıyla toplanır; `ImportLog` yazılır.
+- Yedek: her tablo bir sayfa, başlıklar şablonla aynı → yedekten geri yükleme mümkün.
+
+## Yetki
+- `require_user` (görüntüleme/rapor), `require_poweruser` (import, tanım, plan), `require_admin` (kullanıcılar). Frontend `can(role)` ile butonları gizler; asıl kontrol backend'de.
+
+## Tasarım Kararları
+- Plan granülerliği **hafta**; ilerleme granülerliği **gün**.
+- Setup süresi planlamada dahil, günlük üretimden "kazanılan saat"te hariç.
+- Pilot: planlanmayan iş merkezleri görünür ama otomatik plana girmez.

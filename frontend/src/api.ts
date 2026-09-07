@@ -1,0 +1,116 @@
+const TOKEN_KEY = "kp_token";
+
+export function getToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY);
+}
+export function setToken(t: string | null) {
+  if (t) localStorage.setItem(TOKEN_KEY, t);
+  else localStorage.removeItem(TOKEN_KEY);
+}
+
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function handle<T>(res: Response): Promise<T> {
+  if (res.status === 401) {
+    setToken(null);
+    window.location.href = "/login";
+  }
+  if (!res.ok) {
+    let msg = res.statusText;
+    try {
+      const body = await res.json();
+      msg = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail ?? body);
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(res.status, msg);
+  }
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
+}
+
+function headers(extra: Record<string, string> = {}): Record<string, string> {
+  const t = getToken();
+  return { ...(t ? { Authorization: `Bearer ${t}` } : {}), ...extra };
+}
+
+export function qs(params: Record<string, unknown>): string {
+  const p = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => {
+    if (v === undefined || v === null || v === "") return;
+    if (Array.isArray(v)) v.forEach((x) => p.append(k, String(x)));
+    else p.append(k, String(v));
+  });
+  const s = p.toString();
+  return s ? `?${s}` : "";
+}
+
+export const api = {
+  get: <T>(url: string) => fetch(url, { headers: headers() }).then((r) => handle<T>(r)),
+  post: <T>(url: string, body?: unknown) =>
+    fetch(url, { method: "POST", headers: headers({ "Content-Type": "application/json" }), body: body === undefined ? undefined : JSON.stringify(body) }).then((r) => handle<T>(r)),
+  put: <T>(url: string, body: unknown) =>
+    fetch(url, { method: "PUT", headers: headers({ "Content-Type": "application/json" }), body: JSON.stringify(body) }).then((r) => handle<T>(r)),
+  patch: <T>(url: string, body?: unknown) =>
+    fetch(url, { method: "PATCH", headers: headers({ "Content-Type": "application/json" }), body: body === undefined ? undefined : JSON.stringify(body) }).then((r) => handle<T>(r)),
+  del: <T>(url: string) => fetch(url, { method: "DELETE", headers: headers() }).then((r) => handle<T>(r)),
+  upload: <T>(url: string, file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return fetch(url, { method: "POST", headers: headers(), body: fd }).then((r) => handle<T>(r));
+  },
+  async login(username: string, password: string): Promise<string> {
+    const fd = new URLSearchParams({ username, password });
+    const res = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: fd });
+    const data = await handle<{ access_token: string }>(res);
+    return data.access_token;
+  },
+  async download(url: string, fallbackName = "rapor.xlsx") {
+    const res = await fetch(url, { headers: headers() });
+    if (!res.ok) throw new ApiError(res.status, await res.text());
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="?([^";]+)"?/.exec(cd);
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = m ? decodeURIComponent(m[1]) : fallbackName;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  },
+};
+
+// ---- Types ----
+export type Role = "admin" | "poweruser" | "user";
+export interface User { id: number; username: string; full_name: string; role: Role; is_active: boolean }
+export interface Shift { id?: number; work_center_id?: number; name: string; weekdays: string; start_time: string; end_time: string; headcount: number; efficient_hours_per_person: number | null }
+export interface WorkCenter { id: number; code: string; name: string; description: string; is_active: boolean; is_planned: boolean; capacity_unit_hours: number; default_efficient_hours: number; shifts: Shift[]; employee_count: number }
+export interface Employee { id: number; code: string; name: string; work_center_id: number | null; is_active: boolean }
+export interface Item { id: number; code: string; name: string; product_group: string; unit: string }
+export interface ItemDetail extends Item { bom_lines: { id: number; component_code: string; component_name: string; quantity: number; unit: string }[]; operations: { id: number; seq: number; operation_name: string; work_center_id: number; cycle_time_sec: number; setup_time_min: number }[] }
+export interface Order { id: number; order_no: string; customer: string; due_date: string; item_id: number; item_code: string; quantity: number; status: string }
+export interface Capacity { work_center_id: number; work_center_code: string; start: string; end: string; capacity_hours: number; capacity_units: number; unit_hours: number; days: { day: string; hours: number }[] }
+export interface WeekLoad { week_start: string; capacity_hours: number; planned_hours: number; utilization: number; capacity_units: number; planned_units: number }
+export interface WorkCenterLoad { work_center_id: number; work_center_code: string; weeks: WeekLoad[] }
+export interface PlanLine { id: number; order_id: number; order_no: string; customer: string; due_date: string; item_code: string; operation_id: number; operation_seq: number; work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; planned_qty: number; mode: string }
+export interface Progress { work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; expected_hours_to_date: number; actual_hours_to_date: number; remaining_hours: number; remaining_days: number; working_days: number; elapsed_days: number; status: string }
+export interface ImportKind { kind: string; title: string; columns: string[]; required: string[] }
+export interface ImportResult { kind: string; inserted: number; updated: number; errors: string[] }
+
+export function mondayOf(d: Date): string {
+  const x = new Date(d);
+  const day = (x.getDay() + 6) % 7;
+  x.setDate(x.getDate() - day);
+  return x.toISOString().slice(0, 10);
+}
+export function addDays(iso: string, n: number): string {
+  const d = new Date(iso);
+  d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+export const fmt = (n: number | null | undefined, digits = 1) => (n === null || n === undefined ? "-" : n.toLocaleString("tr-TR", { maximumFractionDigits: digits }));

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type WorkCenter } from "./api";
+import { api, isoWeekInputValue, mondayFromIsoWeek, weekLabel, type WorkCenter } from "./api";
 
 export function useWorkCenters() {
   const [wcs, setWcs] = useState<WorkCenter[]>([]);
@@ -133,6 +133,19 @@ export function StatusBadge({ s }: { s: string }) {
   };
   const [cls, label] = map[s] ?? ["muted", s];
   return <span className={`badge ${cls}`}>{label}</span>;
+}
+
+/** Yalnizca ISO hafta secimi (gun takvimi yok). value = Pazartesi YYYY-MM-DD. */
+export function WeekPicker({ value, onChange, label = "Hafta" }: { value: string; onChange: (mondayIso: string) => void; label?: string }) {
+  return (
+    <label>
+      {label}
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <input type="week" value={isoWeekInputValue(value)} onChange={(e) => onChange(mondayFromIsoWeek(e.target.value))} />
+        <span className="muted">{weekLabel(value)}</span>
+      </div>
+    </label>
+  );
 }
 
 export function ErrorText({ err }: { err: string }) {

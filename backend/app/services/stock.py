@@ -15,7 +15,7 @@ Manuel rezervasyon onceliklidir: serbest stok yetmezse ayni urunun OTOMATIK reze
 from collections import defaultdict
 from datetime import date
 
-from sqlalchemy import func, or_
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import Item, Order, ProductionActual, Reservation, RoutingOperation, Shipment, StockReceipt
@@ -180,30 +180,51 @@ def delete_receipt(db: Session, receipt_id: int) -> None:
 
 # ---------------- uretim -> depo (otomatik) ----------------
 
-def _last_operation(db: Session, item_id: int) -> RoutingOperation | None:
+def _operations(db: Session, item_id: int) -> list[RoutingOperation]:
     return (
         db.query(RoutingOperation)
         .filter(RoutingOperation.item_id == item_id)
-        .order_by(RoutingOperation.seq.desc())
-        .first()
+        .order_by(RoutingOperation.seq)
+        .all()
     )
+
+
+def _op_production_totals(db: Session, item_id: int) -> dict[int, float]:
+    """Operasyon bazinda toplam uretim beyani (yarimamul/seq/is merkezi ile eslesir)."""
+    from app.services.wip import resolve_wip, wip_index
+
+    ops = _operations(db, item_id)
+    if not ops:
+        return {}
+    totals = {op.id: 0.0 for op in ops}
+    item = db.get(Item, item_id)
+    wip_idx = wip_index(db)
+    for a in db.query(ProductionActual).filter(ProductionActual.item_id == item_id).all():
+        op_id = None
+        if a.semi_finished_code:
+            try:
+                op_id = resolve_wip(db, a.semi_finished_code, item.code if item else None, wip_idx).id
+            except ValueError:
+                pass
+        if op_id is None and a.operation_seq is not None:
+            op = next((o for o in ops if o.seq == a.operation_seq), None)
+            op_id = op.id if op else None
+        if op_id is None:
+            op = next((o for o in ops if o.work_center_id == a.work_center_id), None)
+            op_id = op.id if op else None
+        if op_id in totals:
+            totals[op_id] += float(a.quantity or 0)
+    return totals
 
 
 def _finished_qty_from_production(db: Session, item_id: int) -> float:
-    """Son operasyon (en buyuk sira) uretim beyanlarinin toplami = bitmis urun."""
-    last = _last_operation(db, item_id)
-    if not last:
+    """Tum operasyonlar zincirle ilerlemeli: bitmis urun = operasyonlarin dar bogaz miktari."""
+    ops = _operations(db, item_id)
+    if not ops:
         return 0.0
-    conds = []
-    if last.semi_finished_code:
-        conds.append(ProductionActual.semi_finished_code == last.semi_finished_code)
-    conds.append(ProductionActual.operation_seq == last.seq)
-    total = (
-        db.query(func.sum(ProductionActual.quantity))
-        .filter(ProductionActual.item_id == item_id, or_(*conds))
-        .scalar()
-    )
-    return float(total or 0.0)
+    totals = _op_production_totals(db, item_id)
+    qtys = [totals.get(op.id, 0.0) for op in ops]
+    return min(qtys) if qtys else 0.0
 
 
 def _progress_receipt_qty(db: Session, item_id: int) -> float:
@@ -246,14 +267,14 @@ def _trim_progress_receipts(db: Session, item_id: int, amount: float) -> None:
 
 
 def sync_progress_receipts(db: Session, item_ids: list[int] | None = None, username: str = "system") -> dict:
-    """Son operasyon uretim beyanlarini bitmis urun depo girisine yansitir (source=progress)."""
+    """Rota zincirindeki operasyon beyanlarinin dar bogazini bitmis urun depo girisine yansitir."""
     if item_ids:
         ids = list(item_ids)
     else:
         ids = [i for (i,) in db.query(ProductionActual.item_id).distinct().all()]
     added = adjusted = 0
     for iid in ids:
-        if not _last_operation(db, iid):
+        if not _operations(db, iid):
             continue
         target = _finished_qty_from_production(db, iid)
         current = _progress_receipt_qty(db, iid)
@@ -267,7 +288,7 @@ def sync_progress_receipts(db: Session, item_ids: list[int] | None = None, usern
                     receipt_date=date.today(),
                     quantity=delta,
                     lot="",
-                    note="otomatik: son operasyon uretim beyani",
+                    note="otomatik: tum operasyonlar tamam (dar bogaz)",
                     source="progress",
                     created_by=username,
                 )

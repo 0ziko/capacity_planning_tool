@@ -197,3 +197,22 @@ export function weekLabel(iso: string, withYear = false): string {
 export const shortDate = (iso: string) => `${iso.slice(8, 10)}.${iso.slice(5, 7)}`;
 /** "H37 · 07.09" — hafta numarası + Pazartesi tarihi. */
 export const weekLong = (iso: string) => `${weekLabel(iso)} · ${shortDate(iso)}`;
+
+/** ISO hafta input değeri: "2026-W37" */
+export function isoWeekInputValue(mondayIso: string): string {
+  const { year, week } = isoWeek(mondayIso);
+  return `${year}-W${String(week).padStart(2, "0")}`;
+}
+
+/** ISO hafta input → o haftanın Pazartesi tarihi (YYYY-MM-DD). */
+export function mondayFromIsoWeek(value: string): string {
+  const m = /^(\d{4})-W(\d{1,2})$/.exec(value);
+  if (!m) return mondayOf(new Date());
+  const year = Number(m[1]);
+  const week = Number(m[2]);
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const dow = jan4.getUTCDay() || 7;
+  const monday = new Date(jan4);
+  monday.setUTCDate(jan4.getUTCDate() - dow + 1 + (week - 1) * 7);
+  return monday.toISOString().slice(0, 10);
+}

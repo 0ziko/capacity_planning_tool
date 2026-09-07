@@ -221,7 +221,7 @@ def test_stock_reservations_and_shipping(client, auth):
 
 
 def test_production_creates_finished_stock(client, auth):
-    """Son operasyon uretim beyani otomatik depo girisi olusturur."""
+    """Tum operasyonlar beyan edildiginde dar bogaz kadar otomatik depo girisi olusur."""
     wk = _monday()
     _upload(client, auth, "workcenters", ["İş Merkezi Kodu", "İş Merkezi Adı", "Planlanıyor (E/H)", "Kişi Başı Verimli Saat"], [["STK-1", "Stok IM", "E", 8]])
     _upload(client, auth, "employees", ["Sicil No", "Ad Soyad", "İş Merkezi Kodu"], [["S1", "A", "STK-1"]])
@@ -240,3 +240,19 @@ def test_production_creates_finished_stock(client, auth):
     rcpts = client.get("/api/stock/receipts", headers=auth, params={"item_id": row["item_id"]}).json()
     assert len(rcpts) == 1 and rcpts[0]["source"] == "progress" and rcpts[0]["quantity"] == 40
     assert client.delete(f"/api/stock/receipts/{rcpts[0]['id']}", headers=auth).status_code == 400
+
+
+def test_last_op_only_no_auto_stock(client, auth):
+    """Yalnizca son operasyon beyani (onceki ops yok) otomatik stok olusturmaz."""
+    wk = _monday()
+    _upload(client, auth, "workcenters", ["İş Merkezi Kodu", "İş Merkezi Adı", "Planlanıyor (E/H)", "Kişi Başı Verimli Saat"], [["STK-2", "Stok2", "E", 8]])
+    _upload(client, auth, "employees", ["Sicil No", "Ad Soyad", "İş Merkezi Kodu"], [["S2", "B", "STK-2"]])
+    _upload(client, auth, "items", ["Stok Kodu", "Ürün Grubu"], [["STK-M2", "GN"]])
+    _upload(
+        client, auth, "routing",
+        ["Stok Kodu", "Sıra", "Operasyon", "İş Merkezi Kodu", "Çevrim Süresi (sn)", "Yarımamül Kodu"],
+        [["STK-M2", 10, "OP1", "STK-2", 36, "STK-M2-10"], ["STK-M2", 20, "OP2", "STK-2", 36, "STK-M2-20"]],
+    )
+    _upload(client, auth, "production", ["Tarih", "Yarımamül Kodu", "Miktar"], [[wk, "STK-M2-20", 100]])
+    rows = client.get("/api/stock/summary", headers=auth).json()
+    assert not any(x["item_code"] == "STK-M2" for x in rows)

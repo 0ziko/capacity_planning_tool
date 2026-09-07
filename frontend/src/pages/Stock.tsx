@@ -50,8 +50,8 @@ export default function Stock() {
     <>
       <h1>Stok & Rezervasyon</h1>
       <p className="muted" style={{ marginTop: -6 }}>
-        Sipariş plana <b>termini</b> verir; üretim siparişten bağımsız ilerler. Son operasyon (ör. paketleme) üretim beyanı otomatik olarak <b>depoya girer</b>;
-        ek olarak manuel depo girişi/çıkışı yapabilirsiniz. Depodaki ürün siparişe <b>rezerve</b> edilir:
+        Sipariş plana <b>termini</b> verir; üretim siparişten bağımsız ilerler. Otomatik depo girişi yalnızca <b>tüm operasyonlar zincirle beyan edildiyse</b> oluşur (dar boğaz miktarı);
+        ara operasyon atlandıysa veya yarı mamul stoktan karşılandıysa <b>manuel depo girişi</b> kullanın. Depodaki ürün siparişe <b>rezerve</b> edilir:
         önce takip etmek istediğiniz kritik siparişleri <b>manuel</b> rezerve edin, kalanı için <b>otomatik rezervasyon</b> serbest stoğu termin sırasıyla dağıtır.
         Manuel rezervasyon önceliklidir (yer açmak için otomatik rezervasyonlar çözülür, manuel olanlara dokunulmaz). Sevk ile stoktan düşer; sipariş tamamen sevk edilince kapanır.
       </p>
@@ -325,7 +325,7 @@ function Receipts({ canEdit, onChanged }: { canEdit: boolean; onChanged: () => v
   };
   return (
     <>
-      <p className="muted" style={{ margin: "8px 0" }}>Bitmiş ürün depoya girişi: son operasyon üretim beyanı otomatik kayıt oluşturur (<b>Üretim</b> kaynağı). İsteğe bağlı manuel giriş/Excel de kullanılabilir. Siparişe hangi stok gideceği rezervasyonla belirlenir.</p>
+      <p className="muted" style={{ margin: "8px 0" }}>Otomatik giriş (<b>Üretim</b>): rota zincirindeki tüm operasyonların beyan edilmiş olması gerekir; stok = en düşük operasyon miktarı (dar boğaz). Eksik/atlama durumunda manuel giriş veya Excel kullanın.</p>
       <ErrorText err={err || rows.err} />
       <div className="table-wrap">
         <table>

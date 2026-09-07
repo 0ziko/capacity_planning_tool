@@ -1,6 +1,6 @@
-import { useState } from "react";
-import { api, fmt, mondayOf, qs, shortDate, weekLabel, type Progress, type WorkCenterLoad } from "../api";
-import { Bar, ErrorText, StatusBadge, UtilBadge, useAsync } from "../components";
+import { Fragment, useState } from "react";
+import { api, fmt, mondayOf, qs, weekLabel, type Progress, type WorkCenterLoad } from "../api";
+import { Bar, ErrorText, StatusBadge, UtilBadge, useAsync, WeekPicker } from "../components";
 
 export default function Dashboard() {
   const [week, setWeek] = useState(mondayOf(new Date()));
@@ -10,15 +10,13 @@ export default function Dashboard() {
   const totalCap = load.data?.reduce((s, w) => s + (w.weeks[0]?.capacity_hours ?? 0), 0) ?? 0;
   const totalPlan = load.data?.reduce((s, w) => s + (w.weeks[0]?.planned_hours ?? 0), 0) ?? 0;
   const planned = load.data?.filter((w) => w.weeks.some((x) => x.planned_hours > 0)).length ?? 0;
+  const weekCols = load.data?.[0]?.weeks ?? [];
 
   return (
     <>
       <h1>Özet</h1>
       <div className="panel row">
-        <label>
-          Hafta (Pazartesi)
-          <input type="date" value={week} onChange={(e) => setWeek(mondayOf(new Date(e.target.value)))} />
-        </label>
+        <WeekPicker value={week} onChange={setWeek} />
       </div>
       <div className="grid">
         <div className="panel kpi"><span className="v">{fmt(totalCap, 0)} saat</span><span className="l">Bu hafta toplam verimli kapasite</span></div>
@@ -30,11 +28,23 @@ export default function Dashboard() {
       <h2>İş merkezi bazında 4 haftalık yük</h2>
       <ErrorText err={load.err} />
       <div className="table-wrap">
-        <table>
+        <table className="dash-load">
           <thead>
             <tr>
-              <th>İş Merkezi</th>
-              {load.data?.[0]?.weeks.map((w) => <th key={w.week_start} colSpan={2} title={`Hafta başlangıcı (Pzt): ${w.week_start}`}>{weekLabel(w.week_start)} <span className="muted" style={{ fontWeight: 400, fontSize: 11 }}>{shortDate(w.week_start)}</span></th>)}
+              <th rowSpan={2}>İş Merkezi</th>
+              {weekCols.map((w) => (
+                <th key={w.week_start} colSpan={2} className="dash-week-h" title={`Hafta başlangıcı (Pzt): ${w.week_start}`}>
+                  {weekLabel(w.week_start, true)}
+                </th>
+              ))}
+            </tr>
+            <tr>
+              {weekCols.map((w) => (
+                <Fragment key={`${w.week_start}-sub`}>
+                  <th className="num muted dash-sub-h">Saat</th>
+                  <th className="muted dash-sub-h">Doluluk</th>
+                </Fragment>
+              ))}
             </tr>
           </thead>
           <tbody>
@@ -79,10 +89,10 @@ export default function Dashboard() {
 function WeekCells({ w }: { w: { capacity_hours: number; planned_hours: number; utilization: number; planned_units: number; capacity_units: number } }) {
   return (
     <>
-      <td className="num" title={`${fmt(w.planned_units)} / ${fmt(w.capacity_units)} birim`}>
+      <td className="num dash-hours" title={`${fmt(w.planned_units)} / ${fmt(w.capacity_units)} birim`}>
         {fmt(w.planned_hours, 0)} / {fmt(w.capacity_hours, 0)} sa
       </td>
-      <td style={{ minWidth: 120 }}>
+      <td className="dash-bar">
         <Bar ratio={w.utilization} /> <UtilBadge u={w.utilization} />
       </td>
     </>

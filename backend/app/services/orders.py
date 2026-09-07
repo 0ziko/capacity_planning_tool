@@ -302,7 +302,7 @@ def order_progress(db: Session, wc_ids: list[int] | None, as_of: date | None = N
                 OrderProgressOp(
                     operation_seq=op.seq,
                     operation_name=op.operation_name,
-                    work_center_code=op.work_center.code,
+                    work_center_code=op.work_center.code if op.work_center else "(silinmiş İM)",
                     required_hours=round(req, 2),
                     planned_hours=round(planned.get((o.id, op.id), 0.0), 2),
                     produced_qty=round(pq, 2),

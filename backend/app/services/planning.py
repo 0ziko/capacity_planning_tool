@@ -250,6 +250,8 @@ def plan_lines(db: Session, wc_ids: list[int] | None, start: date | None, end: d
         q = q.filter(PlanLine.week_start <= end)
     out = []
     for pl in q.order_by(PlanLine.week_start, PlanLine.work_center_id, PlanLine.id).all():
+        if pl.order is None or pl.operation is None or pl.work_center is None:
+            continue  # bagli kayit silinmis (yetim plan satiri)
         out.append(
             PlanLineOut(
                 id=pl.id,

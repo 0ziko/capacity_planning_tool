@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -6,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import auth, imports, master, planning
 from app.core.config import get_settings
 from app.core.security import hash_password
-from app.db.migrate import ensure_columns
+from app.db.migrate import ensure_columns, repair_orphans
 from app.db.session import Base, SessionLocal, engine
 from app.models import User
 
@@ -26,6 +27,9 @@ def seed_admin() -> None:
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     ensure_columns(engine)
+    removed = repair_orphans(engine)
+    if removed:
+        logging.getLogger("uvicorn.error").warning("Yetim kayitlar temizlendi: %s", removed)
     seed_admin()
     yield
 

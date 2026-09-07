@@ -152,7 +152,7 @@ def cycle_time_suggestions(db: Session, wc_ids: list[int] | None, start: date | 
     out = []
     for (item_id, wc_id, seq), cts in samples.items():
         op = op_map.get((item_id, wc_id, seq)) if seq is not None else op_by_item_wc.get((item_id, wc_id))
-        if not op or op.cycle_time_sec <= 0:
+        if not op or op.cycle_time_sec <= 0 or op.work_center is None:
             continue
         med = median(cts)
         dev_pct = (med - op.cycle_time_sec) / op.cycle_time_sec * 100

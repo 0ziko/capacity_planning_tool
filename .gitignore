@@ -7,3 +7,5 @@ backend/.pytest_cache/
 node_modules/
 frontend/dist/
 .vite/
+
+backend/logs/

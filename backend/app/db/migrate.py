@@ -41,3 +41,37 @@ def ensure_columns(engine: Engine) -> list[str]:
                 conn.execute(text(ddl))
                 added.append(f"{table.name}.{col.name}")
     return added
+
+
+# (tablo, kolon, referans tablo) — silinmis ana kayda isaret eden yetim satirlar.
+# SQLite'ta yabanci anahtar denetimi acilmadan once olusmus olabilirler; ekranlari bozar (500).
+_ORPHAN_CHECKS = [
+    ("routing_operations", "work_center_id", "work_centers"),
+    ("routing_operations", "item_id", "items"),
+    ("bom_lines", "item_id", "items"),
+    ("work_center_shifts", "work_center_id", "work_centers"),
+    ("plan_lines", "work_center_id", "work_centers"),
+    ("plan_lines", "order_id", "orders"),
+    ("plan_lines", "operation_id", "routing_operations"),
+    ("production_actuals", "work_center_id", "work_centers"),
+    ("downtimes", "work_center_id", "work_centers"),
+]
+
+
+def repair_orphans(engine: Engine) -> dict[str, int]:
+    """Ana kaydi silinmis yetim satirlari temizler; tablo -> silinen satir sayisi dondurur."""
+    insp = inspect(engine)
+    removed: dict[str, int] = {}
+    with engine.begin() as conn:
+        for table, col, ref in _ORPHAN_CHECKS:
+            if not insp.has_table(table) or not insp.has_table(ref):
+                continue
+            res = conn.execute(text(f"DELETE FROM {table} WHERE {col} IS NOT NULL AND {col} NOT IN (SELECT id FROM {ref})"))
+            if res.rowcount:
+                removed[f"{table}.{col}"] = removed.get(f"{table}.{col}", 0) + res.rowcount
+        # calisani silinmis is merkezinden ayir
+        if insp.has_table("employees"):
+            res = conn.execute(text("UPDATE employees SET work_center_id = NULL WHERE work_center_id IS NOT NULL AND work_center_id NOT IN (SELECT id FROM work_centers)"))
+            if res.rowcount:
+                removed["employees.work_center_id"] = res.rowcount
+    return removed

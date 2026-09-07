@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.deps import require_poweruser, require_user
 from app.db.session import get_db
-from app.models import Employee, Item, Order, PlanLine, WorkCenter, WorkCenterShift
+from app.models import Downtime, Employee, Item, Order, PlanLine, ProductionActual, RoutingOperation, WorkCenter, WorkCenterShift
 from app.schemas import (
     EmployeeIn,
     EmployeeOut,
@@ -68,7 +68,22 @@ def delete_workcenter(wc_id: int, db: Session = Depends(get_db), _=Depends(requi
     wc = db.get(WorkCenter, wc_id)
     if not wc:
         raise HTTPException(404, "Is merkezi bulunamadi")
-    db.delete(wc)
+    # Bagli kayitlar varsa silme: yetim rota/plan/uretim kaydi olusur ve ekranlar bozulur.
+    deps = {
+        "rota operasyonu": db.query(func.count(RoutingOperation.id)).filter(RoutingOperation.work_center_id == wc_id).scalar(),
+        "plan satırı": db.query(func.count(PlanLine.id)).filter(PlanLine.work_center_id == wc_id).scalar(),
+        "üretim kaydı": db.query(func.count(ProductionActual.id)).filter(ProductionActual.work_center_id == wc_id).scalar(),
+        "duruş kaydı": db.query(func.count(Downtime.id)).filter(Downtime.work_center_id == wc_id).scalar(),
+    }
+    used = [f"{n} {k}" for k, n in deps.items() if n]
+    if used:
+        raise HTTPException(
+            400,
+            f"'{wc.code}' silinemez; bağlı kayıtlar var: {', '.join(used)}. "
+            "Önce bu kayıtları silin/taşıyın ya da iş merkezini 'Pasif' yapın (Aktif işaretini kaldırın).",
+        )
+    db.query(Employee).filter(Employee.work_center_id == wc_id).update({Employee.work_center_id: None}, synchronize_session=False)
+    db.delete(wc)  # vardiyalar cascade ile silinir
     db.commit()
 
 

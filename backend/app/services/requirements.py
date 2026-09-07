@@ -46,8 +46,8 @@ def requirement_lines(db: Session, q: RequirementQuery) -> list[RequirementLine]
     for item in items:
         qty = qty_by_code[item.code]
         for op in item.operations:
-            if wc_filter and op.work_center_id not in wc_filter:
-                continue
+            if (wc_filter and op.work_center_id not in wc_filter) or op.work_center is None:
+                continue  # silinmis is merkezine bagli (yetim) operasyonlar hesaba girmez
             lines.append(
                 RequirementLine(
                     work_center_id=op.work_center_id,
@@ -79,7 +79,7 @@ def item_total_hours(db: Session, item_code: str, quantity: float) -> dict:
         {
             "seq": op.seq,
             "operation_name": op.operation_name,
-            "work_center_code": op.work_center.code,
+            "work_center_code": op.work_center.code if op.work_center else "(silinmiş İM)",
             "cycle_time_sec": op.cycle_time_sec,
             "setup_time_min": op.setup_time_min,
             "hours": round(op.hours_for(quantity), 3),

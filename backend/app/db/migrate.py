@@ -56,6 +56,13 @@ _ORPHAN_CHECKS = [
     ("production_actuals", "work_center_id", "work_centers"),
     ("downtimes", "work_center_id", "work_centers"),
     ("machines", "work_center_id", "work_centers"),
+    ("work_center_weeks", "work_center_id", "work_centers"),
+    ("op_transition_rules", "item_id", "items"),
+    ("stock_receipts", "item_id", "items"),
+    ("reservations", "item_id", "items"),
+    ("reservations", "order_id", "orders"),
+    ("shipments", "item_id", "items"),
+    ("shipments", "order_id", "orders"),
 ]
 
 

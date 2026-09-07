@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, imports, master, planning
+from app.api import auth, imports, master, planning, scenarios, stock
 from app.core.config import get_settings
 from app.core.security import hash_password
 from app.db.migrate import ensure_columns, repair_orphans
@@ -49,6 +49,8 @@ app.include_router(auth.router)
 app.include_router(master.router)
 app.include_router(planning.router)
 app.include_router(imports.router)
+app.include_router(scenarios.router)
+app.include_router(stock.router)
 
 
 @app.get("/api/health")

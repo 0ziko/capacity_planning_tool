@@ -1,6 +1,6 @@
 """Is merkezleri, vardiyalar, personel, stok/BOM/rota, siparisler."""
 
-from datetime import date
+from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.deps import require_poweruser, require_user
 from app.db.session import get_db
-from app.models import Downtime, Employee, Item, Machine, Order, PlanLine, ProductionActual, RoutingOperation, WorkCenter, WorkCenterShift
+from app.models import Downtime, Employee, Item, Machine, Order, PlanLine, ProductionActual, RoutingOperation, WorkCenter, WorkCenterShift, WorkCenterWeek
 from app.schemas import (
     EmployeeIn,
     EmployeeOut,
@@ -20,6 +20,8 @@ from app.schemas import (
     OrderOut,
     ShiftIn,
     ShiftOut,
+    WcWeekIn,
+    WcWeekOut,
     WorkCenterIn,
     WorkCenterOut,
 )
@@ -115,6 +117,73 @@ def delete_workcenter(wc_id: int, db: Session = Depends(get_db), _=Depends(requi
     db.query(Employee).filter(Employee.work_center_id == wc_id).update({Employee.work_center_id: None, Employee.machine_id: None}, synchronize_session=False)
     db.delete(wc)  # vardiyalar ve makineler cascade ile silinir
     db.commit()
+
+
+# ---- Haftalik is gucu (is merkezi x hafta istisnalari) ----
+def _week_out(db: Session, wc: WorkCenter, wk: date) -> WcWeekOut:
+    p = capacity.week_profile(db, wc, wk)
+    ov = p.pop("override")
+    return WcWeekOut(
+        work_center_id=wc.id,
+        **p,
+        has_override=ov is not None,
+        ov_headcount=ov.headcount if ov else None,
+        ov_efficient_hours_per_person=ov.efficient_hours_per_person if ov else None,
+        ov_working_days=ov.working_days if ov else None,
+        note=ov.note if ov else "",
+    )
+
+
+@router.get("/workcenters/{wc_id}/weeks", response_model=list[WcWeekOut])
+def list_wc_weeks(wc_id: int, start: date = Query(...), weeks: int = Query(12, ge=1, le=60), db: Session = Depends(get_db), _=Depends(require_user)):
+    wc = db.get(WorkCenter, wc_id)
+    if not wc:
+        raise HTTPException(404, "Is merkezi bulunamadi")
+    wk0 = capacity.week_start(start)
+    return [_week_out(db, wc, wk0 + timedelta(weeks=i)) for i in range(weeks)]
+
+
+@router.put("/workcenters/{wc_id}/weeks/{week}", response_model=WcWeekOut)
+def upsert_wc_week(wc_id: int, week: date, data: WcWeekIn, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    wc = db.get(WorkCenter, wc_id)
+    if not wc:
+        raise HTTPException(404, "Is merkezi bulunamadi")
+    wk = capacity.week_start(week)
+    row = db.query(WorkCenterWeek).filter(WorkCenterWeek.work_center_id == wc_id, WorkCenterWeek.week_start == wk).first()
+    empty = data.headcount is None and data.efficient_hours_per_person is None and data.working_days is None and not data.note.strip()
+    if empty:
+        if row:
+            db.delete(row)
+    else:
+        if not row:
+            row = WorkCenterWeek(work_center_id=wc_id, week_start=wk)
+            db.add(row)
+        row.headcount = data.headcount
+        row.efficient_hours_per_person = data.efficient_hours_per_person
+        row.working_days = data.working_days
+        row.note = data.note.strip()
+    db.commit()
+    return _week_out(db, wc, wk)
+
+
+@router.delete("/workcenters/{wc_id}/weeks/{week}", status_code=204)
+def delete_wc_week(wc_id: int, week: date, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    wk = capacity.week_start(week)
+    db.query(WorkCenterWeek).filter(WorkCenterWeek.work_center_id == wc_id, WorkCenterWeek.week_start == wk).delete(synchronize_session=False)
+    db.commit()
+
+
+@router.get("/wc-weeks", response_model=list[WcWeekOut])
+def list_all_wc_weeks(start: date = Query(...), weeks: int = Query(12, ge=1, le=60), work_center_ids: list[int] | None = Query(None), db: Session = Depends(get_db), _=Depends(require_user)):
+    """Tum (veya secili) aktif is merkezleri icin hafta profili — planlama ekraninda 'haftalik is gucu' gorunumu."""
+    q = db.query(WorkCenter).filter(WorkCenter.is_active.is_(True))
+    if work_center_ids:
+        q = q.filter(WorkCenter.id.in_(work_center_ids))
+    wk0 = capacity.week_start(start)
+    out = []
+    for wc in q.order_by(WorkCenter.code).all():
+        out.extend(_week_out(db, wc, wk0 + timedelta(weeks=i)) for i in range(weeks))
+    return out
 
 
 # ---- Machines (is merkezi altindaki makineler) ----

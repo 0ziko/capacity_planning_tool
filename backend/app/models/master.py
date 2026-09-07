@@ -1,8 +1,8 @@
 """Master data: is merkezleri, vardiyalar, personel, stok kodlari, BOM, rota."""
 
-from datetime import time
+from datetime import date, time
 
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Time, UniqueConstraint
+from sqlalchemy import Boolean, Date, Float, ForeignKey, Integer, String, Time, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -35,6 +35,25 @@ class WorkCenter(Base):
     )
     employees: Mapped[list["Employee"]] = relationship(back_populates="work_center", foreign_keys="Employee.work_center_id")
     machines: Mapped[list["Machine"]] = relationship(back_populates="work_center", cascade="all, delete-orphan", order_by="Machine.code")
+
+
+class WorkCenterWeek(Base):
+    """Haftalik is gucu istisnasi: belirli bir haftada kisi sayisi / kisi basi verimli saat /
+    calisma gunu sayisi farkliysa buraya yazilir. Bos (None) alanlar varsayilan (vardiya, personel,
+    makine atamasi) davranisi korur. Kapasite, plan, terminleme ve durus analizi bu degerleri kullanir."""
+
+    __tablename__ = "work_center_weeks"
+    __table_args__ = (UniqueConstraint("work_center_id", "week_start", name="uq_wc_week"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    work_center_id: Mapped[int] = mapped_column(ForeignKey("work_centers.id", ondelete="CASCADE"), index=True)
+    week_start: Mapped[date] = mapped_column(Date, index=True)  # Pazartesi
+    headcount: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    efficient_hours_per_person: Mapped[float | None] = mapped_column(Float, nullable=True)
+    working_days: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 0..7; None => vardiya gunleri
+    note: Mapped[str] = mapped_column(String(256), default="")
+
+    work_center: Mapped[WorkCenter] = relationship()
 
 
 class Machine(Base):
@@ -145,9 +164,59 @@ class RoutingOperation(Base):
     work_center_id: Mapped[int] = mapped_column(ForeignKey("work_centers.id"), index=True)
     cycle_time_sec: Mapped[float] = mapped_column(Float, default=0.0)
     setup_time_min: Mapped[float] = mapped_column(Float, default=0.0)
+    semi_finished_code: Mapped[str] = mapped_column(String(64), default="", index=True)  # operasyon sonu yarımamül
 
     item: Mapped[Item] = relationship(back_populates="operations")
     work_center: Mapped[WorkCenter] = relationship()
 
     def hours_for(self, quantity: float) -> float:
         return quantity * self.cycle_time_sec / 3600.0 + self.setup_time_min / 60.0
+
+
+def norm_op(name: str) -> str:
+    """Operasyon adini kural eslemesi icin normalize eder (buyuk/kucuk harf, bosluk, Turkce karakter)."""
+    tr = str.maketrans("çğıöşüÇĞİÖŞÜ", "cgiosuCGIOSU")
+    return " ".join(str(name or "").translate(tr).lower().split())
+
+
+def norm_wip(code: str) -> str:
+    """Yarimamul kodu eslemesi: bosluk kirp, buyuk harf."""
+    return str(code or "").strip().upper()
+
+
+class OpTransitionRule(Base):
+    """Senaryo matrisi: iki ardisik operasyon arasinda sonraki operasyonun ne zaman baslayabilecegi.
+
+    scope: 'group' (urun grubu geneli) veya 'item' (stok koduna ozel; grup kuralini ezer)
+    rule:  'finish' -> onceki operasyon bitince (+ bekleme)
+           'cycles' -> onceki operasyon lag_cycles cevrim (adet) tamamlayinca (+ bekleme); 0 = birlikte basla
+    wait_minutes: tetikten sonra ek bekleme (kuruma, sogutma, tasima vb.)
+    from_op / to_op: operasyon adi (normalize edilerek eslenir) — farkli stoklarin farkli seq'leri olabildigi icin ad kullanilir.
+    """
+
+    __tablename__ = "op_transition_rules"
+    __table_args__ = (
+        UniqueConstraint(
+            "scope", "product_group", "item_id", "from_op_norm", "to_op_norm", "from_wip_norm", "to_wip_norm",
+            name="uq_op_rule",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scope: Mapped[str] = mapped_column(String(8), default="group")  # group / item
+    product_group: Mapped[str] = mapped_column(String(64), default="", index=True)
+    item_id: Mapped[int | None] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"), nullable=True, index=True)
+    from_op: Mapped[str] = mapped_column(String(128))
+    to_op: Mapped[str] = mapped_column(String(128))
+    from_op_norm: Mapped[str] = mapped_column(String(128), index=True)
+    to_op_norm: Mapped[str] = mapped_column(String(128), index=True)
+    from_wip_code: Mapped[str] = mapped_column(String(64), default="")  # opsiyonel; operasyon + yarimamul birlikte
+    to_wip_code: Mapped[str] = mapped_column(String(64), default="")
+    from_wip_norm: Mapped[str] = mapped_column(String(64), default="", index=True)
+    to_wip_norm: Mapped[str] = mapped_column(String(64), default="", index=True)
+    rule: Mapped[str] = mapped_column(String(8), default="finish")  # finish / cycles
+    lag_cycles: Mapped[float] = mapped_column(Float, default=0.0)
+    wait_minutes: Mapped[float] = mapped_column(Float, default=0.0)
+    note: Mapped[str] = mapped_column(String(256), default="")
+
+    item = relationship("Item")

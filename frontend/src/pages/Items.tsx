@@ -19,7 +19,7 @@ export default function Items() {
       <h1>Stok / BOM / Rota</h1>
       <div className="panel row">
         <label>Ara<input value={q} onChange={(e) => setQ(e.target.value)} placeholder="stok kodu, ad, grup" /></label>
-        <span className="muted">BOM ve rota verileri Excel import ile yüklenir.</span>
+        <span className="muted">BOM ve rota verileri Excel import ile yüklenir. Her operasyon için yarımamül kodu rota şablonunda tanımlanır.</span>
       </div>
       <ErrorText err={list.err || detail.err} />
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 14 }}>
@@ -46,13 +46,13 @@ export default function Items() {
                   <div className="kpi"><span className="v">{fmt(hours.data?.total_hours, 2)} saat</span><span className="l">Toplam iş gücü ihtiyacı</span></div>
                 </div>
                 <table>
-                  <thead><tr><th>Sıra</th><th>Operasyon</th><th>İş Merkezi</th><th className="num">Çevrim (sn)</th><th className="num">Setup (dk)</th><th className="num">Saat ({qty} adet)</th></tr></thead>
+                  <thead><tr><th>Sıra</th><th>Operasyon</th><th>Yarımamül Kodu</th><th>İş Merkezi</th><th className="num">Çevrim (sn)</th><th className="num">Setup (dk)</th><th className="num">Saat ({qty} adet)</th></tr></thead>
                   <tbody>
                     {detail.data.operations.map((op) => {
                       const h = hours.data?.operations.find((o) => o.seq === op.seq)?.hours;
-                      return <tr key={op.id}><td>{op.seq}</td><td>{op.operation_name}</td><td>{wcCode(op.work_center_id)}</td><td className="num">{fmt(op.cycle_time_sec)}</td><td className="num">{fmt(op.setup_time_min)}</td><td className="num">{fmt(h, 2)}</td></tr>;
+                      return <tr key={op.id}><td>{op.seq}</td><td>{op.operation_name}</td><td><code>{op.semi_finished_code || "—"}</code></td><td>{wcCode(op.work_center_id)}</td><td className="num">{fmt(op.cycle_time_sec)}</td><td className="num">{fmt(op.setup_time_min)}</td><td className="num">{fmt(h, 2)}</td></tr>;
                     })}
-                    {detail.data.operations.length === 0 && <tr><td colSpan={6} className="muted">Rota tanımı yok</td></tr>}
+                    {detail.data.operations.length === 0 && <tr><td colSpan={7} className="muted">Rota tanımı yok</td></tr>}
                   </tbody>
                 </table>
               </div>

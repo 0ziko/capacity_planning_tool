@@ -14,16 +14,17 @@
 backend/app/
   core/    config.py (pydantic-settings), security.py (bcrypt+JWT), deps.py (get_current_user, require_role)
   db/      session.py (Base, engine, SessionLocal, get_db)
-  models/  user.py · master.py (WorkCenter, WorkCenterShift, Machine, Employee, Item, BomLine, RoutingOperation)
-           planning.py (Order, PlanLine, ProductionActual, Downtime, ImportLog)
+  models/  user.py · master.py (WorkCenter, WorkCenterShift, WorkCenterWeek, Machine, Employee, Item, BomLine, RoutingOperation, OpTransitionRule, norm_op)
+           planning.py (Order, PlanLine, ProductionActual, Downtime, ImportLog, StockReceipt, Reservation, Shipment)
   schemas.py   (tüm Pydantic şemaları)
-  services/ capacity.py · requirements.py · planning.py · progress.py · analysis.py · excel.py
+  services/ capacity.py (Overrides) · requirements.py · planning.py · progress.py · analysis.py · excel.py · scenarios.py (RuleLookup, flow) · stock.py (rezervasyon/sevk)
   api/     auth.py (login, users) · master.py (iş merkezi, vardiya, personel, stok, sipariş)
            planning.py (kapasite, ihtiyaç, plan, yük, terminleme, ilerleme, analiz, raporlar) · imports.py (şablon, upload, log, yedek)
+           scenarios.py (/api/scenarios: groups, flow, rules) · stock.py (/api/stock: summary, orders, receipts, reservations, shipments)
   main.py  (lifespan: create_all + admin seed; router kaydı)
 frontend/src/
   api.ts (fetch sarmalayıcı, tipler, tarih yardımcıları) · auth.tsx (context, roller) · components.tsx (ortak parçalar)
-  App.tsx (yan menü + rotalar) · pages/*.tsx (10 sayfa)
+  App.tsx (yan menü + rotalar) · pages/*.tsx (12 sayfa: + Scenarios, Stock) · pages/WcWeeksPanel.tsx · pages/planning/*
 ```
 
 ## Veri Modeli (özet)
@@ -32,11 +33,14 @@ frontend/src/
 - **Machine**: work_center_id (CASCADE), code (benzersiz), name, description, is_active — İM altındaki makine/tezgah; isteğe bağlı detay
 - **Employee**: code, name, work_center_id, **machine_id** (SET NULL; makine personelin İM'sine ait olmalı — API/import doğrular)
 - **Kapasite kişi sayısı kaynağı** (`capacity.employee_count(db, wc)` + `shift_headcount(shift, emp, wc)`): `work_center` ⇒ vardiya headcount>0 ise o, yoksa İM'ye bağlı aktif personel; `machines` ⇒ İM'nin aktif makinelerine atanmış aktif personel, vardiya headcount yok sayılır. Kullanıcı İM satırından anlık değiştirir ("makine detayını istediğimde aktifleştir")
+- **WorkCenterWeek**: (work_center_id, week_start) benzersiz; headcount / efficient_hours_per_person / working_days **nullable** — null ⇒ vardiya/İM varsayılanı. `capacity.Overrides(db, wc_id)` haftalık sözlük; tüm kapasite fonksiyonları `ov` parametresiyle çalışır. Etkin kapasite = kişi × verimli saat × gün.
+- **OpTransitionRule**: scope `group|item`, product_group, item_id, from_op/to_op (+ `_norm`: Türkçe karakter/boşluk normalize), rule `finish|cycles`, lag_cycles, wait_minutes. Öncelik: stok > grup > varsayılan(finish). `cycles` ⇒ sonraki op öncekinin `lag/qty` oranında başlar (iç içe), öncekinden önce bitemez.
 - **Item** → **BomLine**[] (hammadde) + **RoutingOperation**[] (seq, work_center, cycle_time_sec, setup_time_min)
 - **Order**: order_no, customer, due_date, item, quantity, status(open/closed)
 - **PlanLine**: order, operation, work_center, week_start (Pazartesi), planned_hours, planned_qty, mode(auto/manual)
 - **ProductionActual**: prod_date, wc, item, operation_seq, order_no, quantity, earned_hours (CT'den), reported_hours (opsiyonel fiili)
 - **Downtime**: dt_date, wc, reason_code/desc, minutes
+- **StockReceipt** (item, receipt_date, quantity, lot, source manual|excel), **Reservation** (item, order CASCADE, quantity, source manual|auto), **Shipment** (item, order, ship_date, quantity). Serbest = Σgiriş − Σrezerve − Σsevk (ürün bazında). Sipariş kalan = miktar − rezerve − sevk; tamamen sevk ⇒ `Order.status=closed`.
 - **ImportLog**, **User**
 
 ## Temel Hesaplar (services)
@@ -89,3 +93,18 @@ frontend/src/
 - `Order.unit_price`; ciro = quantity × unit_price (tek para birimi). Birleştirilen siparişte ağırlıklı ortalama fiyat.
 - `revenue.revenue_report`: completed (bitiş gününün haftası/ayı, tüm ciro) + earned (satır saat payı × ciro; tamamen planlananda pay planlanan toplam saate göre). Dönem listesi ufuk + ufuk dışına taşan bitişleri kapsar.
 - `revenue.compare`: iki simülasyon → `PlanScenario` (özet KPI + çizelge + ciro) + `CompareOrderRow.diff` sınıflandırması.
+
+## Haftalık İş Gücü (v0.5)
+- Vardiya tanımı **varsayılan**; `WorkCenterWeek` sadece **farkı** saklar (null alan = varsayılan). UI'da istisna turuncu; "Varsayılan" düğmesi kaydı siler.
+- Tüketiciler `cap.Overrides` üzerinden okur: planlama (`_daily_free_hours`, `_schedule_op`), analiz (beklenen üretim), ilerleme (çalışma günü), sipariş bitiş tahmini. Yeni bir kapasite hesabı yazarken `ov = ovl.get(day)` alıp `cap.*(…, ov)` çağır.
+- Excel `wc_weeks`: hafta kolonu tarih (herhangi bir gün → Pazartesi) ya da `YYYY-Www`.
+
+## Senaryo Matrisi (v0.5)
+- Akış = ürün grubundaki rotaların operasyon adına göre birleşimi (`_merge_sequences`); stok seçilirse o stokun rotası. Düğüm: operasyon + İM + çevrim; ok: etkin kural + kaynağı (varsayılan/grup/stok).
+- Kural uygulaması iki yerde: `planning._place_order` (otomatik plan; önceki op'un ilk/son hafta indeksi → `cycles` ise öncekinin ilk haftasından itibaren, `finish` ise son haftasından itibaren yerleşir) ve `planning.lead_time` (saat bazlı; `_schedule_op` boş kapasiteye yayar).
+- Operasyon adı eşleşmesi `norm_op` ile (Sıvama = SIVAMA = sivama).
+
+## Stok & Rezervasyon (v0.5)
+- Akış: **Depo girişi** (manuel/Excel) → **Serbest stok** → **Manuel rezerve** (kritik) → **⚡ Otomatik** (termin sırası, kalan stoğu dağıtır) → **Sevk** (stoktan düşer; sipariş kapanır) → **Geri al**.
+- Manuel rezervasyon serbest stok yetmezse otomatik rezervasyonları en geç terminliden başlayarak çözer; manuel kayıtlara dokunmaz. Otomatik dağıtım manuel kayıtları sabit kabul eder.
+- Üretim ilerlemesi ile bağ yok (bilinçli): `ProductionActual` rezervasyonu etkilemez; depo girişi ayrı kayıttır.

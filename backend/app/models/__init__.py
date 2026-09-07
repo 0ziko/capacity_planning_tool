@@ -4,9 +4,13 @@ from app.models.master import (  # noqa: F401
     Employee,
     Item,
     Machine,
+    OpTransitionRule,
     RoutingOperation,
     WorkCenter,
     WorkCenterShift,
+    WorkCenterWeek,
+    norm_op,
+    norm_wip,
 )
 from app.models.planning import (  # noqa: F401
     Downtime,
@@ -14,4 +18,7 @@ from app.models.planning import (  # noqa: F401
     Order,
     PlanLine,
     ProductionActual,
+    Reservation,
+    Shipment,
+    StockReceipt,
 )

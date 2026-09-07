@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, fmt, mondayOf, qs, type Progress, type WorkCenterLoad } from "../api";
+import { api, fmt, mondayOf, qs, shortDate, weekLabel, type Progress, type WorkCenterLoad } from "../api";
 import { Bar, ErrorText, StatusBadge, UtilBadge, useAsync } from "../components";
 
 export default function Dashboard() {
@@ -34,7 +34,7 @@ export default function Dashboard() {
           <thead>
             <tr>
               <th>İş Merkezi</th>
-              {load.data?.[0]?.weeks.map((w) => <th key={w.week_start} colSpan={2}>{w.week_start}</th>)}
+              {load.data?.[0]?.weeks.map((w) => <th key={w.week_start} colSpan={2} title={`Hafta başlangıcı (Pzt): ${w.week_start}`}>{weekLabel(w.week_start)} <span className="muted" style={{ fontWeight: 400, fontSize: 11 }}>{shortDate(w.week_start)}</span></th>)}
             </tr>
           </thead>
           <tbody>

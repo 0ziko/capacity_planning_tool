@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { fmt, type OrderSchedule, type PlanLine, type WorkCenter } from "../../api";
+import { fmt, weekLabel, weekLong, type OrderSchedule, type PlanLine, type WorkCenter } from "../../api";
 import { PlanStatusBadge } from "./OrderSchedulePanel";
 
 interface Row {
@@ -84,7 +84,7 @@ export default function WcOrdersPanel({ lines, schedule, wcs, horizon }: { lines
                     <td>{r.item_code} <span className="muted">{r.sched?.item_name}</span></td>
                     <td className="num">{fmt(r.sched?.quantity, 0)}</td>
                     <td>{r.ops.join(", ")}</td>
-                    <td>{r.weeks.length === 1 ? r.weeks[0] : `${r.weeks[0]} → ${r.weeks[r.weeks.length - 1]} (${r.weeks.length} hafta)`}</td>
+                    <td title={r.weeks.join(", ")}>{r.weeks.length === 1 ? weekLong(r.weeks[0]) : `${weekLabel(r.weeks[0])} → ${weekLabel(r.weeks[r.weeks.length - 1])} (${r.weeks.length} hafta)`}</td>
                     <td className="num">{fmt(r.hours, 2)}</td><td className="num">{fmt(r.qty, 0)}</td>
                     <td style={{ fontWeight: 600 }}>{r.due_date}</td>
                     <td style={{ color: r.sched?.plan_status === "late" ? "var(--bad)" : undefined }}>{r.sched?.planned_end ?? "-"}</td>

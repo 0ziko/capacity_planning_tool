@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import re
 import unicodedata
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Any, Callable
 
 from openpyxl import Workbook, load_workbook
@@ -20,13 +20,18 @@ from app.models import (
     ImportLog,
     Item,
     Machine,
+    OpTransitionRule,
     Order,
     PlanLine,
     ProductionActual,
+    Reservation,
     RoutingOperation,
+    Shipment,
+    StockReceipt,
     User,
     WorkCenter,
     WorkCenterShift,
+    WorkCenterWeek,
 )
 from app.schemas import ImportResult
 
@@ -129,8 +134,9 @@ TEMPLATES: dict[str, dict] = {
             ("wc_code", "İş Merkezi Kodu", ["ismerkezi", "tezgah", "tezgahkodu"]),
             ("cycle_time_sec", "Çevrim Süresi (sn)", ["cycletime", "cevrimsuresi", "cevrimsuresisn", "cevrim"]),
             ("setup_time_min", "Setup (dk)", ["setup", "hazirlik", "setupsuresi"]),
+            ("semi_finished_code", "Yarımamül Kodu", ["yarimamul", "yarimamulkodu", "wip", "wipkodu", "semifinished"]),
         ],
-        "example": ["MAM-0001", 10, "Kesim", "TZG-A", 50, 15],
+        "example": ["MAM-0001", 10, "Kesim", "TZG-A", 50, 15, "MAM-0001-K10"],
         "required": ["item_code", "seq", "wc_code", "cycle_time_sec"],
     },
     "orders": {
@@ -150,15 +156,16 @@ TEMPLATES: dict[str, dict] = {
         "title": "Günlük Üretim",
         "columns": [
             ("prod_date", "Tarih", ["uretimtarihi", "gun"]),
-            ("wc_code", "İş Merkezi Kodu", ["ismerkezi", "tezgah"]),
-            ("item_code", "Stok Kodu", ["stokkodu", "malzeme"]),
-            ("operation_seq", "Operasyon Sıra", ["sira", "operasyon"]),
-            ("order_no", "Sipariş No", ["siparis", "siparisno"]),
+            ("semi_finished_code", "Yarımamül Kodu", ["yarimamul", "yarimamulkodu", "wip", "wipkodu"]),
             ("quantity", "Miktar", ["adet", "uretilen", "uretimmiktari"]),
+            ("order_no", "Sipariş No", ["siparis", "siparisno"]),
+            ("wc_code", "İş Merkezi Kodu (opsiyonel)", ["ismerkezi", "tezgah", "ismerkezikodu"]),
+            ("item_code", "Stok Kodu (opsiyonel)", ["stokkodu", "malzeme"]),
+            ("operation_seq", "Operasyon Sıra (opsiyonel)", ["sira", "operasyon", "operasyonsira"]),
             ("reported_hours", "Fiili Süre (saat)", ["fiilisure", "calismasuresi", "sure"]),
         ],
-        "example": ["2026-09-06", "TZG-A", "MAM-0001", 10, "SIP-2026-001", 120, ""],
-        "required": ["prod_date", "wc_code", "item_code", "quantity"],
+        "example": ["2026-09-06", "MAM-0001-K10", 120, "SIP-2026-001", "", "", "", ""],
+        "required": ["prod_date", "quantity"],
     },
     "downtime": {
         "title": "Günlük Duruşlar",
@@ -172,7 +179,62 @@ TEMPLATES: dict[str, dict] = {
         "example": ["2026-09-06", "TZG-A", "MLZ", "Malzeme bekleme", 45],
         "required": ["dt_date", "wc_code", "minutes"],
     },
+    "wc_weeks": {
+        "title": "Haftalık İş Gücü",
+        "columns": [
+            ("wc_code", "İş Merkezi Kodu", ["ismerkezi", "ismerkezikodu"]),
+            ("week_start", "Hafta (Pzt tarihi veya 2026-W37)", ["hafta", "haftabaslangici", "haftano"]),
+            ("headcount", "Kişi Sayısı", ["kisi", "kisisayisi"]),
+            ("efficient_hours_per_person", "Kişi Başı Verimli Saat", ["verimlisaat", "verimlisure"]),
+            ("working_days", "Çalışma Günü", ["gun", "gunsayisi", "calismagunu"]),
+            ("note", "Not", ["aciklama"]),
+        ],
+        "example": ["PRESHANE 3", "2026-09-07", 8, 4.5, 5, "1 kişi izinli"],
+        "required": ["wc_code", "week_start"],
+    },
+    "op_rules": {
+        "title": "Senaryo Kuralları",
+        "columns": [
+            ("product_group", "Ürün Grubu", ["grup", "urungrubu"]),
+            ("item_code", "Stok Kodu (boş = grup geneli)", ["stok", "stokkodu", "malzemekodu"]),
+            ("from_op", "Önceki Operasyon", ["onceki", "oncekioperasyon", "kaynak"]),
+            ("to_op", "Sonraki Operasyon", ["sonraki", "sonrakioperasyon", "hedef"]),
+            ("from_wip_code", "Önceki Yarımamül Kodu", ["oncekiyarimamul", "kaynakwip"]),
+            ("to_wip_code", "Sonraki Yarımamül Kodu", ["sonrakiyarimamul", "hedefwip"]),
+            ("rule", "Kural (Bitiş/Çevrim)", ["kuraltipi", "tip"]),
+            ("lag_cycles", "Çevrim Sayısı", ["cevrim", "cevrimsayisi", "adet"]),
+            ("wait_minutes", "Bekleme (dk)", ["bekleme", "beklemesuresi"]),
+            ("note", "Not", ["aciklama"]),
+        ],
+        "example": ["EVYE", "", "Sıvama", "Forma", "6005510-10", "6005510-11", "Çevrim", 5, 0, "5 parça sıvandıktan sonra forma başlar"],
+        "required": ["from_op", "to_op"],
+    },
+    "stock_receipts": {
+        "title": "Depo Girişi (Bitmiş Ürün)",
+        "columns": [
+            ("receipt_date", "Tarih", ["giristarihi", "gun"]),
+            ("item_code", "Stok Kodu", ["stok", "stokkodu", "malzemekodu"]),
+            ("quantity", "Miktar", ["adet", "miktar"]),
+            ("lot", "Lot / Parti", ["lot", "parti", "partino"]),
+            ("note", "Not", ["aciklama"]),
+        ],
+        "example": ["2026-09-06", "MAM-0001", 120, "L-2609", ""],
+        "required": ["receipt_date", "item_code", "quantity"],
+    },
 }
+
+
+def parse_week(v: Any) -> date:
+    """'2026-09-07', '07.09.2026' veya '2026-W37' / '2026-H37' / '37' (yil = bugun) -> haftanin Pazartesisi."""
+    s = _str(v)
+    m = re.fullmatch(r"(?:(\d{4})[-/ ]?)?[WwHh]?(\d{1,2})", s)
+    if m and not re.search(r"[./]", s) and len(s) <= 8:
+        year = int(m.group(1)) if m.group(1) else date.today().year
+        week = int(m.group(2))
+        if 1 <= week <= 53:
+            return date.fromisocalendar(year, week, 1)
+    d = _date(v)
+    return d - timedelta(days=d.weekday())
 
 
 def sheet_title(title: str) -> str:
@@ -540,6 +602,9 @@ def import_routing(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
             op.operation_name = _str(r.get("operation_name")) or op.operation_name
             op.cycle_time_sec = _float(r.get("cycle_time_sec"), 0.0) or 0.0
             op.setup_time_min = _float(r.get("setup_time_min"), 0.0) or 0.0
+            wip = _str(r.get("semi_finished_code"))
+            if wip:
+                op.semi_finished_code = wip
         except Exception as e:  # noqa: BLE001
             errs.append(f"Satir {r['_row']}: {e}")
     return ins, upd, errs
@@ -581,48 +646,92 @@ def import_orders(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
 
 
 def import_production(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
-    """Ayni gun/is merkezi/stok/operasyon/siparis satiri varsa uzerine yazar (idempotent)."""
+    """Ayni gun/yarimamul/siparis satiri varsa uzerine yazar (idempotent).
+
+    Birincil anahtar: tarih + yarimamul kodu + siparis no.
+    Yarimamul kodu rota operasyonuna cozulur; stok kodu coklu eslesmede ayirt eder.
+    Geriye uyumluluk: yarimamul yoksa is merkezi + stok + operasyon sira ile eslesir.
+    """
+    from app.services.wip import resolve_wip, wip_index
+
     ins = upd = 0
     errs = []
     items = _item_lookup(db)
     wcs = _wc_lookup(db)
+    wip_idx = wip_index(db)
     for r in rows:
         try:
             d = _date(r.get("prod_date"))
-            wc = wcs.get(_str(r.get("wc_code")).upper())
-            if not wc:
-                raise ValueError(f"Is merkezi bulunamadi: {r.get('wc_code')}")
-            item = items.get(_str(r.get("item_code")).upper())
-            if not item:
-                raise ValueError(f"Stok kodu bulunamadi: {r.get('item_code')}")
-            seq = _int(r.get("operation_seq"), None)
             order_no = _str(r.get("order_no"))
             qty = _float(r.get("quantity"))
             if qty is None:
                 raise ValueError("Miktar bos")
+            wip_raw = _str(r.get("semi_finished_code"))
             op = None
-            if seq is not None:
-                op = next((o for o in item.operations if o.seq == seq), None)
-            if op is None:
-                op = next((o for o in item.operations if o.work_center_id == wc.id), None)
-            earned = op.hours_for(qty) - (op.setup_time_min / 60.0) if op else 0.0  # gunluk uretimde setup sayilmaz
-            pa = (
-                db.query(ProductionActual)
-                .filter(
-                    ProductionActual.prod_date == d,
-                    ProductionActual.work_center_id == wc.id,
-                    ProductionActual.item_id == item.id,
-                    ProductionActual.operation_seq == seq,
-                    ProductionActual.order_no == order_no,
+            item = None
+            wc = None
+            seq = None
+            if wip_raw:
+                op = resolve_wip(db, wip_raw, _str(r.get("item_code")) or None, wip_idx)
+                item = op.item
+                wc = op.work_center
+                seq = op.seq
+            else:
+                wc = wcs.get(_str(r.get("wc_code")).upper())
+                if not wc:
+                    raise ValueError("Yarimamul kodu veya is merkezi + stok kodu gerekli")
+                item = items.get(_str(r.get("item_code")).upper())
+                if not item:
+                    raise ValueError(f"Stok kodu bulunamadi: {r.get('item_code')}")
+                seq = _int(r.get("operation_seq"), None)
+                if seq is not None:
+                    op = next((o for o in item.operations if o.seq == seq), None)
+                if op is None:
+                    op = next((o for o in item.operations if o.work_center_id == wc.id), None)
+            if item is None or wc is None:
+                raise ValueError("Uretim satiri cozulemedi")
+            earned = op.hours_for(qty) - (op.setup_time_min / 60.0) if op else 0.0
+            wip_stored = wip_raw or (op.semi_finished_code if op else "")
+            if wip_stored:
+                pa = (
+                    db.query(ProductionActual)
+                    .filter(
+                        ProductionActual.prod_date == d,
+                        ProductionActual.semi_finished_code == wip_stored,
+                        ProductionActual.order_no == order_no,
+                    )
+                    .first()
                 )
-                .first()
-            )
+            else:
+                pa = (
+                    db.query(ProductionActual)
+                    .filter(
+                        ProductionActual.prod_date == d,
+                        ProductionActual.work_center_id == wc.id,
+                        ProductionActual.item_id == item.id,
+                        ProductionActual.operation_seq == seq,
+                        ProductionActual.order_no == order_no,
+                    )
+                    .first()
+                )
             if not pa:
-                pa = ProductionActual(prod_date=d, work_center_id=wc.id, item_id=item.id, operation_seq=seq, order_no=order_no, quantity=qty)
+                pa = ProductionActual(
+                    prod_date=d,
+                    work_center_id=wc.id,
+                    item_id=item.id,
+                    operation_seq=seq,
+                    order_no=order_no,
+                    semi_finished_code=wip_stored,
+                    quantity=qty,
+                )
                 db.add(pa)
                 ins += 1
             else:
                 pa.quantity = qty
+                pa.work_center_id = wc.id
+                pa.item_id = item.id
+                pa.operation_seq = seq
+                pa.semi_finished_code = wip_stored
                 upd += 1
             pa.earned_hours = round(max(earned, 0.0), 4)
             pa.reported_hours = _float(r.get("reported_hours"), None)
@@ -656,17 +765,105 @@ def import_downtime(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]
     return ins, 0, errs
 
 
+def import_wc_weeks(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
+    """Is merkezi x hafta istisnalari; ayni hafta varsa guncellenir. Tum degerler bos ise kayit silinir."""
+    ins = upd = 0
+    errs = []
+    wcs = _wc_lookup(db)
+    for r in rows:
+        try:
+            wc = wcs.get(_str(r.get("wc_code")).upper())
+            if not wc:
+                raise ValueError(f"Is merkezi bulunamadi: {r.get('wc_code')}")
+            wk = parse_week(r.get("week_start"))
+            hc = _int(r.get("headcount"))
+            eff = _float(r.get("efficient_hours_per_person"))
+            days = _int(r.get("working_days"))
+            if days is not None and not 0 <= days <= 7:
+                raise ValueError("Calisma gunu 0-7 arasinda olmali")
+            note = _str(r.get("note"))
+            row = db.query(WorkCenterWeek).filter(WorkCenterWeek.work_center_id == wc.id, WorkCenterWeek.week_start == wk).first()
+            if hc is None and eff is None and days is None and not note:
+                if row:
+                    db.delete(row)
+                    upd += 1
+                continue
+            if row:
+                upd += 1
+            else:
+                row = WorkCenterWeek(work_center_id=wc.id, week_start=wk)
+                db.add(row)
+                ins += 1
+            row.headcount, row.efficient_hours_per_person, row.working_days, row.note = hc, eff, days, note
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"Satir {r['_row']}: {e}")
+    return ins, upd, errs
+
+
+def import_op_rules(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
+    from app.services import scenarios as scen
+
+    ins = upd = 0
+    errs = []
+    for r in rows:
+        try:
+            item_code = _str(r.get("item_code"))
+            scope = "item" if item_code else "group"
+            group = _str(r.get("product_group"))
+            if scope == "group" and not group:
+                raise ValueError("Urun grubu veya stok kodu gerekli")
+            kind_raw = norm(r.get("rule"))
+            rule = "cycles" if kind_raw in ("cevrim", "cycles", "cycle", "adet", "birlikte", "overlap") else "finish"
+            existed = db.query(OpTransitionRule).count()
+            scen.upsert_rule(
+                db, scope, group, item_code or None, _str(r.get("from_op")), _str(r.get("to_op")),
+                rule, _float(r.get("lag_cycles"), 0.0) or 0.0, _float(r.get("wait_minutes"), 0.0) or 0.0, _str(r.get("note")),
+                _str(r.get("from_wip_code")), _str(r.get("to_wip_code")),
+            )
+            if db.query(OpTransitionRule).count() > existed:
+                ins += 1
+            else:
+                upd += 1
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"Satir {r['_row']}: {e}")
+    return ins, upd, errs
+
+
+def import_stock_receipts(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
+    ins = 0
+    errs = []
+    items = _item_lookup(db)
+    for r in rows:
+        try:
+            d = _date(r.get("receipt_date"))
+            code = _str(r.get("item_code")).upper()
+            item = items.get(code)
+            if not item:
+                raise ValueError(f"Stok kodu bulunamadi: {code}")
+            qty = _float(r.get("quantity"))
+            if qty is None or qty <= 0:
+                raise ValueError("Miktar pozitif olmali")
+            db.add(StockReceipt(item_id=item.id, receipt_date=d, quantity=qty, lot=_str(r.get("lot")), note=_str(r.get("note")), source="import"))
+            ins += 1
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"Satir {r['_row']}: {e}")
+    return ins, 0, errs
+
+
 IMPORTERS: dict[str, Callable[[Session, list[dict]], tuple[int, int, list[str]]]] = {
     "workcenters": import_workcenters,
     "machines": import_machines,
     "shifts": import_shifts,
+    "wc_weeks": import_wc_weeks,
     "employees": import_employees,
     "items": import_items,
     "bom": import_bom,
     "routing": import_routing,
+    "op_rules": import_op_rules,
     "orders": import_orders,
     "production": import_production,
     "downtime": import_downtime,
+    "stock_receipts": import_stock_receipts,
 }
 
 
@@ -721,15 +918,26 @@ def build_backup(db: Session) -> bytes:
     _ws_from_rows(wb, "BOM", [c[1] for c in TEMPLATES["bom"]["columns"]],
                   [[item_code.get(b.item_id), b.component_code, b.component_name, b.quantity, b.unit] for b in db.query(BomLine).order_by(BomLine.item_id, BomLine.id)])
     _ws_from_rows(wb, "Rota", [c[1] for c in TEMPLATES["routing"]["columns"]],
-                  [[item_code.get(o.item_id), o.seq, o.operation_name, wc_code.get(o.work_center_id), o.cycle_time_sec, o.setup_time_min] for o in db.query(RoutingOperation).order_by(RoutingOperation.item_id, RoutingOperation.seq)])
+                  [[item_code.get(o.item_id), o.seq, o.operation_name, wc_code.get(o.work_center_id), o.cycle_time_sec, o.setup_time_min, o.semi_finished_code] for o in db.query(RoutingOperation).order_by(RoutingOperation.item_id, RoutingOperation.seq)])
     _ws_from_rows(wb, "Siparişler", [c[1] for c in TEMPLATES["orders"]["columns"]] + ["Durum"],
                   [[o.order_no, o.customer, o.due_date, item_code.get(o.item_id), o.quantity, o.unit_price, o.status] for o in db.query(Order).order_by(Order.due_date, Order.order_no)])
     _ws_from_rows(wb, "Plan", ["Hafta", "İş Merkezi Kodu", "Sipariş No", "Stok Kodu", "Operasyon Id", "Planlanan Saat", "Planlanan Miktar", "Mod", "Oluşturan"],
                   [[p.week_start, wc_code.get(p.work_center_id), p.order.order_no, item_code.get(p.order.item_id), p.operation_id, p.planned_hours, p.planned_qty, p.mode, p.created_by] for p in db.query(PlanLine).order_by(PlanLine.week_start, PlanLine.work_center_id)])
     _ws_from_rows(wb, "Günlük Üretim", [c[1] for c in TEMPLATES["production"]["columns"]] + ["Kazanılan Saat"],
-                  [[p.prod_date, wc_code.get(p.work_center_id), item_code.get(p.item_id), p.operation_seq, p.order_no, p.quantity, p.reported_hours, p.earned_hours] for p in db.query(ProductionActual).order_by(ProductionActual.prod_date)])
+                  [[p.prod_date, p.semi_finished_code or "", p.quantity, p.order_no, wc_code.get(p.work_center_id), item_code.get(p.item_id), p.operation_seq, p.reported_hours, p.earned_hours] for p in db.query(ProductionActual).order_by(ProductionActual.prod_date)])
     _ws_from_rows(wb, "Günlük Duruşlar", [c[1] for c in TEMPLATES["downtime"]["columns"]],
                   [[d.dt_date, wc_code.get(d.work_center_id), d.reason_code, d.reason_desc, d.minutes] for d in db.query(Downtime).order_by(Downtime.dt_date)])
+    _ws_from_rows(wb, "Haftalık İş Gücü", [c[1] for c in TEMPLATES["wc_weeks"]["columns"]],
+                  [[wc_code.get(w.work_center_id), w.week_start, w.headcount, w.efficient_hours_per_person, w.working_days, w.note] for w in db.query(WorkCenterWeek).order_by(WorkCenterWeek.work_center_id, WorkCenterWeek.week_start)])
+    _ws_from_rows(wb, "Senaryo Kuralları", [c[1] for c in TEMPLATES["op_rules"]["columns"]],
+                  [[r.product_group, item_code.get(r.item_id) if r.item_id else "", r.from_op, r.to_op, r.from_wip_code, r.to_wip_code, "Çevrim" if r.rule == "cycles" else "Bitiş", r.lag_cycles, r.wait_minutes, r.note] for r in db.query(OpTransitionRule).order_by(OpTransitionRule.product_group, OpTransitionRule.scope, OpTransitionRule.id)])
+    _ws_from_rows(wb, "Depo Girişi", [c[1] for c in TEMPLATES["stock_receipts"]["columns"]],
+                  [[s.receipt_date, item_code.get(s.item_id), s.quantity, s.lot, s.note] for s in db.query(StockReceipt).order_by(StockReceipt.receipt_date, StockReceipt.id)])
+    order_no = {o.id: o.order_no for o in db.query(Order).all()}
+    _ws_from_rows(wb, "Rezervasyonlar", ["Stok Kodu", "Sipariş No", "Miktar", "Kaynak", "Not", "Oluşturan", "Tarih"],
+                  [[item_code.get(r.item_id), order_no.get(r.order_id), r.quantity, "manuel" if r.source == "manual" else "otomatik", r.note, r.created_by, r.created_at] for r in db.query(Reservation).order_by(Reservation.id)])
+    _ws_from_rows(wb, "Sevkler", ["Tarih", "Stok Kodu", "Sipariş No", "Miktar", "Not", "Oluşturan"],
+                  [[s.ship_date, item_code.get(s.item_id), order_no.get(s.order_id), s.quantity, s.note, s.created_by] for s in db.query(Shipment).order_by(Shipment.ship_date, Shipment.id)])
     _ws_from_rows(wb, "Kullanıcılar", ["Kullanıcı", "Ad Soyad", "Rol", "Aktif"],
                   [[u.username, u.full_name, u.role, "E" if u.is_active else "H"] for u in db.query(User).order_by(User.username)])
     _ws_from_rows(wb, "Import Logu", ["Tarih", "Tür", "Dosya", "Kullanıcı", "Eklenen", "Güncellenen", "Hatalar"],

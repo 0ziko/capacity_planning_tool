@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, fmt, type CompareDiff, type CompareRow, type PlanCompare, type PlanMode, type PlanScenario } from "../../api";
+import { api, fmt, weekLong, type CompareDiff, type CompareRow, type PlanCompare, type PlanMode, type PlanScenario } from "../../api";
 import { useAuth } from "../../auth";
 import { ErrorText } from "../../components";
 import { PlanStatusBadge } from "./OrderSchedulePanel";
@@ -136,7 +136,7 @@ export default function ComparePanel({ start, weeks, wcIds, onApplied }: { start
                   const cd = (b?.cumulative_completed ?? 0) - (a?.cumulative_completed ?? 0);
                   return (
                     <tr key={p}>
-                      <td><b>{gran === "week" ? p : monthLabel(p)}</b></td>
+                      <td title={p}><b>{gran === "week" ? weekLong(p) : monthLabel(p)}</b></td>
                       <td className="num">{fmt(a?.completed_revenue ?? 0, 0)} <span className="muted">({fmt(a?.earned_revenue ?? 0, 0)})</span></td>
                       <td className="num">{fmt(b?.completed_revenue ?? 0, 0)} <span className="muted">({fmt(b?.earned_revenue ?? 0, 0)})</span></td>
                       <td className="num" style={{ color: d > 0 ? "var(--ok)" : d < 0 ? "var(--bad)" : undefined }}>{d > 0 ? "+" : ""}{fmt(d, 0)}</td>

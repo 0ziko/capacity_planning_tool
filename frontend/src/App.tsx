@@ -11,6 +11,8 @@ import ProgressPage from "./pages/Progress";
 import Analysis from "./pages/Analysis";
 import Imports from "./pages/Imports";
 import Users from "./pages/Users";
+import Scenarios from "./pages/Scenarios";
+import Stock from "./pages/Stock";
 
 export default function App() {
   const { user, loading, logout, can } = useAuth();
@@ -35,7 +37,9 @@ export default function App() {
         <NavLink to="/employees">Personel</NavLink>
         <NavLink to="/items">Stok / BOM / Rota</NavLink>
         <NavLink to="/orders">Siparişler & İhtiyaç</NavLink>
+        <NavLink to="/scenarios">Senaryo Matrisi</NavLink>
         <NavLink to="/planning">Planlama</NavLink>
+        <NavLink to="/stock">Stok & Rezervasyon</NavLink>
         <NavLink to="/progress">Günlük İlerleme</NavLink>
         <NavLink to="/analysis">Duruş & Çevrim Süresi</NavLink>
         <NavLink to="/imports">Excel Import / Yedek</NavLink>
@@ -54,7 +58,9 @@ export default function App() {
           <Route path="/employees" element={<Employees />} />
           <Route path="/items" element={<Items />} />
           <Route path="/orders" element={<Orders />} />
+          <Route path="/scenarios" element={<Scenarios />} />
           <Route path="/planning" element={<Planning />} />
+          <Route path="/stock" element={<Stock />} />
           <Route path="/progress" element={<ProgressPage />} />
           <Route path="/analysis" element={<Analysis />} />
           <Route path="/imports" element={<Imports />} />

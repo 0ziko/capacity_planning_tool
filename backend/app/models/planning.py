@@ -64,6 +64,7 @@ class ProductionActual(Base):
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), index=True)
     operation_seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
     order_no: Mapped[str] = mapped_column(String(64), default="")
+    semi_finished_code: Mapped[str] = mapped_column(String(64), default="", index=True)
     quantity: Mapped[float] = mapped_column(Float)
     # cevrim suresine gore hesaplanan is gucu saati
     earned_hours: Mapped[float] = mapped_column(Float, default=0.0)
@@ -85,6 +86,60 @@ class Downtime(Base):
     minutes: Mapped[float] = mapped_column(Float)
 
     work_center = relationship("WorkCenter")
+
+
+class StockReceipt(Base):
+    """Bitmis urun depo girisi (uretimden depoya alinan miktar). Siparisten bagimsizdir."""
+
+    __tablename__ = "stock_receipts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), index=True)
+    receipt_date: Mapped[date] = mapped_column(Date, index=True)
+    quantity: Mapped[float] = mapped_column(Float)
+    lot: Mapped[str] = mapped_column(String(64), default="")
+    note: Mapped[str] = mapped_column(String(256), default="")
+    source: Mapped[str] = mapped_column(String(16), default="manual")  # manual / import
+    created_by: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    item = relationship("Item")
+
+
+class Reservation(Base):
+    """Depodaki bitmis urunun bir siparise rezervasyonu (sevk edilene kadar acik)."""
+
+    __tablename__ = "reservations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), index=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), index=True)
+    quantity: Mapped[float] = mapped_column(Float)
+    source: Mapped[str] = mapped_column(String(8), default="auto")  # auto / manual
+    note: Mapped[str] = mapped_column(String(256), default="")
+    created_by: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    item = relationship("Item")
+    order = relationship("Order")
+
+
+class Shipment(Base):
+    """Siparise sevk edilen miktar; stoktan duser."""
+
+    __tablename__ = "shipments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), index=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), index=True)
+    ship_date: Mapped[date] = mapped_column(Date, index=True)
+    quantity: Mapped[float] = mapped_column(Float)
+    note: Mapped[str] = mapped_column(String(256), default="")
+    created_by: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    item = relationship("Item")
+    order = relationship("Order")
 
 
 class ImportLog(Base):

@@ -37,8 +37,11 @@ def downtime_analysis(db: Session, wc_ids: list[int] | None, start: date, end: d
     totals_by_wc: dict[int, dict] = {}
     for w in wcs:
         emp = cap.employee_count(db, w)
-        for day in cap.working_days(w, start, end):
-            expected_min = max(cap.daily_nominal_hours(w, day, emp) - cap.daily_capacity_hours(w, day, emp), 0.0) * 60
+        ovl = cap.Overrides(db, w.id)
+        ovl.preload(start, end)
+        for day in cap.working_days(w, start, end, ovl):
+            ov = ovl.get(day)
+            expected_min = max(cap.daily_nominal_hours(w, day, emp, ov) - cap.daily_capacity_hours(w, day, emp, ov), 0.0) * 60
             actual_min = actual_by_wc_day.get((w.id, day), 0.0)
             excess = actual_min - expected_min
             summary.append(
@@ -121,11 +124,13 @@ def cycle_time_suggestions(db: Session, wc_ids: list[int] | None, start: date | 
 
     samples: dict[tuple[int, int, int | None], list[float]] = defaultdict(list)  # (item, wc, seq) -> etkin CT
     emp_cache: dict[int, int] = {}
+    ov_cache: dict[int, cap.Overrides] = {}
     for (wc_id, day), lst in by_wc_day.items():
         wc = lst[0].work_center
         emp = emp_cache.setdefault(wc_id, cap.employee_count(db, wc))
-        eff_hours = cap.daily_capacity_hours(wc, day, emp)
-        nominal = cap.daily_nominal_hours(wc, day, emp)
+        ov = ov_cache.setdefault(wc_id, cap.Overrides(db, wc_id)).get(day)
+        eff_hours = cap.daily_capacity_hours(wc, day, emp, ov)
+        nominal = cap.daily_nominal_hours(wc, day, emp, ov)
         expected_dt_min = max(nominal - eff_hours, 0.0) * 60
         excess_dt_h = max(downtime_by_wc_day.get((wc_id, day), 0.0) - expected_dt_min, 0.0) / 60
         available_h = max(eff_hours - excess_dt_h, 0.0)

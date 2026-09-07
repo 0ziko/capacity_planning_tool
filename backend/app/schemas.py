@@ -1,4 +1,4 @@
-from datetime import date, time
+from datetime import date, datetime, time
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -119,6 +119,7 @@ class OperationOut(ORM):
     work_center_id: int
     cycle_time_sec: float
     setup_time_min: float
+    semi_finished_code: str = ""
 
 
 class ItemOut(ORM):
@@ -188,6 +189,7 @@ class OrderProgressOp(BaseModel):
     operation_seq: int
     operation_name: str
     work_center_code: str
+    semi_finished_code: str = ""
     required_hours: float
     planned_hours: float
     produced_qty: float
@@ -404,6 +406,7 @@ class LeadTimeStep(BaseModel):
     hours: float
     start: str
     end: str
+    start_rule: str = ""  # senaryo matrisi: baslangic kurali aciklamasi (bos = ilk operasyon)
 
 
 class LeadTimeOut(BaseModel):
@@ -436,3 +439,214 @@ class ImportResult(BaseModel):
     inserted: int
     updated: int
     errors: list[str]
+
+
+# ---- Haftalik is gucu (WorkCenterWeek) ----
+class WcWeekIn(BaseModel):
+    headcount: int | None = None
+    efficient_hours_per_person: float | None = None
+    working_days: int | None = Field(default=None, ge=0, le=7)
+    note: str = ""
+
+
+class WcWeekOut(BaseModel):
+    work_center_id: int
+    week_start: date
+    # etkin degerler (istisna varsa o, yoksa varsayilan)
+    headcount: int
+    efficient_hours_per_person: float
+    working_days: int
+    capacity_hours: float
+    # varsayilanlar (vardiya/personel/makine tanimindan)
+    default_headcount: int
+    default_efficient_hours: float
+    default_working_days: int
+    # istisna kaydi (varsa)
+    has_override: bool = False
+    ov_headcount: int | None = None
+    ov_efficient_hours_per_person: float | None = None
+    ov_working_days: int | None = None
+    note: str = ""
+
+
+# ---- Senaryo matrisi ----
+RuleKind = Literal["finish", "cycles"]
+
+
+class RuleOut(BaseModel):
+    rule: str
+    lag_cycles: float
+    wait_minutes: float
+    source: str  # default / group / item
+    id: int | None = None
+    note: str = ""
+    description: str = ""
+
+
+class FlowNode(BaseModel):
+    name: str
+    work_centers: list[str]
+    item_count: int
+    cycle_time_sec: float | None = None
+    semi_finished_codes: list[str] = []
+
+
+class FlowTransition(BaseModel):
+    from_op: str
+    to_op: str
+    from_wip_code: str = ""
+    to_wip_code: str = ""
+    effective: RuleOut
+    group_rule: RuleOut | None = None
+    item_rule: RuleOut | None = None
+
+
+class FlowItem(BaseModel):
+    code: str
+    name: str
+    operations: list[str]
+    differs: bool
+    item_rules: int
+
+
+class FlowOut(BaseModel):
+    product_group: str
+    item_code: str | None = None
+    item_name: str | None = None
+    nodes: list[FlowNode]
+    transitions: list[FlowTransition]
+    items: list[FlowItem]
+
+
+class ScenarioGroup(BaseModel):
+    product_group: str
+    item_count: int
+    operations: list[str]
+    rule_count: int
+
+
+class RuleIn(BaseModel):
+    scope: Literal["group", "item"] = "group"
+    product_group: str = ""
+    item_code: str | None = None
+    from_op: str = Field(min_length=1)
+    to_op: str = Field(min_length=1)
+    from_wip_code: str = ""
+    to_wip_code: str = ""
+    rule: RuleKind = "finish"
+    lag_cycles: float = Field(default=0.0, ge=0)
+    wait_minutes: float = Field(default=0.0, ge=0)
+    note: str = ""
+
+
+class RuleRow(RuleIn, ORM):
+    id: int
+    description: str = ""
+
+
+# ---- Stok & rezervasyon ----
+class ReceiptIn(BaseModel):
+    item_code: str = Field(min_length=1)
+    receipt_date: date
+    quantity: float = Field(gt=0)
+    lot: str = ""
+    note: str = ""
+
+
+class ReceiptOut(BaseModel):
+    id: int
+    item_id: int
+    item_code: str
+    item_name: str
+    receipt_date: date
+    quantity: float
+    lot: str
+    note: str
+    source: str
+    created_by: str
+
+
+class StockRow(BaseModel):
+    item_id: int
+    item_code: str
+    item_name: str
+    product_group: str
+    on_hand: float  # depo girisi - sevk
+    reserved: float  # acik rezervasyon
+    free: float  # on_hand - reserved
+    shipped: float
+    open_demand: float  # acik siparislerin rezerve/sevk edilmemis miktari
+    open_orders: int
+
+
+class ReservationIn(BaseModel):
+    item_id: int | None = None
+    item_code: str | None = None
+    order_id: int
+    quantity: float = Field(gt=0)
+    note: str = ""
+
+
+class ReservationOut(BaseModel):
+    id: int
+    item_id: int
+    item_code: str
+    item_name: str
+    order_id: int
+    order_no: str
+    customer: str
+    due_date: date
+    order_qty: float
+    quantity: float
+    source: str
+    note: str
+    created_by: str
+    created_at: datetime | None = None
+
+
+class OrderStockRow(BaseModel):
+    """Acik siparisin rezervasyon / sevk durumu."""
+
+    order_id: int
+    order_no: str
+    customer: str
+    due_date: date
+    item_id: int
+    item_code: str
+    item_name: str
+    quantity: float
+    reserved: float
+    shipped: float
+    remaining: float  # quantity - reserved - shipped
+    status: str
+    planned_end: date | None = None
+
+
+class ShipIn(BaseModel):
+    quantity: float | None = None  # bos = rezervasyonun tamami
+    ship_date: date | None = None
+    note: str = ""
+
+
+class ShipmentOut(BaseModel):
+    id: int
+    item_id: int
+    item_code: str
+    order_id: int
+    order_no: str
+    customer: str
+    ship_date: date
+    quantity: float
+    note: str
+    created_by: str
+
+
+class AutoReserveRequest(BaseModel):
+    item_ids: list[int] | None = None  # bos = tum urunler
+
+
+class AutoReserveResult(BaseModel):
+    created: int
+    reserved_qty: float
+    items: int
+    message: str

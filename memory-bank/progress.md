@@ -45,13 +45,23 @@
 - [x] İM bazında kapasite kaynağı: İM personeli (varsayılan, eski davranış) / makine atamaları — anlık değiştirilebilir
 - [x] Test `tests/test_machines.py` → toplam 11/11
 
+## Çalışan (v0.5 — 2026-09-07, haftalık iş gücü, senaryo matrisi, rezervasyon)
+- [x] Planlama yük tablosu ve tüm panellerde hafta numarası (H37 · 07.09) gösterimi
+- [x] Haftalık iş gücü istisnaları (`WorkCenterWeek`): İM satırında "Haftalık" paneli, Planlama → "Haftalık iş gücü" sekmesi; kapasite/plan/terminleme/analiz anında uyum sağlar; Excel şablonu + yedek
+- [x] Senaryo Matrisi sayfası: ürün grubu akış şeması, operasyon geçiş kuralları (bitince / N çevrim sonra iç içe / bekleme dk), grup geneli veya stok koduna özel; terminleme ve otomatik plan kuralları uygular; Excel şablonu
+- [x] Stok & Rezervasyon sayfası: depo girişi, serbest stok, manuel + otomatik (termin sırası) rezervasyon, taşı/kaldır, sevk (stoktan düşer, sipariş kapanır), geri al; Excel şablonu + yedek
+- [x] Testler `tests/test_v05_features.py` (3) → toplam 14/14; tsc temiz; tarayıcı doğrulaması yapıldı
+
+
 ## Yapılacaklar
 - [ ] Makine bazlı kapasite detayı (makine başına vardiya/verimlilik, makine duruşu) — kullanıcı makineleri tanımladıktan sonra
 - [ ] Gerçek Excel formatlarına göre alias/şablon uyarlaması
 - [ ] PostgreSQL kurulumu ve `.env` geçişi (admin/IT)
 - [ ] Alembic migrasyonları
 - [ ] Çevrim süresi önerisini rotaya "uygula" aksiyonu
-- [ ] Tarih bazlı vardiya istisnaları (tatil, fazla mesai günü)
+- [x] ~~Tarih bazlı vardiya istisnaları~~ → haftalık iş gücü istisnaları ile karşılandı (v0.5); gün bazlı istisna gerekirse `WorkCenterWeek.working_days` üzerine eklenir
+- [ ] Günlük ilerleme (son operasyon) → otomatik depo girişi önerisi
+- [ ] Senaryo matrisi: paralel operasyonlar, İM'ler arası taşıma süresi, Gantt görünümü
 - [ ] Kullanıcı bazlı iş merkezi görünürlüğü (yetki matrisi detayı)
 - [ ] Üretim ortamı: uvicorn servis olarak, frontend `npm run build` çıktısının sunulması, HTTPS
 
@@ -70,6 +80,8 @@ Pilot denemeye hazır. Yerelde çalışıyor: backend :8000, frontend :5173 (SQL
 - Backend'i bir araç kabuğunda `2>&1` ile çalıştırma: stderr borusu tıkanırsa ilk traceback sunucuyu kilitler (07.09 giriş yapılamama olayı). `start_backend.ps1` kullan.
 
 ## Karar Evrimi
+- 2026-09-07: Rezervasyon, üretim ilerlemesinden bilinçli olarak ayrık tutuldu ("sipariş plana termini verir, üretim siparişten bağımsız ilerler"); depo girişi manuel/Excel, ileride ilerlemeden öneri. Senaryo kuralı `cycles` modelinde sonraki operasyon öncekinin miktar oranı kadar ilerlemesinde başlar; öncekinden önce bitemez.
+- 2026-09-07: İş gücü haftalık istisnalarla modellendi (vardiya tanımı varsayılan kalır, `WorkCenterWeek` null alanlar varsayılanı korur) — vardiya kopyalama yerine fark kaydı.
 - 2026-09-07: MRP2 sonlu kapasite yerine bağımsız iş gücü kapasite planlama aracı (veri akışı yetersizliği).
 - 2026-09-07: Yığın: Python/FastAPI + PostgreSQL + React SPA; yerelde SQLite fallback (PostgreSQL admin gerektirdiği için).
 - 2026-09-07: UI kütüphanesi kullanılmadı (bağımlılık azlığı, tablo odaklı sade arayüz).

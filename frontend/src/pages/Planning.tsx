@@ -1,7 +1,8 @@
-import { useState } from "react";
-import { addDays, api, fmt, mondayOf, qs, type ItemDetail, type Order, type OrderSchedule, type PlanLine, type PlanMode, type WorkCenterLoad } from "../api";
+import { Fragment, useState } from "react";
+import { addDays, api, fmt, mondayOf, qs, shortDate, weekLabel, weekLong, type ItemDetail, type Order, type OrderSchedule, type PlanLine, type PlanMode, type WcWeek, type WorkCenterLoad } from "../api";
 import { useAuth } from "../auth";
 import { Bar, ErrorText, UtilBadge, WcMultiSelect, useAsync, useWorkCenters } from "../components";
+import WcWeeksPanel from "./WcWeeksPanel";
 import ComparePanel from "./planning/ComparePanel";
 import MergePanel from "./planning/MergePanel";
 import OrderProgressPanel from "./planning/OrderProgressPanel";
@@ -10,11 +11,12 @@ import RevenuePanel from "./planning/RevenuePanel";
 import WcOrdersPanel from "./planning/WcOrdersPanel";
 
 interface AutoResult { created: number; message: string; mode: PlanMode; unplanned: { order_no: string; item_code: string; operation_seq: number; work_center_code: string; hours: number }[]; skipped: { order_no: string; item_code: string; revenue: number; hours: number }[] }
-interface LeadTime { item_code: string; quantity: number; total_hours: number; start: string; end: string; steps: { operation_seq: number; operation_name: string; work_center_code: string; hours: number; start: string; end: string }[] }
+interface LeadTime { item_code: string; quantity: number; total_hours: number; start: string; end: string; steps: { operation_seq: number; operation_name: string; work_center_code: string; hours: number; start: string; end: string; start_rule: string }[] }
 
-type Tab = "load" | "orders" | "wc" | "revenue" | "compare" | "progress" | "merge" | "leadtime";
+type Tab = "load" | "labor" | "orders" | "wc" | "revenue" | "compare" | "progress" | "merge" | "leadtime";
 const TABS: { id: Tab; label: string; hint: string }[] = [
   { id: "load", label: "Haftalık yük & plan satırları", hint: "İş merkezi × hafta doluluk ve tüm plan satırları" },
+  { id: "labor", label: "Haftalık iş gücü", hint: "İş merkezi × hafta kişi / verimli saat / gün — haftaya özel değişiklikler" },
   { id: "orders", label: "Sipariş bitiş tarihleri", hint: "Plan sonucuna göre her siparişin tahmini üretim bitişi" },
   { id: "wc", label: "İş merkezi bazlı siparişler", hint: "Seçilen iş merkezine planlanmış siparişler" },
   { id: "revenue", label: "Ciro", hint: "Mevcut plana göre haftalık / aylık ciro" },
@@ -120,6 +122,7 @@ export default function Planning() {
         ))}
       </div>
 
+      {tab === "labor" && <LaborPanel start={start} weeks={weeks} wcs={wcIds.length ? wcs.filter((w) => wcIds.includes(w.id)) : wcs.filter((w) => w.is_planned)} canEdit={can("poweruser")} onChanged={refresh} />}
       {tab === "orders" && <OrderSchedulePanel rows={schedule.data} err={schedule.err} onReload={schedule.reload} />}
       {tab === "wc" && <WcOrdersPanel lines={lines.data} schedule={schedule.data} wcs={wcIds.length ? wcs.filter((w) => wcIds.includes(w.id)) : wcs.filter((w) => w.is_planned)} horizon={`${start} → ${addDays(start, weeks * 7 - 1)}`} />}
       {tab === "revenue" && <RevenuePanel start={start} weeks={weeks} wcIds={wcIds} />}
@@ -131,7 +134,11 @@ export default function Planning() {
       <h2>Haftalık yük (saat: planlanan / kapasite)</h2>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>İş Merkezi</th>{weekList.map((w) => <th key={w} style={{ cursor: "pointer", textDecoration: weekFilter === w ? "underline" : undefined }} onClick={() => setWeekFilter(weekFilter === w ? "" : w)}>{w}</th>)}</tr></thead>
+          <thead><tr><th>İş Merkezi</th>{weekList.map((w) => (
+            <th key={w} style={{ cursor: "pointer", textDecoration: weekFilter === w ? "underline" : undefined }} onClick={() => setWeekFilter(weekFilter === w ? "" : w)} title={`Hafta başlangıcı (Pzt): ${w}`}>
+              {weekLabel(w)} <span className="muted" style={{ fontWeight: 400, fontSize: 11 }}>{shortDate(w)}</span>
+            </th>
+          ))}</tr></thead>
           <tbody>
             {load.data?.map((wc) => (
               <tr key={wc.work_center_id}>
@@ -151,7 +158,7 @@ export default function Planning() {
         </table>
       </div>
 
-      <h2>Plan satırları {weekFilter && <span className="muted">— {weekFilter} (filtreyi kaldırmak için başlığa tekrar tıklayın)</span>}</h2>
+      <h2>Plan satırları {weekFilter && <span className="muted">— {weekLong(weekFilter)} (filtreyi kaldırmak için başlığa tekrar tıklayın)</span>}</h2>
       {can("poweruser") && <ManualAdd wcs={wcs} weekList={weekList} onAdded={refresh} />}
       <div className="table-wrap">
         <table>
@@ -161,10 +168,10 @@ export default function Planning() {
               <tr key={l.id}>
                 <td>
                   {can("poweruser") ? (
-                    <select value={l.week_start} onChange={(e) => moveLine(l, e.target.value)}>
-                      {[...new Set([l.week_start, ...weekList])].sort().map((w) => <option key={w} value={w}>{w}</option>)}
+                    <select value={l.week_start} onChange={(e) => moveLine(l, e.target.value)} title={`Hafta başlangıcı: ${l.week_start}`}>
+                      {[...new Set([l.week_start, ...weekList])].sort().map((w) => <option key={w} value={w}>{weekLong(w)}</option>)}
                     </select>
-                  ) : l.week_start}
+                  ) : <span title={l.week_start}>{weekLong(l.week_start)}</span>}
                 </td>
                 <td><b>{l.work_center_code}</b></td><td>{l.order_no}</td><td>{l.customer}</td>
                 <td style={{ color: l.due_date < l.week_start ? "var(--bad)" : undefined }} title={l.due_date < l.week_start ? "Termin, plan haftasından önce!" : ""}>{l.due_date}</td>
@@ -179,6 +186,69 @@ export default function Planning() {
         </table>
       </div>
       </>)}
+    </>
+  );
+}
+
+/** İş merkezi × hafta iş gücü matrisi (kişi · saat/kişi · gün → kapasite); satıra tıklayınca haftalık düzenleme paneli açılır. */
+function LaborPanel({ start, weeks, wcs, canEdit, onChanged }: { start: string; weeks: number; wcs: { id: number; code: string; name: string }[]; canEdit: boolean; onChanged: () => void }) {
+  const ids = wcs.map((w) => w.id);
+  const rows = useAsync(() => (ids.length ? api.get<WcWeek[]>(`/api/wc-weeks${qs({ start, weeks, work_center_ids: ids })}`) : Promise.resolve([] as WcWeek[])), [start, weeks, ids.join(",")]);
+  const [open, setOpen] = useState<number | null>(null);
+  const byWc = new Map<number, WcWeek[]>();
+  for (const r of rows.data ?? []) byWc.set(r.work_center_id, [...(byWc.get(r.work_center_id) ?? []), r]);
+  const firstRows: WcWeek[] = byWc.size ? (byWc.values().next().value as WcWeek[]) : [];
+  const weekList: string[] = firstRows.map((r) => r.week_start);
+  const overrides = (rows.data ?? []).filter((r) => r.has_override).length;
+  return (
+    <>
+      <h2>Haftalık iş gücü <span className="muted" style={{ fontWeight: 400 }}>— hücre: kişi × verimli saat × gün = kapasite (saat); turuncu = haftaya özel istisna</span></h2>
+      <p className="muted" style={{ marginTop: -6 }}>
+        İş gücü hafta hafta değişebilir (izin, bayram, fazla mesai, ek personel). Satırdaki <b>Düzenle</b> ile o iş merkezinin haftalarını tek tek değiştirin; plan, terminleme ve analiz yeni değerlere uyum sağlar.
+        {overrides > 0 && <> Şu an <b>{overrides}</b> hafta istisnası tanımlı.</>}
+      </p>
+      <ErrorText err={rows.err} />
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>İş Merkezi</th>
+              {weekList.map((w) => <th key={w} title={`Hafta başlangıcı: ${w}`}>{weekLabel(w)} <span className="muted" style={{ fontWeight: 400, fontSize: 11 }}>{shortDate(w)}</span></th>)}
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {wcs.map((w) => {
+              const cells = byWc.get(w.id) ?? [];
+              return (
+                <Fragment key={w.id}>
+                  <tr>
+                    <td><b>{w.code}</b> <span className="muted">{w.name}</span></td>
+                    {cells.map((c) => (
+                      <td key={c.week_start} style={{ background: c.has_override ? "#fff7ed" : undefined }} title={c.has_override ? `İstisna: ${c.note || "-"}` : "Varsayılan"}>
+                        <div style={{ whiteSpace: "nowrap" }}>
+                          <b>{c.headcount}</b> kişi · {fmt(c.efficient_hours_per_person, 2)} sa · {c.working_days} gün
+                        </div>
+                        <div className="muted">= {fmt(c.capacity_hours, 0)} saat</div>
+                      </td>
+                    ))}
+                    {cells.length === 0 && <td colSpan={Math.max(weekList.length, 1)} className="muted">…</td>}
+                    <td><button className={`secondary small${open === w.id ? " active" : ""}`} onClick={() => setOpen(open === w.id ? null : w.id)}>{open === w.id ? "Kapat" : canEdit ? "Düzenle" : "Detay"}</button></td>
+                  </tr>
+                  {open === w.id && (
+                    <tr>
+                      <td colSpan={weekList.length + 2} style={{ background: "#f8fafc" }}>
+                        <WcWeeksPanel wcId={w.id} wcCode={w.code} start={start} weeks={weeks} canEdit={canEdit} onChanged={() => { rows.reload(); onChanged(); }} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
+            {wcs.length === 0 && <tr><td className="muted">Planlanan iş merkezi yok.</td></tr>}
+          </tbody>
+        </table>
+      </div>
     </>
   );
 }
@@ -215,7 +285,7 @@ function ManualAdd({ wcs, weekList, onAdded }: { wcs: { id: number; code: string
           {detail.data?.operations.map((op) => <option key={op.id} value={op.id}>{op.seq} {op.operation_name} @ {wcs.find((w) => w.id === op.work_center_id)?.code}</option>)}
         </select>
       </label>
-      <label>Hafta<input type="date" value={week} onChange={(e) => setWeek(mondayOf(new Date(e.target.value)))} /></label>
+      <label>Hafta <span className="muted">({weekLabel(week)})</span><input type="date" value={week} onChange={(e) => setWeek(mondayOf(new Date(e.target.value)))} /></label>
       <label>Saat (boş = tamamı)<input type="number" step="0.5" value={hours} onChange={(e) => setHours(e.target.value)} /></label>
       <button onClick={submit} disabled={!orderId || !opId}>Ekle</button>
       <button className="secondary" onClick={() => setOpen(false)}>Vazgeç</button>
@@ -248,9 +318,10 @@ function LeadTimePanel() {
         <>
           <p><b>{res.item_code}</b> × {fmt(res.quantity, 0)} → toplam {fmt(res.total_hours)} saat · başlangıç <b>{res.start}</b> · bitiş <b>{res.end}</b></p>
           <table style={{ width: "auto" }}>
-            <thead><tr><th>Op.</th><th>İş Merkezi</th><th className="num">Saat</th><th>Başlangıç</th><th>Bitiş</th></tr></thead>
-            <tbody>{res.steps.map((s) => <tr key={s.operation_seq}><td>{s.operation_seq} {s.operation_name}</td><td>{s.work_center_code}</td><td className="num">{fmt(s.hours)}</td><td>{s.start}</td><td>{s.end}</td></tr>)}</tbody>
+            <thead><tr><th>Op.</th><th>İş Merkezi</th><th className="num">Saat</th><th>Başlangıç</th><th>Bitiş</th><th title="Senaryo matrisi: bu operasyon öncekine göre ne zaman başlar">Başlangıç kuralı</th></tr></thead>
+            <tbody>{res.steps.map((s) => <tr key={s.operation_seq}><td>{s.operation_seq} {s.operation_name}</td><td>{s.work_center_code}</td><td className="num">{fmt(s.hours)}</td><td>{s.start}</td><td>{s.end}</td><td className="muted">{s.start_rule || (s === res.steps[0] ? "ilk operasyon" : "")}</td></tr>)}</tbody>
           </table>
+          <p className="muted" style={{ marginBottom: 0 }}>Operasyon geçiş kuralları (iç içe başlama, bekleme) <a href="/scenarios">Senaryo Matrisi</a> sayfasından tanımlanır.</p>
         </>
       )}
     </div>

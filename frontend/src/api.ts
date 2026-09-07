@@ -100,7 +100,7 @@ export interface WorkCenter {
 }
 export interface Employee { id: number; code: string; name: string; work_center_id: number | null; machine_id: number | null; is_active: boolean; machine_code?: string }
 export interface Item { id: number; code: string; name: string; product_group: string; unit: string }
-export interface ItemDetail extends Item { bom_lines: { id: number; component_code: string; component_name: string; quantity: number; unit: string }[]; operations: { id: number; seq: number; operation_name: string; work_center_id: number; cycle_time_sec: number; setup_time_min: number }[] }
+export interface ItemDetail extends Item { bom_lines: { id: number; component_code: string; component_name: string; quantity: number; unit: string }[]; operations: { id: number; seq: number; operation_name: string; work_center_id: number; cycle_time_sec: number; setup_time_min: number; semi_finished_code: string }[] }
 export interface Order { id: number; order_no: string; customer: string; due_date: string; item_id: number; item_code: string; item_name: string; quantity: number; unit_price: number; revenue: number; status: string; merged_into_id: number | null; note: string }
 export interface OrderIn { order_no: string; customer: string; due_date: string; item_code: string; quantity: number; unit_price: number; note: string }
 export type PlanMode = "due_date" | "revenue";
@@ -127,6 +127,32 @@ export interface WorkCenterLoad { work_center_id: number; work_center_code: stri
 export interface PlanLine { id: number; order_id: number; order_no: string; customer: string; due_date: string; item_code: string; operation_id: number; operation_seq: number; work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; planned_qty: number; mode: string; strategy: string }
 export interface Progress { work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; expected_hours_to_date: number; actual_hours_to_date: number; remaining_hours: number; remaining_days: number; working_days: number; elapsed_days: number; status: string }
 export interface ImportKind { kind: string; title: string; columns: string[]; required: string[] }
+
+// ---- Haftalık iş gücü ----
+export interface WcWeek {
+  work_center_id: number; week_start: string;
+  headcount: number; efficient_hours_per_person: number; working_days: number; capacity_hours: number;
+  default_headcount: number; default_efficient_hours: number; default_working_days: number;
+  has_override: boolean; ov_headcount: number | null; ov_efficient_hours_per_person: number | null; ov_working_days: number | null; note: string;
+}
+
+// ---- Senaryo matrisi ----
+export type RuleKind = "finish" | "cycles";
+export interface Rule { rule: RuleKind; lag_cycles: number; wait_minutes: number; source: "default" | "group" | "item"; id: number | null; note: string; description: string }
+export interface FlowNode { name: string; work_centers: string[]; item_count: number; cycle_time_sec: number | null; semi_finished_codes: string[] }
+export interface FlowTransition { from_op: string; to_op: string; from_wip_code: string; to_wip_code: string; effective: Rule; group_rule: Rule | null; item_rule: Rule | null }
+export interface FlowItem { code: string; name: string; operations: string[]; semi_finished_codes: string[]; differs: boolean; item_rules: number }
+export interface Flow { product_group: string; item_code: string | null; item_name: string | null; nodes: FlowNode[]; transitions: FlowTransition[]; items: FlowItem[] }
+export interface ScenarioGroup { product_group: string; item_count: number; operations: string[]; rule_count: number }
+export interface RuleRow { id: number; scope: "group" | "item"; product_group: string; item_code: string | null; from_op: string; to_op: string; from_wip_code: string; to_wip_code: string; rule: RuleKind; lag_cycles: number; wait_minutes: number; note: string; description: string }
+
+// ---- Stok & rezervasyon ----
+export interface StockRow { item_id: number; item_code: string; item_name: string; product_group: string; on_hand: number; reserved: number; free: number; shipped: number; open_demand: number; open_orders: number }
+export interface OrderStockRow { order_id: number; order_no: string; customer: string; due_date: string; item_id: number; item_code: string; item_name: string; quantity: number; reserved: number; shipped: number; remaining: number; status: string; planned_end: string | null }
+export interface Receipt { id: number; item_id: number; item_code: string; item_name: string; receipt_date: string; quantity: number; lot: string; note: string; source: string; created_by: string }
+export interface Reservation { id: number; item_id: number; item_code: string; item_name: string; order_id: number; order_no: string; customer: string; due_date: string; order_qty: number; quantity: number; source: "auto" | "manual"; note: string; created_by: string; created_at: string | null }
+export interface Shipment { id: number; item_id: number; item_code: string; order_id: number; order_no: string; customer: string; ship_date: string; quantity: number; note: string; created_by: string }
+export interface AutoReserveResult { created: number; reserved_qty: number; items: number; message: string }
 export interface ImportResult { kind: string; inserted: number; updated: number; errors: string[] }
 
 export function mondayOf(d: Date): string {
@@ -141,3 +167,23 @@ export function addDays(iso: string, n: number): string {
   return d.toISOString().slice(0, 10);
 }
 export const fmt = (n: number | null | undefined, digits = 1) => (n === null || n === undefined ? "-" : n.toLocaleString("tr-TR", { maximumFractionDigits: digits }));
+
+/** ISO hafta numarası (Pzt başlangıçlı; yılın ilk Perşembesini içeren hafta = 1). */
+export function isoWeek(iso: string): { year: number; week: number } {
+  const d = new Date(Date.UTC(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10))));
+  const day = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - day); // haftanın Perşembesi
+  const year = d.getUTCFullYear();
+  const yearStart = Date.UTC(year, 0, 1);
+  const week = Math.ceil(((d.getTime() - yearStart) / 86400000 + 1) / 7);
+  return { year, week };
+}
+/** "H37" — hafta numarası etiketi (yıl farklıysa "H37/26"). */
+export function weekLabel(iso: string, withYear = false): string {
+  const { year, week } = isoWeek(iso);
+  return withYear || year !== new Date().getFullYear() ? `H${week}/${String(year).slice(2)}` : `H${week}`;
+}
+/** "07.09" — kısa tarih (gün.ay). */
+export const shortDate = (iso: string) => `${iso.slice(8, 10)}.${iso.slice(5, 7)}`;
+/** "H37 · 07.09" — hafta numarası + Pazartesi tarihi. */
+export const weekLong = (iso: string) => `${weekLabel(iso)} · ${shortDate(iso)}`;

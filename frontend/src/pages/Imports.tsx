@@ -5,18 +5,21 @@ import { ErrorText, useAsync } from "../components";
 
 interface LogRow { id: number; kind: string; filename: string; username: string; inserted: number; updated: number; errors: string[]; created_at: string }
 
-const ORDER = ["workcenters", "machines", "shifts", "employees", "items", "bom", "routing", "orders", "production", "downtime"];
+const ORDER = ["workcenters", "machines", "shifts", "wc_weeks", "employees", "items", "bom", "routing", "op_rules", "orders", "production", "downtime", "stock_receipts"];
 const HINT: Record<string, string> = {
   workcenters: "Önce iş merkezleri. Alan Kodu/Adı ile gruplanır; Kapasite Kaynağı: İM (personel/vardiya) veya Makine (makine atamaları).",
   machines: "İş merkezi altındaki makineler. Makine kodu benzersizdir.",
   shifts: "Günler: 0=Pzt … 6=Paz (örn. 0,1,2,3,4). Kişi sayısı 0 ise personel listesinden sayılır.",
+  wc_weeks: "Haftaya özel iş gücü: Hafta = Pazartesi tarihi ya da 2026-W37. Boş bırakılan alan varsayılanı korur; tüm alanlar boşsa istisna silinir.",
   employees: "Kimin hangi iş merkezinde (ve isteğe bağlı hangi makinede) çalıştığı → verimli kapasite.",
   items: "Stok kodları (BOM/rota yüklerken bilinmeyen kodlar otomatik oluşturulur).",
   bom: "Hammadde satırları.",
   routing: "Aşamalı tezgah sırası + çevrim süresi (sn/adet). Kapasite ihtiyacının kaynağı.",
+  op_rules: "Senaryo matrisi: Kural = Bitiş (önceki bitince) ya da Çevrim (önceki N çevrim tamamlayınca). Stok Kodu boşsa ürün grubu geneli.",
   orders: "Aynı Sipariş No + Stok Kodu tekrar yüklenirse güncellenir.",
   production: "Bir önceki günün üretimi. Aynı gün/iş merkezi/stok/op/sipariş satırı üzerine yazılır.",
   downtime: "Bir günün duruşları yeniden yüklenirse o gün/iş merkezi için eskiler silinir.",
+  stock_receipts: "Depoya giren bitmiş ürün (siparişten bağımsız). Rezervasyon Stok & Rezervasyon sayfasından yapılır.",
 };
 
 export default function Imports() {

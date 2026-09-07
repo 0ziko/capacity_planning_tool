@@ -101,7 +101,7 @@ def update_order(db: Session, o: Order, data: OrderIn) -> Order:
 def _end_day_in_week(db: Session, wc: WorkCenter, wk: date, order_id: int, lines_in_week: list[PlanLine]) -> date:
     """Haftadaki plan satirlari (termin sirasiyla) kumulatif doldurulur; bu siparisin
     payi bittigi noktadaki calisma gununu dondurur."""
-    wdays = cap.working_days(wc, wk, wk + timedelta(days=6))
+    wdays = cap.working_days(wc, wk, wk + timedelta(days=6), cap.Overrides(db, wc.id))
     if not wdays:
         return wk + timedelta(days=4)
     capacity = cap.week_capacity_hours(db, wc, wk)
@@ -229,8 +229,18 @@ def order_progress(db: Session, wc_ids: list[int] | None, as_of: date | None = N
     for p in db.query(PlanLine).filter(PlanLine.order_id.in_([o.id for o in orders])).all():
         planned[(p.order_id, p.operation_id)] += p.planned_hours
 
-    # operasyon anahtari: (item_id, seq) ; seq yoksa is merkezine gore ilk operasyon
-    def op_key(item: Item, seq: int | None, wc_id: int) -> int | None:
+    # operasyon anahtari: (item_id, seq) ; yarimamul kodu veya seq/is merkezi ile cozulur
+    from app.services.wip import resolve_wip, wip_index
+
+    wip_idx = wip_index(db)
+
+    def op_key(item: Item, seq: int | None, wc_id: int, wip_code: str = "") -> int | None:
+        if wip_code:
+            try:
+                op = resolve_wip(db, wip_code, item.code, wip_idx)
+                return op.id
+            except ValueError:
+                pass
         if seq is not None:
             op = next((x for x in item.operations if x.seq == seq), None)
         else:
@@ -252,7 +262,7 @@ def order_progress(db: Session, wc_ids: list[int] | None, as_of: date | None = N
         item = items_by_id.get(a.item_id)
         if not item:
             continue
-        op_id = op_key(item, a.operation_seq, a.work_center_id)
+        op_id = op_key(item, a.operation_seq, a.work_center_id, a.semi_finished_code or "")
         if op_id is None:
             continue
         if a.order_no:
@@ -303,6 +313,7 @@ def order_progress(db: Session, wc_ids: list[int] | None, as_of: date | None = N
                     operation_seq=op.seq,
                     operation_name=op.operation_name,
                     work_center_code=op.work_center.code if op.work_center else "(silinmiş İM)",
+                    semi_finished_code=op.semi_finished_code or "",
                     required_hours=round(req, 2),
                     planned_hours=round(planned.get((o.id, op.id), 0.0), 2),
                     produced_qty=round(pq, 2),

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, fmt, qs, type PeriodRevenue, type RevenueReport } from "../../api";
+import { api, fmt, qs, weekLong, type PeriodRevenue, type RevenueReport } from "../../api";
 import { ErrorText, useAsync } from "../../components";
 
 const MONTHS = ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"];
@@ -13,7 +13,7 @@ export function RevenueTable({ rows, granularity, showCumulative = true }: { row
       <table>
         <thead>
           <tr>
-            <th>{granularity === "week" ? "Hafta (Pzt)" : "Ay"}</th>
+            <th>{granularity === "week" ? "Hafta" : "Ay"}</th>
             <th className="num" title="Son operasyonu bu dönemde biten siparişlerin tüm cirosu (teslim / fatura mantığı)">Tamamlanan ciro</th>
             <th className="num">Sipariş</th>
             <th className="num" title="Her plan satırı, sipariş cirosunun planlanan saat / gereken saat payını kendi dönemine yazar (oransal ilerleme)">Oransal ciro</th>
@@ -24,7 +24,7 @@ export function RevenueTable({ rows, granularity, showCumulative = true }: { row
         <tbody>
           {rows.map((r) => (
             <tr key={r.period}>
-              <td><b>{granularity === "week" ? r.period : monthLabel(r.period)}</b></td>
+              <td title={r.period}><b>{granularity === "week" ? weekLong(r.period) : monthLabel(r.period)}</b></td>
               <td className="num" style={{ fontWeight: 600 }}>{r.completed_revenue ? fmt(r.completed_revenue, 0) : "—"}</td>
               <td className="num">{r.completed_orders || "—"}</td>
               <td className="num">{r.earned_revenue ? fmt(r.earned_revenue, 0) : "—"}</td>

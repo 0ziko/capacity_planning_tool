@@ -37,6 +37,8 @@ cd backend;  .\.venv\Scripts\python.exe seed_demo.py     # demo veri (API üzeri
 - `frontend/package.json`: react, react-dom, react-router-dom; dev: vite, @vitejs/plugin-react, typescript, @types/react*
 
 ## Araç Notları (Cursor / bu makine)
+- `python` ve `git` PATH'te yok: backend için `backend\.venv\Scripts\python.exe`, git için `%LOCALAPPDATA%\Programs\Git\cmd\git.exe`; tsc için PATH'e `%LOCALAPPDATA%\Programs\nodejs` ekle.
+- Cursor tarayıcısında React `onBlur` tetiklemek için `FocusEvent('focusout', {bubbles:true})` dispatch et (`blur` yetmez).
 - Cursor sandbox shell komutlarını çalıştıramıyor → komutlar `all` izniyle çalıştırılıyor.
 - Cursor Write aracı bu makinede bazı dosyaları BOM'suz **UTF-16LE** yazdı (özellikle memory-bank ilk oluşturma). Read/Glob bunları "binary" sayıyor. Kontrol: dosyanın 2. baytı `0x00` ise UTF-16. Dönüştürme (PowerShell):
   `[IO.File]::WriteAllText($p, [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($p)), (New-Object Text.UTF8Encoding($false)))`

@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { api, fmt, mondayOf, qs, type Capacity, type CapacitySource, type Machine, type Shift, type WorkCenter } from "../api";
 import { useAuth } from "../auth";
 import { ErrorText, useAsync, useWorkCenters } from "../components";
+import WcWeeksPanel from "./WcWeeksPanel";
 
 const DAYS = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"];
 const emptyWc = {
@@ -157,7 +158,7 @@ export default function WorkCenters() {
               <th>Kod</th><th>Ad</th>{!groupByArea && <th>Alan</th>}<th>Planlanıyor</th>
               <th className="num" title="Kapasite hesabında kullanılan kişi sayısı (vardiya kişi sayısı girilmişse o geçerlidir)">Kişi</th>
               <th>Kapasite kaynağı</th><th>Makineler</th><th>Vardiyalar</th>
-              <th className="num">Haftalık kapasite (saat)</th><th className="num">Birim</th><th></th>
+              <th className="num" title="Seçili haftanın kapasitesi; 'Haftalık' ile hafta hafta iş gücü istisnaları">Haftalık kapasite (saat)</th><th className="num">Birim</th><th></th>
             </tr>
           </thead>
           <tbody>
@@ -172,6 +173,7 @@ export default function WorkCenters() {
                     key={wc.id}
                     wc={wc}
                     cap={capBy[wc.id]}
+                    week={week}
                     canEdit={canEdit}
                     showArea={!groupByArea}
                     onEdit={() => setEdit(wc)}
@@ -204,12 +206,12 @@ function GroupRows({ header, colSpan, children }: { header: string | null; colSp
   );
 }
 
-function WcRow({ wc, cap, canEdit, showArea, onEdit, onDelete, onTogglePlanned, onSource, onChanged }: {
-  wc: WorkCenter; cap?: Capacity; canEdit: boolean; showArea: boolean;
+function WcRow({ wc, cap, week, canEdit, showArea, onEdit, onDelete, onTogglePlanned, onSource, onChanged }: {
+  wc: WorkCenter; cap?: Capacity; week: string; canEdit: boolean; showArea: boolean;
   onEdit: () => void; onDelete: () => void; onTogglePlanned: () => void; onSource: (s: CapacitySource) => void; onChanged: () => void;
 }) {
-  const [open, setOpen] = useState<"" | "shifts" | "machines">("");
-  const toggle = (k: "shifts" | "machines") => setOpen(open === k ? "" : k);
+  const [open, setOpen] = useState<"" | "shifts" | "machines" | "weeks">("");
+  const toggle = (k: "shifts" | "machines" | "weeks") => setOpen(open === k ? "" : k);
   const isMachines = wc.capacity_source === "machines";
   const noAssigned = isMachines && wc.machine_employee_count === 0;
   return (
@@ -240,7 +242,12 @@ function WcRow({ wc, cap, canEdit, showArea, onEdit, onDelete, onTogglePlanned, 
             {wc.shifts.length} vardiya {open === "shifts" ? "▲" : "▼"}
           </button>
         </td>
-        <td className="num">{cap ? fmt(cap.capacity_hours) : "…"}</td>
+        <td className="num">
+          {cap ? fmt(cap.capacity_hours) : "…"}{" "}
+          <button className={`secondary small${open === "weeks" ? " active" : ""}`} title="Hafta hafta iş gücü (kişi / verimli saat / gün) — haftaya özel istisna tanımla" onClick={() => toggle("weeks")}>
+            Haftalık {open === "weeks" ? "▲" : "▼"}
+          </button>
+        </td>
         <td className="num">{cap ? `${fmt(cap.capacity_units)} (× ${wc.capacity_unit_hours} sa)` : ""}</td>
         <td>
           {canEdit && (
@@ -254,7 +261,9 @@ function WcRow({ wc, cap, canEdit, showArea, onEdit, onDelete, onTogglePlanned, 
       {open && (
         <tr>
           <td colSpan={showArea ? 11 : 10} style={{ background: "#f8fafc" }}>
-            {open === "shifts" ? <Shifts wc={wc} canEdit={canEdit} onChanged={onChanged} /> : <Machines wc={wc} canEdit={canEdit} onChanged={onChanged} />}
+            {open === "shifts" && <Shifts wc={wc} canEdit={canEdit} onChanged={onChanged} />}
+            {open === "machines" && <Machines wc={wc} canEdit={canEdit} onChanged={onChanged} />}
+            {open === "weeks" && <WcWeeksPanel wcId={wc.id} start={week} weeks={12} canEdit={canEdit} onChanged={onChanged} />}
           </td>
         </tr>
       )}

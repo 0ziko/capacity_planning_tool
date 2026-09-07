@@ -23,7 +23,7 @@ def week_progress(db: Session, wc: WorkCenter, wk: date, as_of: date | None = No
         .scalar()
         or 0.0
     )
-    wdays = cap.working_days(wc, wk, wk_end)
+    wdays = cap.working_days(wc, wk, wk_end, cap.Overrides(db, wc.id))
     n_days = len(wdays)
     elapsed = len([d for d in wdays if d < as_of])
     expected = planned * (elapsed / n_days) if n_days else 0.0
@@ -72,7 +72,7 @@ def week_progress(db: Session, wc: WorkCenter, wk: date, as_of: date | None = No
 def daily_series(db: Session, wc: WorkCenter, wk: date) -> list[dict]:
     """Hafta icin gun gun kumulatif beklenen ve gerceklesen."""
     wk = cap.week_start(wk)
-    wdays = cap.working_days(wc, wk, wk + timedelta(days=6))
+    wdays = cap.working_days(wc, wk, wk + timedelta(days=6), cap.Overrides(db, wc.id))
     planned = (
         db.query(func.sum(PlanLine.planned_hours))
         .filter(PlanLine.work_center_id == wc.id, PlanLine.week_start == wk)

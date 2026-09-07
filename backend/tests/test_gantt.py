@@ -28,6 +28,9 @@ def test_load_includes_actual_hours(client, auth):
     assert w0["actual_utilization"] > 0
     assert w0["remaining_hours"] == round(w0["planned_hours"] - w0["actual_hours"], 2)
     assert w0["idle_hours"] == round(max(w0["capacity_hours"] - w0["planned_hours"], 0), 2)
+    if w0["capacity_hours"] > 0 and w0["remaining_hours"] > 0:
+        assert w0["remaining_days"] > 0
+        assert w0["remaining_days"] <= w0["remaining_hours"]
 
 
 def test_gantt_bars_with_production(client, auth):

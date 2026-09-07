@@ -384,6 +384,7 @@ class WeekLoad(BaseModel):
     actual_hours: float = 0.0
     actual_utilization: float = 0.0  # gerceklesen uretim / kapasite
     remaining_hours: float = 0.0  # plan - gerceklesen (kalan plan)
+    remaining_days: float = 0.0  # kalan saat / gunluk verimli kapasite
     idle_hours: float = 0.0  # kapasite - plan (atil kapasite)
     capacity_units: float
     planned_units: float

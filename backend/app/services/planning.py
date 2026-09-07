@@ -303,12 +303,16 @@ def load(db: Session, wc_ids: list[int] | None, start: date, weeks: int) -> list
     for w in wcs:
         rows = []
         unit = w.capacity_unit_hours or 1.0
+        ovl = cap.Overrides(db, w.id)
         for wk in wk_list:
             c = cap.week_capacity_hours(db, w, wk)
             p = planned.get((w.id, wk), 0.0)
             a = actual.get((w.id, wk), 0.0)
             remaining = max(p - a, 0.0)
             idle = max(c - p, 0.0)
+            n_days = len(cap.working_days(w, wk, wk + timedelta(days=6), ovl))
+            daily_cap = c / n_days if n_days else 0.0
+            rem_days = remaining / daily_cap if daily_cap > 0 else 0.0
             rows.append(
                 WeekLoad(
                     week_start=wk,
@@ -318,6 +322,7 @@ def load(db: Session, wc_ids: list[int] | None, start: date, weeks: int) -> list
                     actual_hours=round(a, 2),
                     actual_utilization=round(a / c, 3) if c > 0 else 0.0,
                     remaining_hours=round(remaining, 2),
+                    remaining_days=round(rem_days, 2),
                     idle_hours=round(idle, 2),
                     capacity_units=round(c / unit, 2),
                     planned_units=round(p / unit, 2),

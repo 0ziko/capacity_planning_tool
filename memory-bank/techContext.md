@@ -24,6 +24,9 @@
 ```powershell
 cd backend;  .\run_dev.ps1            # venv + pip + .env + uvicorn :8000  (API dokümanı /docs)
 cd frontend; npm install; npm run dev # :5173, /api -> :8000 proxy (vite.config.ts)
+# Backend'i arka planda, log dosyasina yazarak baslatmak icin (tercih edilen):
+cd backend; .\start_backend.ps1        # durdurmak: .\start_backend.ps1 -Stop ; loglar: backend\logs\backend.err.log
+# Not: uvicorn'u bir arac kabugu altinda `2>&1` ile calistirma — stderr borusu tikaninca ilk traceback tum sunucuyu kilitler (07.09 olayi).
 cd backend;  .\.venv\Scripts\python.exe -m pytest -q     # testler
 cd backend;  .\.venv\Scripts\python.exe seed_demo.py     # demo veri (API üzerinden Excel import akışı)
 ```

@@ -79,6 +79,10 @@ frontend/src/
 - `due_date`: termin sırası, kısmi yerleşim serbest. `revenue`: ciro/saat azalan sıra; her sipariş kapasite kopyası üzerinde denenir, tamamen sığmazsa atlanır; sonra atlananlar termin sırasıyla kısmen yerleştirilir (`skipped` = hiç yerleşemeyenler).
 - `orders.order_schedule(db, wc_ids, lines=None, orders=None)` hem DB hem simülasyon satırlarıyla çalışır → karşılaştırma aynı bitiş tarihi mantığını kullanır.
 
+## Veri Bütünlüğü
+- SQLite'ta `PRAGMA foreign_keys=ON` (session.py connect event). İş merkezi silme, bağlı rota/plan/üretim/duruş varsa 400 ile engellenir; çalışanların İM'si NULL'a çekilir; vardiyalar cascade.
+- `db/migrate.repair_orphans` açılışta ana kaydı silinmiş satırları temizler (`_ORPHAN_CHECKS` listesi). Servisler yine de `op.work_center is None` durumuna toleranslıdır.
+
 ## Ciro (v0.3)
 - `Order.unit_price`; ciro = quantity × unit_price (tek para birimi). Birleştirilen siparişte ağırlıklı ortalama fiyat.
 - `revenue.revenue_report`: completed (bitiş gününün haftası/ayı, tüm ciro) + earned (satır saat payı × ciro; tamamen planlananda pay planlanan toplam saate göre). Dönem listesi ufuk + ufuk dışına taşan bitişleri kapsar.

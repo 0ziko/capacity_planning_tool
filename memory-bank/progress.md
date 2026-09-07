@@ -29,6 +29,7 @@
 - [x] Sipariş / iş emri ilerleme raporu (Planlama › Sipariş ilerleme; butonla tetiklenir; Excel)
 - [x] Aynı stok kodlu siparişleri birleştirme önerisi + birleştir / geri al (Planlama › Birleştirme önerileri)
 - [x] Hafif şema migrasyonu (eksik kolon ekleme) — Alembic'e kadar
+- [x] Veri bütünlüğü: İM silme koruması, SQLite FK denetimi, açılışta yetim kayıt temizliği, arka plan başlatma scripti
 
 ## Çalışan (v0.3 — 2026-09-07, ciro ve planlama modları)
 - [x] Siparişte birim fiyat (form, liste, Excel şablonu/yedek); ciro = miktar × fiyat
@@ -57,6 +58,7 @@ Pilot denemeye hazır. Yerelde çalışıyor: backend :8000, frontend :5173 (SQL
 - Ciro "tamamlanan" yaklaşımı siparişin tüm cirosunu tahmini bitiş gününün dönemine yazar; kısmi teslimat / parçalı fatura modellenmez.
 - Çevrim süresi önerisi "fiili süre" yoksa günün verimli kapasitesini kazanılan saat oranıyla paylaştırır — kaba bir tahmindir; fiili süre kolonu doldurulursa doğruluk artar.
 - SECRET_KEY varsayılanı kısa; üretimde `.env` içinde uzun rastgele değer verilmeli.
+- Backend'i bir araç kabuğunda `2>&1` ile çalıştırma: stderr borusu tıkanırsa ilk traceback sunucuyu kilitler (07.09 giriş yapılamama olayı). `start_backend.ps1` kullan.
 
 ## Karar Evrimi
 - 2026-09-07: MRP2 sonlu kapasite yerine bağımsız iş gücü kapasite planlama aracı (veri akışı yetersizliği).

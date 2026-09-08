@@ -329,62 +329,83 @@ function ManualAdd({ wcs, weekList, onAdded }: { wcs: { id: number; code: string
 
 function LoadDetailModal({ wcId, wcCode, week, onClose }: { wcId: number; wcCode: string; week: string; onClose: () => void }) {
   const detail = useAsync(() => api.get<LoadDetail>(`/api/plan/load/detail${qs({ work_center_id: wcId, week_start: week })}`), [wcId, week]);
-  const rows = detail.data?.rows ?? [];
-  const total = detail.data?.total_hours || 1;
-  const byItem = new Map<string, number>();
-  for (const r of rows) byItem.set(r.item_code, (byItem.get(r.item_code) ?? 0) + r.planned_hours);
-  const pareto = [...byItem.entries()].sort((a, b) => b[1] - a[1]);
-  let cum = 0;
-  const paretoRows = pareto.map(([code, h]) => {
-    cum += h;
-    return { code, hours: h, pct: (h / total) * 100, cumPct: (cum / total) * 100 };
-  });
+  const rows = [...(detail.data?.rows ?? [])].sort((a, b) => (a.planned_start ?? "").localeCompare(b.planned_start ?? "") || a.order_no.localeCompare(b.order_no));
+  const totalHours = detail.data?.total_hours ?? rows.reduce((s, r) => s + r.planned_hours, 0);
+  const totalQty = detail.data?.total_qty ?? rows.reduce((s, r) => s + r.planned_qty, 0);
+  const paretoRows = detail.data?.pareto ?? [];
+  const exportXlsx = () => api.download(`/api/plan/load/detail.xlsx${qs({ work_center_id: wcId, week_start: week })}`, `is_listesi_${wcCode}_${week}.xlsx`);
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal panel" style={{ maxWidth: 920, width: "95vw" }} onClick={(e) => e.stopPropagation()}>
+      <div className="modal panel" style={{ maxWidth: 1100, width: "96vw" }} onClick={(e) => e.stopPropagation()}>
         <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
           <h2 style={{ margin: 0 }}>{wcCode} · {weekLong(week)} yük detayı</h2>
-          <button className="secondary" onClick={onClose}>Kapat</button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="secondary" onClick={exportXlsx} disabled={!detail.data?.rows.length}>⬇ Excel (iş listesi)</button>
+            <button className="secondary" onClick={onClose}>Kapat</button>
+          </div>
         </div>
         <ErrorText err={detail.err} />
         {detail.data && (
           <>
-            <p className="muted">Toplam planlanan: <b>{fmt(detail.data.total_hours)} saat</b> · {rows.length} satır</p>
-            <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 16 }}>
-              <div className="table-wrap" style={{ maxHeight: 360 }}>
+            <p className="muted">Toplam planlanan: <b>{fmt(totalHours)} saat</b> · <b>{fmt(totalQty, 0)}</b> adet · {rows.length} satır</p>
+            <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: 16 }}>
+              <div className="table-wrap" style={{ maxHeight: 420 }}>
                 <table>
-                  <thead><tr><th>Stok</th><th>Sipariş</th><th>Müşteri</th><th>Op.</th><th className="num">Miktar</th><th className="num">Saat</th><th>Mod</th></tr></thead>
+                  <thead>
+                    <tr>
+                      <th>Başlangıç</th><th>Bitiş</th><th>Yarımamül</th><th>Bitmiş ürün</th><th>Sipariş</th><th>Müşteri</th>
+                      <th>Op.</th><th className="num">Miktar</th><th className="num">Saat</th><th>Mod</th>
+                    </tr>
+                  </thead>
                   <tbody>
-                    {rows.map((r, i) => (
-                      <tr key={i}>
+                    {rows.map((r) => (
+                      <tr key={r.plan_line_id}>
+                        <td><b>{r.planned_start ? shortDate(r.planned_start) : "—"}</b></td>
+                        <td>{r.planned_end ? shortDate(r.planned_end) : "—"}</td>
+                        <td><code title={r.operation_name}>{r.semi_finished_code || <span className="muted">—</span>}</code></td>
                         <td><b>{r.item_code}</b></td>
-                        <td>{r.batch_no ? <><b>{r.batch_no}</b> <span className="muted">({r.order_no})</span></> : r.order_no}{r.position_no && !r.batch_no ? ` / ${r.position_no}` : ""}</td>
-                        <td>{r.customer}</td>
-                        <td>{r.operation_seq}</td>
+                        <td>
+                          {r.batch_no ? <><b>{r.batch_no}</b> <span className="muted">({r.batch_order_nos.join(", ")})</span></> : <>{r.order_no}{r.position_no ? ` / ${r.position_no}` : ""}</>}
+                        </td>
+                        <td className="muted">{r.customer}</td>
+                        <td title={r.operation_name}>{r.operation_seq}</td>
                         <td className="num">{fmt(r.planned_qty, 0)}</td>
                         <td className="num">{fmt(r.planned_hours, 2)}</td>
                         <td>{r.mode === "forecast" ? <span className="badge ok">tahmin</span> : r.mode}</td>
                       </tr>
                     ))}
-                    {rows.length === 0 && <tr><td colSpan={7} className="muted">Plan satırı yok.</td></tr>}
+                    {rows.length === 0 && <tr><td colSpan={10} className="muted">Plan satırı yok.</td></tr>}
+                    {rows.length > 0 && (
+                      <tr style={{ fontWeight: 700, background: "#f5f7fa" }}>
+                        <td colSpan={7}>Alt toplam</td>
+                        <td className="num">{fmt(totalQty, 0)}</td>
+                        <td className="num">{fmt(totalHours, 2)}</td>
+                        <td></td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>
               <div>
-                <h3 style={{ marginTop: 0 }}>Pareto — stok kodu bazlı saat</h3>
+                <h3 style={{ marginTop: 0 }}>Pareto — bitmiş ürün bazlı saat</h3>
                 {paretoRows.map((p) => (
-                  <div key={p.code} style={{ marginBottom: 8 }}>
+                  <div key={p.item_code} style={{ marginBottom: 8 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
-                      <span><b>{p.code}</b></span>
-                      <span>{fmt(p.hours, 1)} sa · {fmt(p.pct, 0)}% · küm. {fmt(p.cumPct, 0)}%</span>
+                      <span><b>{p.item_code}</b></span>
+                      <span>{fmt(p.hours, 1)} sa · {fmt(p.pct, 0)}% · küm. {fmt(p.cum_pct, 0)}%</span>
                     </div>
                     <div style={{ background: "#e0e0e0", height: 8, borderRadius: 4, overflow: "hidden" }}>
-                      <div style={{ width: `${p.pct}%`, background: "var(--primary)", height: "100%" }} />
+                      <div style={{ width: `${Math.min(p.pct, 100)}%`, background: "var(--primary)", height: "100%" }} />
                     </div>
                   </div>
                 ))}
                 {paretoRows.length === 0 && <p className="muted">Veri yok.</p>}
+                {paretoRows.length > 0 && (
+                  <div className="panel" style={{ marginTop: 12, padding: "8px 12px", background: "#f5f7fa" }}>
+                    <b>Alt toplam:</b> {fmt(totalHours, 1)} saat · {paretoRows.length} ürün kodu
+                  </div>
+                )}
               </div>
             </div>
           </>

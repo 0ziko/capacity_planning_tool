@@ -169,6 +169,16 @@ def get_load_detail(work_center_id: int, week_start: date, db: Session = Depends
         raise HTTPException(400, str(e))
 
 
+@router.get("/plan/load/detail.xlsx")
+def load_detail_xlsx(work_center_id: int, week_start: date, db: Session = Depends(get_db), _=Depends(require_user)):
+    try:
+        detail = planning.load_detail(db, work_center_id, week_start)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    content = excel.build_load_detail_xlsx(detail)
+    return _xlsx(content, f"is_listesi_{detail.work_center_code}_{week_start}.xlsx")
+
+
 @router.post("/plan/leadtime/forecast", response_model=dict)
 def add_leadtime_forecast(req: ForecastFromLeadTimeIn, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
     try:

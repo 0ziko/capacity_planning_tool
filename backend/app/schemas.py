@@ -539,16 +539,29 @@ class ForecastFromLeadTimeIn(BaseModel):
 
 
 class LoadDetailRow(BaseModel):
+    plan_line_id: int = 0
     item_code: str
     item_name: str = ""
+    semi_finished_code: str = ""
+    operation_name: str = ""
     order_no: str = ""
     position_no: str = ""
     customer: str = ""
     batch_no: str = ""
+    batch_order_nos: list[str] = []
     operation_seq: int = 0
     planned_hours: float
     planned_qty: float
+    planned_start: date | None = None
+    planned_end: date | None = None
     mode: str = ""
+
+
+class LoadDetailParetoRow(BaseModel):
+    item_code: str
+    hours: float
+    pct: float
+    cum_pct: float
 
 
 class LoadDetailOut(BaseModel):
@@ -556,7 +569,9 @@ class LoadDetailOut(BaseModel):
     work_center_code: str
     week_start: date
     total_hours: float
+    total_qty: float
     rows: list[LoadDetailRow]
+    pareto: list[LoadDetailParetoRow]
 
 
 # ---- Progress ----

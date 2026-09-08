@@ -1337,3 +1337,65 @@ def build_report(sheets: dict[str, tuple[list[str], list[list[Any]]]]) -> bytes:
     for title, (header, rows) in sheets.items():
         _ws_from_rows(wb, title, header, rows)
     return workbook_bytes(wb)
+
+
+def build_load_detail_xlsx(detail) -> bytes:
+    """Haftalik yuk detayi: is listesi + Pareto (uretim ekibi icin)."""
+    job_hdr = [
+        "Plan Başlangıç",
+        "Plan Bitiş",
+        "Yarımamül Kodu",
+        "Bitmiş Ürün",
+        "Ürün Adı",
+        "Op.",
+        "Operasyon",
+        "Sipariş",
+        "Poz",
+        "Müşteri",
+        "Parti No",
+        "Parti Siparişleri",
+        "Miktar",
+        "Saat",
+        "Mod",
+    ]
+    job_rows = [
+        [
+            r.planned_start,
+            r.planned_end,
+            r.semi_finished_code or "—",
+            r.item_code,
+            r.item_name,
+            r.operation_seq,
+            r.operation_name,
+            r.order_no,
+            r.position_no,
+            r.customer,
+            r.batch_no,
+            ", ".join(r.batch_order_nos),
+            r.planned_qty,
+            r.planned_hours,
+            "tahmin" if r.mode == "forecast" else r.mode,
+        ]
+        for r in detail.rows
+    ]
+    job_rows.append(["", "", "", "", "", "", "", "", "", "", "", "", "TOPLAM", detail.total_qty, detail.total_hours, ""])
+
+    pareto_hdr = ["Bitmiş Ürün Kodu", "Saat", "Pay %", "Kümülatif %"]
+    pareto_rows = [[p.item_code, p.hours, p.pct, p.cum_pct] for p in detail.pareto]
+    if pareto_rows:
+        pareto_rows.append(["TOPLAM", detail.total_hours, 100, 100])
+
+    summary_rows = [
+        ["İş Merkezi", detail.work_center_code],
+        ["Hafta Başlangıcı", detail.week_start],
+        ["Plan Satırı", len(detail.rows)],
+        ["Toplam Miktar", detail.total_qty],
+        ["Toplam Saat", detail.total_hours],
+    ]
+    return build_report(
+        {
+            "Özet": (["Alan", "Değer"], summary_rows),
+            "İş Listesi": (job_hdr, job_rows),
+            "Pareto": (pareto_hdr, pareto_rows),
+        }
+    )

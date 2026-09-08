@@ -17,6 +17,7 @@ from app.schemas import (
     LeadTimeRequest,
     LeadTimeStep,
     LoadDetailOut,
+    LoadDetailParetoRow,
     LoadDetailRow,
     ManualPlanLineIn,
     PlanLineOut,
@@ -564,32 +565,92 @@ def lead_time(db: Session, req: LeadTimeRequest) -> LeadTimeOut:
 
 
 def load_detail(db: Session, work_center_id: int, week_start: date) -> LoadDetailOut:
+    from app.services.gantt import _line_window_in_week
+
     wc = db.get(WorkCenter, work_center_id)
     if not wc:
         raise ValueError("Is merkezi bulunamadi")
     wk = cap.week_start(week_start)
-    lines = plan_lines(db, [work_center_id], wk, wk + timedelta(days=6))
-    rows = [
-        LoadDetailRow(
-            item_code=l.item_code,
-            item_name="",
-            order_no=l.order_no,
-            position_no=l.position_no,
-            customer=l.customer if not l.batch_no else "parti",
-            batch_no=l.batch_no,
-            operation_seq=l.operation_seq,
-            planned_hours=l.planned_hours,
-            planned_qty=l.planned_qty,
-            mode=l.mode,
+    pls = (
+        db.query(PlanLine)
+        .options(
+            joinedload(PlanLine.order).joinedload(Order.item),
+            joinedload(PlanLine.production_batch).joinedload(ProductionBatch.orders).joinedload(ProductionBatchOrder.order),
+            joinedload(PlanLine.operation),
         )
-        for l in lines
-    ]
+        .filter(PlanLine.work_center_id == work_center_id, PlanLine.week_start == wk)
+        .all()
+    )
+    rows: list[LoadDetailRow] = []
+    for pl in sorted(pls, key=lambda p: (effective_due(p.order), p.order.order_no, p.order_id, p.operation.seq, p.id)):
+        if pl.order is None or pl.operation is None:
+            continue
+        ps, pe = _line_window_in_week(db, wc, wk, pl.id, pls)
+        op = pl.operation
+        item = pl.order.item
+        batch_no = ""
+        batch_nos: list[str] = []
+        order_no = pl.order.order_no
+        position_no = pl.order.position_no or ""
+        customer = pl.order.customer
+        qty = pl.planned_qty if pl.planned_qty > 0 else pl.order.quantity
+        if pl.production_batch:
+            batch_no = pl.production_batch.batch_no
+            order_no = batch_no
+            position_no = ""
+            batch_nos = [
+                f"{l.order.order_no}{f'/{l.order.position_no}' if l.order and l.order.position_no else ''}"
+                for l in sorted(pl.production_batch.orders, key=lambda x: x.order_id)
+                if l.order
+            ]
+            customers = sorted({l.order.customer for l in pl.production_batch.orders if l.order and l.order.customer})
+            customer = ", ".join(customers) if customers else "parti"
+            qty = pl.planned_qty if pl.planned_qty > 0 else pl.production_batch.quantity
+        rows.append(
+            LoadDetailRow(
+                plan_line_id=pl.id,
+                item_code=item.code if item else "",
+                item_name=item.name if item else "",
+                semi_finished_code=(op.semi_finished_code or "").strip(),
+                operation_name=op.operation_name or "",
+                order_no=order_no,
+                position_no=position_no,
+                customer=customer,
+                batch_no=batch_no,
+                batch_order_nos=batch_nos,
+                operation_seq=op.seq,
+                planned_hours=round(pl.planned_hours, 3),
+                planned_qty=round(qty, 2),
+                planned_start=ps,
+                planned_end=pe,
+                mode=pl.mode,
+            )
+        )
+    total_hours = round(sum(r.planned_hours for r in rows), 2)
+    total_qty = round(sum(r.planned_qty for r in rows), 2)
+    by_item: dict[str, float] = defaultdict(float)
+    for r in rows:
+        by_item[r.item_code] += r.planned_hours
+    pareto: list[LoadDetailParetoRow] = []
+    cum = 0.0
+    for code, h in sorted(by_item.items(), key=lambda x: -x[1]):
+        cum += h
+        pareto.append(
+            LoadDetailParetoRow(
+                item_code=code,
+                hours=round(h, 2),
+                pct=round(h / total_hours * 100, 1) if total_hours > 0 else 0.0,
+                cum_pct=round(cum / total_hours * 100, 1) if total_hours > 0 else 0.0,
+            )
+        )
     return LoadDetailOut(
         work_center_id=wc.id,
         work_center_code=wc.code,
         week_start=wk,
-        total_hours=round(sum(r.planned_hours for r in rows), 2),
+        total_hours=total_hours,
+        total_qty=total_qty,
         rows=rows,
+        pareto=pareto,
     )
 
 

@@ -160,8 +160,9 @@ export interface GanttData {
   timeline_days: string[]; bars: GanttBar[];
 }
 export interface PlanLine { id: number; order_id: number; order_no: string; position_no: string; production_batch_id: number | null; batch_no: string; batch_order_nos: string[]; customer: string; due_date: string; item_code: string; operation_id: number; operation_seq: number; work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; planned_qty: number; mode: string; strategy: string }
-export interface LoadDetailRow { item_code: string; item_name: string; order_no: string; position_no: string; customer: string; batch_no: string; operation_seq: number; planned_hours: number; planned_qty: number; mode: string }
-export interface LoadDetail { work_center_id: number; work_center_code: string; week_start: string; total_hours: number; rows: LoadDetailRow[] }
+export interface LoadDetailRow { plan_line_id: number; item_code: string; item_name: string; semi_finished_code: string; operation_name: string; order_no: string; position_no: string; customer: string; batch_no: string; batch_order_nos: string[]; operation_seq: number; planned_hours: number; planned_qty: number; planned_start: string | null; planned_end: string | null; mode: string }
+export interface LoadDetailParetoRow { item_code: string; hours: number; pct: number; cum_pct: number }
+export interface LoadDetail { work_center_id: number; work_center_code: string; week_start: string; total_hours: number; total_qty: number; rows: LoadDetailRow[]; pareto: LoadDetailParetoRow[] }
 export interface LeadTimeStep { operation_seq: number; operation_name: string; work_center_code: string; hours: number; start: string; end: string; start_rule: string }
 export interface LeadTime { item_code: string; quantity: number; total_hours: number; start: string; end: string; steps: LeadTimeStep[] }
 export interface Progress { work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; expected_hours_to_date: number; actual_hours_to_date: number; remaining_hours: number; remaining_days: number; working_days: number; elapsed_days: number; status: string }

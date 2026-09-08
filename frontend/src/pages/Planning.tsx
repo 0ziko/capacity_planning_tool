@@ -1,7 +1,7 @@
 import { Fragment, useState } from "react";
-import { addDays, api, fmt, mondayOf, qs, shortDate, weekLabel, weekLong, type ItemDetail, type Order, type OrderSchedule, type PlanLine, type PlanMode, type WcWeek, type WorkCenterLoad } from "../api";
+import { addDays, api, fmt, mondayOf, qs, shortDate, weekLabel, weekLong, type ItemDetail, type LoadDetail, type LeadTime, type Order, type OrderSchedule, type PlanLine, type PlanMode, type WcWeek, type WorkCenterLoad } from "../api";
 import { useAuth } from "../auth";
-import { Bar, ErrorText, UtilBadge, WcMultiSelect, useAsync, useWorkCenters } from "../components";
+import { Bar, ErrorText, UtilBadge, WeekInput, WcMultiSelect, useAsync, useWorkCenters } from "../components";
 import WcWeeksPanel from "./WcWeeksPanel";
 import ComparePanel from "./planning/ComparePanel";
 import MergePanel from "./planning/MergePanel";
@@ -12,7 +12,6 @@ import GanttPanel from "./planning/GanttPanel";
 import WcOrdersPanel from "./planning/WcOrdersPanel";
 
 interface AutoResult { created: number; message: string; mode: PlanMode; unplanned: { order_no: string; item_code: string; operation_seq: number; work_center_code: string; hours: number }[]; skipped: { order_no: string; item_code: string; revenue: number; hours: number }[] }
-interface LeadTime { item_code: string; quantity: number; total_hours: number; start: string; end: string; steps: { operation_seq: number; operation_name: string; work_center_code: string; hours: number; start: string; end: string; start_rule: string }[] }
 
 type Tab = "load" | "labor" | "gantt" | "orders" | "wc" | "revenue" | "compare" | "progress" | "merge" | "leadtime";
 const TABS: { id: Tab; label: string; hint: string }[] = [
@@ -40,6 +39,7 @@ export default function Planning() {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [weekFilter, setWeekFilter] = useState("");
+  const [loadDetail, setLoadDetail] = useState<{ wcId: number; wcCode: string; week: string } | null>(null);
   const load = useAsync(() => api.get<WorkCenterLoad[]>(`/api/plan/load${qs({ start, weeks, work_center_ids: wcIds })}`), [start, weeks, wcIds.join(",")]);
   const lines = useAsync(() => api.get<PlanLine[]>(`/api/plan/lines${qs({ start, end: addDays(start, weeks * 7 - 1), work_center_ids: wcIds })}`), [start, weeks, wcIds.join(",")]);
   const schedule = useAsync(() => api.get<OrderSchedule[]>(`/api/plan/orders${qs({ work_center_ids: wcIds })}`), [wcIds.join(",")]);
@@ -73,7 +73,7 @@ export default function Planning() {
     <>
       <h1>Planlama</h1>
       <div className="panel row">
-        <label>Başlangıç haftası<input type="date" value={start} onChange={(e) => setStart(mondayOf(new Date(e.target.value)))} /></label>
+        <WeekInput value={start} onChange={setStart} label="Başlangıç haftası" />
         <label>Hafta sayısı<input type="number" min={1} max={52} value={weeks} onChange={(e) => setWeeks(Number(e.target.value) || 1)} /></label>
         <WcMultiSelect wcs={wcs} value={wcIds} onChange={setWcIds} onlyPlanned />
         {can("poweruser") && (
@@ -138,7 +138,7 @@ export default function Planning() {
       {tab === "compare" && <ComparePanel start={start} weeks={weeks} wcIds={wcIds} onApplied={refresh} />}
       {tab === "progress" && <OrderProgressPanel wcIds={wcIds} />}
       {tab === "merge" && <MergePanel onChanged={() => { refresh(); mergeCount.reload(); }} />}
-      {tab === "leadtime" && <LeadTimePanel />}
+      {tab === "leadtime" && <LeadTimePanel onForecastAdded={refresh} />}
       {tab === "load" && (<>
       <h2>Haftalık yük (saat: plan / gerçekleşen / kalan / kalan iş gün)</h2>
       <p className="muted" style={{ marginTop: -8 }}>Mavi = planlanan yük; yeşil = üretim beyanı (gerçekleşen). <b>Kalan</b> = plan − gerçekleşen. Son değer = kalan saatin tanımlı iş gücüne göre iş günü karşılığı. <b>Atıl kapasite</b> = kapasite − plan.</p>
@@ -154,7 +154,12 @@ export default function Planning() {
               <tr key={wc.work_center_id}>
                 <td><b>{wc.work_center_code}</b></td>
                 {wc.weeks.map((w) => (
-                  <td key={w.week_start} title={`Plan: ${fmt(w.planned_hours)} sa · Gerçekleşen: ${fmt(w.actual_hours)} sa · Kalan: ${fmt(w.remaining_hours)} sa · Kalan iş gün: ${fmt(w.remaining_days, 2)} · Atıl: ${w.idle_hours > 0.5 ? fmt(w.idle_hours) + " sa" : "yok"}`}>
+                  <td
+                    key={w.week_start}
+                    style={{ cursor: w.planned_hours > 0 ? "pointer" : undefined }}
+                    onClick={() => w.planned_hours > 0 && setLoadDetail({ wcId: wc.work_center_id, wcCode: wc.work_center_code, week: w.week_start })}
+                    title={`Plan: ${fmt(w.planned_hours)} sa · Gerçekleşen: ${fmt(w.actual_hours)} sa · Kalan: ${fmt(w.remaining_hours)} sa · Kalan iş gün: ${fmt(w.remaining_days, 2)} · Atıl: ${w.idle_hours > 0.5 ? fmt(w.idle_hours) + " sa" : "yok"}${w.planned_hours > 0 ? " · Detay için tıklayın" : ""}`}
+                  >
                     <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 155 }}>
                       <span style={{ fontSize: 12 }}>{fmt(w.planned_hours, 0)} / <b style={{ color: "var(--ok)" }}>{fmt(w.actual_hours, 0)}</b> / {fmt(w.remaining_hours, 0)} / <span title="Kalan iş gün">{fmt(w.remaining_days, 2)}</span></span>
                       <span style={{ fontSize: 11 }} className="muted">Atıl: {w.idle_hours > 0.5 ? <b>{fmt(w.idle_hours, 0)} sa</b> : "yok"}</span>
@@ -204,7 +209,7 @@ export default function Planning() {
                 <td style={{ color: l.due_date < l.week_start ? "var(--bad)" : undefined }} title={l.due_date < l.week_start ? "Termin, plan haftasından önce!" : ""}>{l.due_date}</td>
                 <td>{l.item_code}</td><td>{l.operation_seq}</td>
                 <td className="num">{fmt(l.planned_hours, 2)}</td><td className="num">{fmt(l.planned_qty, 0)}</td>
-                <td><span className={`badge ${l.mode === "manual" ? "warn" : "muted"}`} title={l.strategy === "revenue" ? "Otomatik · maksimum ciro" : l.strategy === "due_date" ? "Otomatik · termine göre" : ""}>{l.mode === "manual" ? "manuel" : l.strategy === "revenue" ? "oto 💰" : "oto"}</span></td>
+                <td><span className={`badge ${l.mode === "manual" ? "warn" : l.mode === "forecast" ? "ok" : "muted"}`} title={l.strategy === "revenue" ? "Otomatik · maksimum ciro" : l.strategy === "due_date" ? "Otomatik · termine göre" : l.mode === "forecast" ? "Terminleme tahmini" : ""}>{l.mode === "manual" ? "manuel" : l.mode === "forecast" ? "tahmin" : l.strategy === "revenue" ? "oto 💰" : "oto"}</span></td>
                 <td>{can("poweruser") && (<><button className="secondary small" onClick={() => setHours(l)}>Saat</button> <button className="danger small" onClick={async () => { await api.del(`/api/plan/lines/${l.id}`); refresh(); }}>Sil</button></>)}</td>
               </tr>
             ))}
@@ -212,6 +217,7 @@ export default function Planning() {
           </tbody>
         </table>
       </div>
+      {loadDetail && <LoadDetailModal wcId={loadDetail.wcId} wcCode={loadDetail.wcCode} week={loadDetail.week} onClose={() => setLoadDetail(null)} />}
       </>)}
     </>
   );
@@ -312,7 +318,7 @@ function ManualAdd({ wcs, weekList, onAdded }: { wcs: { id: number; code: string
           {detail.data?.operations.map((op) => <option key={op.id} value={op.id}>{op.seq} {op.operation_name} @ {wcs.find((w) => w.id === op.work_center_id)?.code}</option>)}
         </select>
       </label>
-      <label>Hafta <span className="muted">({weekLabel(week)})</span><input type="date" value={week} onChange={(e) => setWeek(mondayOf(new Date(e.target.value)))} /></label>
+      <label>Hafta <span className="muted">({weekLabel(week)})</span><WeekInput value={week} onChange={setWeek} label="" /></label>
       <label>Saat (boş = tamamı)<input type="number" step="0.5" value={hours} onChange={(e) => setHours(e.target.value)} /></label>
       <button onClick={submit} disabled={!orderId || !opId}>Ekle</button>
       <button className="secondary" onClick={() => setOpen(false)}>Vazgeç</button>
@@ -321,29 +327,124 @@ function ManualAdd({ wcs, weekList, onAdded }: { wcs: { id: number; code: string
   );
 }
 
-function LeadTimePanel() {
+function LoadDetailModal({ wcId, wcCode, week, onClose }: { wcId: number; wcCode: string; week: string; onClose: () => void }) {
+  const detail = useAsync(() => api.get<LoadDetail>(`/api/plan/load/detail${qs({ work_center_id: wcId, week_start: week })}`), [wcId, week]);
+  const rows = detail.data?.rows ?? [];
+  const total = detail.data?.total_hours || 1;
+  const byItem = new Map<string, number>();
+  for (const r of rows) byItem.set(r.item_code, (byItem.get(r.item_code) ?? 0) + r.planned_hours);
+  const pareto = [...byItem.entries()].sort((a, b) => b[1] - a[1]);
+  let cum = 0;
+  const paretoRows = pareto.map(([code, h]) => {
+    cum += h;
+    return { code, hours: h, pct: (h / total) * 100, cumPct: (cum / total) * 100 };
+  });
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal panel" style={{ maxWidth: 920, width: "95vw" }} onClick={(e) => e.stopPropagation()}>
+        <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+          <h2 style={{ margin: 0 }}>{wcCode} · {weekLong(week)} yük detayı</h2>
+          <button className="secondary" onClick={onClose}>Kapat</button>
+        </div>
+        <ErrorText err={detail.err} />
+        {detail.data && (
+          <>
+            <p className="muted">Toplam planlanan: <b>{fmt(detail.data.total_hours)} saat</b> · {rows.length} satır</p>
+            <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 16 }}>
+              <div className="table-wrap" style={{ maxHeight: 360 }}>
+                <table>
+                  <thead><tr><th>Stok</th><th>Sipariş</th><th>Müşteri</th><th>Op.</th><th className="num">Miktar</th><th className="num">Saat</th><th>Mod</th></tr></thead>
+                  <tbody>
+                    {rows.map((r, i) => (
+                      <tr key={i}>
+                        <td><b>{r.item_code}</b></td>
+                        <td>{r.batch_no ? <><b>{r.batch_no}</b> <span className="muted">({r.order_no})</span></> : r.order_no}{r.position_no && !r.batch_no ? ` / ${r.position_no}` : ""}</td>
+                        <td>{r.customer}</td>
+                        <td>{r.operation_seq}</td>
+                        <td className="num">{fmt(r.planned_qty, 0)}</td>
+                        <td className="num">{fmt(r.planned_hours, 2)}</td>
+                        <td>{r.mode === "forecast" ? <span className="badge ok">tahmin</span> : r.mode}</td>
+                      </tr>
+                    ))}
+                    {rows.length === 0 && <tr><td colSpan={7} className="muted">Plan satırı yok.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+              <div>
+                <h3 style={{ marginTop: 0 }}>Pareto — stok kodu bazlı saat</h3>
+                {paretoRows.map((p) => (
+                  <div key={p.code} style={{ marginBottom: 8 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                      <span><b>{p.code}</b></span>
+                      <span>{fmt(p.hours, 1)} sa · {fmt(p.pct, 0)}% · küm. {fmt(p.cumPct, 0)}%</span>
+                    </div>
+                    <div style={{ background: "#e0e0e0", height: 8, borderRadius: 4, overflow: "hidden" }}>
+                      <div style={{ width: `${p.pct}%`, background: "var(--primary)", height: "100%" }} />
+                    </div>
+                  </div>
+                ))}
+                {paretoRows.length === 0 && <p className="muted">Veri yok.</p>}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LeadTimePanel({ onForecastAdded }: { onForecastAdded: () => void }) {
+  const { can } = useAuth();
   const [code, setCode] = useState("");
   const [qty, setQty] = useState(100);
   const [start, setStart] = useState(new Date().toISOString().slice(0, 10));
+  const [label, setLabel] = useState("");
   const [res, setRes] = useState<LeadTime | null>(null);
   const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
   const run = async () => {
-    setErr("");
+    setErr(""); setMsg("");
     try { setRes(await api.post<LeadTime>("/api/plan/leadtime", { item_code: code, quantity: qty, start })); } catch (e) { setErr((e as Error).message); }
+  };
+  const addForecast = async () => {
+    if (!res || !confirm("Hesaplanan termin planda TAHMİN olarak kaydedilsin mi? Aynı gün içindeki sonraki terminlemeler bu yükü dikkate alır.")) return;
+    setBusy(true); setErr("");
+    try {
+      const out = await api.post<{ created: number; message: string }>("/api/plan/leadtime/forecast", { item_code: res.item_code, quantity: res.quantity, label: label.trim(), steps: res.steps });
+      setMsg(out.message);
+      onForecastAdded();
+    } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
+  };
+  const clearForecast = async () => {
+    if (!confirm("Tüm tahmin plan satırları silinsin mi?")) return;
+    await api.del("/api/plan/forecast");
+    setMsg("Tahmin satırları silindi.");
+    onForecastAdded();
   };
   return (
     <div className="panel">
       <h2 style={{ marginTop: 0 }}>Yeni iş terminleme (mevcut plan doluluğuna göre)</h2>
+      <p className="muted" style={{ marginTop: -6 }}>Aynı gün birden fazla termin hesapladığınızda, önceki sonuçları <b>plana tahmin olarak ekleyin</b>; sonraki hesaplamalar doluluğu doğru yansıtır.</p>
       <div className="row">
         <label>Stok kodu<input value={code} onChange={(e) => setCode(e.target.value)} /></label>
         <label>Miktar<input type="number" value={qty} onChange={(e) => setQty(Number(e.target.value))} /></label>
         <label>En erken başlangıç<input type="date" value={start} onChange={(e) => setStart(e.target.value)} /></label>
         <button onClick={run} disabled={!code}>Hesapla</button>
+        {can("poweruser") && <button className="secondary" onClick={clearForecast}>Tahminleri temizle</button>}
       </div>
       <ErrorText err={err} />
+      {msg && <div className="success">{msg}</div>}
       {res && (
         <>
           <p><b>{res.item_code}</b> × {fmt(res.quantity, 0)} → toplam {fmt(res.total_hours)} saat · başlangıç <b>{res.start}</b> · bitiş <b>{res.end}</b></p>
+          {can("poweruser") && (
+            <div className="row" style={{ marginBottom: 10 }}>
+              <label>Tahmin etiketi<input value={label} onChange={(e) => setLabel(e.target.value)} placeholder={`TAH-${res.item_code}`} style={{ minWidth: 200 }} /></label>
+              <button onClick={addForecast} disabled={busy}>Plana tahmin olarak ekle</button>
+            </div>
+          )}
           <table style={{ width: "auto" }}>
             <thead><tr><th>Op.</th><th>İş Merkezi</th><th className="num">Saat</th><th>Başlangıç</th><th>Bitiş</th><th title="Senaryo matrisi: bu operasyon öncekine göre ne zaman başlar">Başlangıç kuralı</th></tr></thead>
             <tbody>{res.steps.map((s) => <tr key={s.operation_seq}><td>{s.operation_seq} {s.operation_name}</td><td>{s.work_center_code}</td><td className="num">{fmt(s.hours)}</td><td>{s.start}</td><td>{s.end}</td><td className="muted">{s.start_rule || (s === res.steps[0] ? "ilk operasyon" : "")}</td></tr>)}</tbody>

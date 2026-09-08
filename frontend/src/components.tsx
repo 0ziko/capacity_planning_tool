@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, isoWeekInputValue, mondayFromIsoWeek, weekLabel, type WorkCenter } from "./api";
+import { api, isoWeekInputValue, mondayFromIsoWeek, weekLabel, weekLong, type WorkCenter } from "./api";
 
 export function useWorkCenters() {
   const [wcs, setWcs] = useState<WorkCenter[]>([]);
@@ -106,6 +106,19 @@ export function WcMultiSelect({ wcs, value, onChange, onlyPlanned = false, label
         )}
       </div>
     </div>
+  );
+}
+
+/** ISO hafta seçici — doğrudan hafta numarası ile seçim (Pazartesi tarihine çevrilir). */
+export function WeekInput({ value, onChange, label = "Hafta" }: { value: string; onChange: (mondayIso: string) => void; label?: string }) {
+  return (
+    <label>
+      {label}
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <input type="week" value={isoWeekInputValue(value)} onChange={(e) => onChange(mondayFromIsoWeek(e.target.value))} title={`Hafta başlangıcı: ${value}`} />
+        <span className="muted" style={{ whiteSpace: "nowrap" }}>{weekLong(value)}</span>
+      </div>
+    </label>
   );
 }
 

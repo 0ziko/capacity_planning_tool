@@ -12,9 +12,12 @@ from app.services import production_batches as pbatches
 from app.services.orders import effective_due
 from app.schemas import (
     AutoPlanRequest,
+    ForecastFromLeadTimeIn,
     LeadTimeOut,
     LeadTimeRequest,
     LeadTimeStep,
+    LoadDetailOut,
+    LoadDetailRow,
     ManualPlanLineIn,
     PlanLineOut,
     WeekLoad,
@@ -471,6 +474,8 @@ def _schedule_op(db: Session, wc: WorkCenter, hours: float, earliest: datetime, 
                     step_start = day_start
                 step_end = day_start + timedelta(hours=elapsed_nominal)
                 hours_left -= take
+                wk = cap.week_start(day)
+                planned_week[wk] = planned_week.get(wk, 0.0) + take
         if hours_left > 1e-6:
             day += timedelta(days=1)
             cursor = datetime.combine(day, cap.first_shift_start(wc, day, ovl.get(day)))
@@ -556,3 +561,93 @@ def lead_time(db: Session, req: LeadTimeRequest) -> LeadTimeOut:
         end=(overall_end or cursor).strftime("%Y-%m-%d %H:%M"),
         steps=steps,
     )
+
+
+def load_detail(db: Session, work_center_id: int, week_start: date) -> LoadDetailOut:
+    wc = db.get(WorkCenter, work_center_id)
+    if not wc:
+        raise ValueError("Is merkezi bulunamadi")
+    wk = cap.week_start(week_start)
+    lines = plan_lines(db, [work_center_id], wk, wk + timedelta(days=6))
+    rows = [
+        LoadDetailRow(
+            item_code=l.item_code,
+            item_name="",
+            order_no=l.order_no,
+            position_no=l.position_no,
+            customer=l.customer if not l.batch_no else "parti",
+            batch_no=l.batch_no,
+            operation_seq=l.operation_seq,
+            planned_hours=l.planned_hours,
+            planned_qty=l.planned_qty,
+            mode=l.mode,
+        )
+        for l in lines
+    ]
+    return LoadDetailOut(
+        work_center_id=wc.id,
+        work_center_code=wc.code,
+        week_start=wk,
+        total_hours=round(sum(r.planned_hours for r in rows), 2),
+        rows=rows,
+    )
+
+
+def add_forecast_from_leadtime(db: Session, req: ForecastFromLeadTimeIn, username: str) -> int:
+    """Terminleme sonucunu tahmin plan satirlari olarak kaydeder; sonraki terminlemelerde doluluk hesaba katilir."""
+    item = (
+        db.query(Item)
+        .options(joinedload(Item.operations))
+        .filter(Item.code == req.item_code)
+        .first()
+    )
+    if not item:
+        raise ValueError("Stok kodu bulunamadi")
+    if not req.steps:
+        raise ValueError("Operasyon adimi yok")
+    end_dt = datetime.strptime(req.steps[-1].end[:10], "%Y-%m-%d").date()
+    label = (req.label or "").strip() or f"TAH-{item.code}-{datetime.now():%m%d%H%M}"
+    order = Order(
+        order_no=label,
+        customer="Tahmin",
+        due_date=end_dt,
+        item_id=item.id,
+        quantity=req.quantity,
+        status="forecast",
+        note="Yeni is terminleme tahmini",
+    )
+    db.add(order)
+    db.flush()
+    created = 0
+    for step in req.steps:
+        op = next((o for o in item.operations if o.seq == step.operation_seq), None)
+        if not op:
+            continue
+        start_day = datetime.strptime(step.start[:10], "%Y-%m-%d").date()
+        db.add(
+            PlanLine(
+                order_id=order.id,
+                operation_id=op.id,
+                work_center_id=op.work_center_id,
+                week_start=cap.week_start(start_day),
+                planned_hours=round(step.hours, 3),
+                planned_qty=round(req.quantity, 2),
+                mode="forecast",
+                created_by=username,
+            )
+        )
+        created += 1
+    db.commit()
+    return created
+
+
+def clear_forecast_plans(db: Session, work_center_ids: list[int] | None = None) -> int:
+    q = db.query(PlanLine).filter(PlanLine.mode == "forecast")
+    if work_center_ids:
+        q = q.filter(PlanLine.work_center_id.in_(work_center_ids))
+    forecast_order_ids = {pl.order_id for pl in q.all()}
+    n = q.delete(synchronize_session=False)
+    if forecast_order_ids:
+        db.query(Order).filter(Order.id.in_(forecast_order_ids), Order.status == "forecast").delete(synchronize_session=False)
+    db.commit()
+    return n

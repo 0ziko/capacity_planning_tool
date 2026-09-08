@@ -531,6 +531,34 @@ class LeadTimeOut(BaseModel):
     steps: list[LeadTimeStep]
 
 
+class ForecastFromLeadTimeIn(BaseModel):
+    item_code: str
+    quantity: float
+    label: str = ""
+    steps: list[LeadTimeStep]
+
+
+class LoadDetailRow(BaseModel):
+    item_code: str
+    item_name: str = ""
+    order_no: str = ""
+    position_no: str = ""
+    customer: str = ""
+    batch_no: str = ""
+    operation_seq: int = 0
+    planned_hours: float
+    planned_qty: float
+    mode: str = ""
+
+
+class LoadDetailOut(BaseModel):
+    work_center_id: int
+    work_center_code: str
+    week_start: date
+    total_hours: float
+    rows: list[LoadDetailRow]
+
+
 # ---- Progress ----
 class ProgressOut(BaseModel):
     work_center_id: int

@@ -13,8 +13,10 @@ from app.schemas import (
     AutoPlanRequest,
     CapacityOut,
     GanttOut,
+    ForecastFromLeadTimeIn,
     LeadTimeOut,
     LeadTimeRequest,
+    LoadDetailOut,
     ManualPlanLineIn,
     MergeGroup,
     MergeRequest,
@@ -157,6 +159,28 @@ def get_gantt(
         return gantt.plan_gantt(db, work_center_id, start, end, as_of)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@router.get("/plan/load/detail", response_model=LoadDetailOut)
+def get_load_detail(work_center_id: int, week_start: date, db: Session = Depends(get_db), _=Depends(require_user)):
+    try:
+        return planning.load_detail(db, work_center_id, week_start)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/plan/leadtime/forecast", response_model=dict)
+def add_leadtime_forecast(req: ForecastFromLeadTimeIn, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
+    try:
+        n = planning.add_forecast_from_leadtime(db, req, user.username)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"created": n, "message": f"{n} tahmin plan satiri eklendi; sonraki terminlemelerde doluluk hesaba katilir."}
+
+
+@router.delete("/plan/forecast", status_code=204)
+def clear_forecast(work_center_ids: list[int] | None = Query(None), db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    planning.clear_forecast_plans(db, work_center_ids)
 
 
 @router.post("/plan/leadtime", response_model=LeadTimeOut)

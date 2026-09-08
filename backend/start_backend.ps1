@@ -22,7 +22,7 @@ if (-not (Test-Path ".venv")) { python -m venv .venv; .\.venv\Scripts\python.exe
 if (-not (Test-Path ".env")) { Copy-Item .env.example .env }
 $env:PYTHONIOENCODING = "utf-8"
 $p = Start-Process -FilePath ".\.venv\Scripts\python.exe" `
-    -ArgumentList "-m", "uvicorn", "app.main:app", "--port", "8000", "--reload" `
+    -ArgumentList "-m", "uvicorn", "app.main:app", "--port", "8000", "--reload", "--reload-dir", "app", "--reload-delay", "0.5" `
     -WorkingDirectory $PSScriptRoot -WindowStyle Hidden -PassThru `
     -RedirectStandardOutput "logs\backend.out.log" -RedirectStandardError "logs\backend.err.log"
 $p.Id | Set-Content $pidFile

@@ -1,0 +1,21 @@
+---
+description: Her kod degisikliginden sonra commit ve backend yeniden baslatma
+alwaysApply: true
+---
+
+# Geliştirme otomasyonu (BilgeInox Kapasite Planlama)
+
+Her kullanıcı talebini tamamladıktan sonra, kullanıcıdan ayrıca istemeden:
+
+1. **Backend değiştiyse:** ilgili testleri çalıştır (`backend\.venv\Scripts\python.exe -m pytest tests/ -q`)
+2. **Git commit** at (backend + frontend birlikte)
+3. **Backend'i yeniden başlat:**
+   ```powershell
+   Set-Location "C:\Users\ozan.deniz\Desktop\BilgeInox-KapasitePlanlama\backend"
+   .\start_backend.ps1
+   ```
+4. Kullanıcıya "backend'i yeniden başlatın" deme — bunu agent yapar.
+
+`start_backend.ps1` uvicorn'u `--reload` ile çalıştırır; dosya kaydı sırasında da otomatik yenilenir.
+
+Push yalnızca kullanıcı açıkça isterse yapılır.

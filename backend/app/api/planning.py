@@ -18,7 +18,8 @@ from app.schemas import (
     ManualPlanLineIn,
     MergeGroup,
     MergeRequest,
-    OrderOut,
+    ProductionBatchCreate,
+    ProductionBatchOut,
     OrderProgressOut,
     OrderScheduleOut,
     PlanCompareOut,
@@ -32,6 +33,7 @@ from app.schemas import (
 )
 from app.services import analysis, capacity, excel, gantt, planning, progress, requirements, revenue
 from app.services import orders as orders_svc
+from app.services import production_batches as pbatches
 
 router = APIRouter(prefix="/api", tags=["planning"])
 
@@ -182,25 +184,34 @@ def get_order_schedule(work_center_ids: list[int] | None = Query(None), db: Sess
     return orders_svc.order_schedule(db, work_center_ids)
 
 
-# ---- Birlestirme ----
+# ---- Uretim partisi (eski ad: birlestirme) ----
 @router.get("/plan/merge-suggestions", response_model=list[MergeGroup])
 def get_merge_suggestions(db: Session = Depends(get_db), _=Depends(require_user)):
-    return orders_svc.merge_suggestions(db)
+    return pbatches.batch_suggestions(db)
 
 
-@router.post("/plan/merge", response_model=OrderOut, status_code=201)
-def merge_orders(req: MergeRequest, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
+@router.get("/plan/production-batches", response_model=list[ProductionBatchOut])
+def get_production_batches(status: str = "open", db: Session = Depends(get_db), _=Depends(require_user)):
+    return pbatches.list_batches(db, status)
+
+
+@router.post("/plan/merge", response_model=ProductionBatchOut, status_code=201)
+def create_production_batch(req: MergeRequest, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
     try:
-        merged = orders_svc.merge_orders(db, req, user.username)
+        batch = pbatches.create_batch(
+            db,
+            ProductionBatchCreate(order_ids=req.order_ids, batch_no=req.order_no, due_date=req.due_date, note=req.note),
+            user.username,
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return orders_svc.order_out(merged)
+    return pbatches.batch_out(batch)
 
 
-@router.delete("/plan/merge/{merged_id}", response_model=dict)
-def unmerge(merged_id: int, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+@router.delete("/plan/merge/{batch_id}", response_model=dict)
+def dissolve_production_batch(batch_id: int, db: Session = Depends(get_db), _=Depends(require_poweruser)):
     try:
-        n = orders_svc.unmerge_order(db, merged_id)
+        n = pbatches.dissolve_batch(db, batch_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"ok": True, "reopened": n}

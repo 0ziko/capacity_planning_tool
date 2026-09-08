@@ -219,6 +219,8 @@ class OrderProgressOut(BaseModel):
 
 
 class MergeGroup(BaseModel):
+    """Geriye uyumluluk: uretim partisi birlestirme onerisi."""
+
     item_id: int
     item_code: str
     item_name: str
@@ -227,15 +229,50 @@ class MergeGroup(BaseModel):
     earliest_due: date
     latest_due: date
     customers: list[str]
-    has_progress: bool  # siparislerden birinde uretim kaydi var (birlestirme dikkat)
+    has_progress: bool
     orders: list[OrderOut]
 
 
-class MergeRequest(BaseModel):
+ProductionBatchSuggestion = MergeGroup  # alias
+
+
+class ProductionBatchOrderOut(BaseModel):
+    order_id: int
+    order_no: str
+    position_no: str = ""
+    customer: str
+    due_date: date
+    quantity: float
+
+
+class ProductionBatchOut(BaseModel):
+    id: int
+    batch_no: str
+    item_id: int
+    item_code: str
+    item_name: str
+    due_date: date
+    quantity: float
+    note: str
+    status: str
+    orders: list[ProductionBatchOrderOut]
+
+
+class ProductionBatchCreate(BaseModel):
     order_ids: list[int] = Field(min_length=2)
-    order_no: str | None = None
-    due_date: date | None = None  # None => en erken termin
-    customer: str | None = None
+    batch_no: str | None = None
+    due_date: date | None = None
+    note: str | None = None
+
+
+class MergeRequest(BaseModel):
+    """Geriye uyumluluk: uretim partisi olusturma istegi."""
+
+    order_ids: list[int] = Field(min_length=2)
+    order_no: str | None = None  # batch_no olarak kullanilir
+    due_date: date | None = None
+    customer: str | None = None  # yoksayilir (siparisler ayri kalir)
+    note: str | None = None
 
 
 # ---- Capacity ----
@@ -368,6 +405,9 @@ class PlanLineOut(ORM):
     order_id: int
     order_no: str = ""
     position_no: str = ""
+    production_batch_id: int | None = None
+    batch_no: str = ""
+    batch_order_nos: list[str] = []
     customer: str = ""
     due_date: date | None = None
     item_code: str = ""
@@ -408,6 +448,9 @@ class GanttBar(BaseModel):
     order_id: int
     order_no: str
     position_no: str = ""
+    production_batch_id: int | None = None
+    batch_no: str = ""
+    batch_order_nos: list[str] = []
     item_code: str
     semi_finished_code: str = ""
     operation_seq: int

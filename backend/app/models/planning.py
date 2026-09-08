@@ -20,8 +20,8 @@ class Order(Base):
     quantity: Mapped[float] = mapped_column(Float)
     # birim satis fiyati (ciro = miktar x birim fiyat); para birimi uygulama genelinde tek kabul edilir
     unit_price: Mapped[float] = mapped_column(Float, default=0.0)
-    status: Mapped[str] = mapped_column(String(16), default="open")  # open / closed / merged
-    # Birlestirilmis siparis: bu siparis hangi birlesik siparise dahil edildi
+    status: Mapped[str] = mapped_column(String(16), default="open")  # open / closed / merged (legacy)
+    # Legacy: birlestirilmis siparis (migrate edildi); yeni akista kullanilmaz
     merged_into_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id", ondelete="SET NULL"), nullable=True)
     note: Mapped[str] = mapped_column(String(256), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -29,15 +29,51 @@ class Order(Base):
     item = relationship("Item")
     merged_into = relationship("Order", remote_side="Order.id", foreign_keys=[merged_into_id])
     plan_lines: Mapped[list["PlanLine"]] = relationship(back_populates="order", cascade="all, delete-orphan")
+    batch_links: Mapped[list["ProductionBatchOrder"]] = relationship(back_populates="order", cascade="all, delete-orphan")
+
+
+class ProductionBatch(Base):
+    """Ayni stok kodundan birden fazla siparis icin birlestirilmis uretim partisi. Siparisler acik kalir."""
+
+    __tablename__ = "production_batches"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_no: Mapped[str] = mapped_column(String(64), index=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), index=True)
+    due_date: Mapped[date] = mapped_column(Date, index=True)
+    quantity: Mapped[float] = mapped_column(Float)
+    note: Mapped[str] = mapped_column(String(512), default="")
+    status: Mapped[str] = mapped_column(String(16), default="open")  # open / closed
+    created_by: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    item = relationship("Item")
+    orders: Mapped[list["ProductionBatchOrder"]] = relationship(back_populates="batch", cascade="all, delete-orphan")
+    plan_lines: Mapped[list["PlanLine"]] = relationship(back_populates="production_batch", cascade="all, delete-orphan")
+
+
+class ProductionBatchOrder(Base):
+    """Parti icindeki siparis satiri (miktar siparis talebinden)."""
+
+    __tablename__ = "production_batch_orders"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_id: Mapped[int] = mapped_column(ForeignKey("production_batches.id", ondelete="CASCADE"), index=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), index=True, unique=True)
+    quantity: Mapped[float] = mapped_column(Float)
+
+    batch = relationship("ProductionBatch", back_populates="orders")
+    order = relationship("Order", back_populates="batch_links")
 
 
 class PlanLine(Base):
-    """Bir siparis operasyonunun belirli bir haftaya yerlestirilmis is gucu saati."""
+    """Bir siparis veya uretim partisi operasyonunun belirli bir haftaya yerlestirilmis is gucu saati."""
 
     __tablename__ = "plan_lines"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), index=True)
+    production_batch_id: Mapped[int | None] = mapped_column(ForeignKey("production_batches.id", ondelete="CASCADE"), nullable=True, index=True)
     operation_id: Mapped[int] = mapped_column(ForeignKey("routing_operations.id", ondelete="CASCADE"))
     work_center_id: Mapped[int] = mapped_column(ForeignKey("work_centers.id"), index=True)
     week_start: Mapped[date] = mapped_column(Date, index=True)  # Pazartesi
@@ -50,6 +86,7 @@ class PlanLine(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     order: Mapped[Order] = relationship(back_populates="plan_lines")
+    production_batch: Mapped["ProductionBatch | None"] = relationship(back_populates="plan_lines")
     operation = relationship("RoutingOperation")
     work_center = relationship("WorkCenter")
 

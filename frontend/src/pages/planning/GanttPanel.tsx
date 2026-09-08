@@ -64,7 +64,7 @@ export default function GanttPanel({
         <>
           <div className="panel gantt-wrap">
             <div className="gantt-header">
-              <div className="gantt-label-col">Sipariş / Yarımamül</div>
+              <div className="gantt-label-col">Sipariş / Parti · Yarımamül</div>
               <div className="gantt-timeline">
                 {days.map((d) => (
                   <div key={d} className="gantt-day" title={d}>{shortDate(d)}</div>
@@ -78,7 +78,11 @@ export default function GanttPanel({
               return (
                 <div key={b.plan_line_id} className="gantt-row">
                   <div className="gantt-label-col" title={`${b.operation_name} · termin ${b.due_date}`}>
-                    <b>{b.order_no}</b>{b.position_no && <span className="muted" style={{ marginLeft: 4 }}>/ poz {b.position_no}</span>}
+                    <b>{b.order_no}</b>
+                    {b.batch_no && b.batch_order_nos.length > 0 && (
+                      <div className="muted" style={{ fontSize: 11 }}>Siparişler: {b.batch_order_nos.join(", ")}</div>
+                    )}
+                    {!b.batch_no && b.position_no && <span className="muted" style={{ marginLeft: 4 }}>/ poz {b.position_no}</span>}
                     <div className="muted" style={{ fontSize: 11 }}>{b.semi_finished_code || b.operation_name}</div>
                     <div style={{ fontSize: 11 }}>{fmt(b.produced_qty, 0)}/{fmt(b.planned_qty, 0)} ad · kalan {fmt(b.remaining_qty, 0)}</div>
                   </div>
@@ -107,8 +111,12 @@ export default function GanttPanel({
               <tbody>
                 {g.bars.map((b) => (
                   <tr key={b.plan_line_id}>
-                    <td><b>{b.order_no}</b><div className="muted">{b.item_code}</div></td>
-                    <td>{b.position_no || <span className="muted">—</span>}</td>
+                    <td>
+                      <b>{b.order_no}</b>
+                      {b.batch_order_nos.length > 0 && <div className="muted" style={{ fontSize: 11 }}>{b.batch_order_nos.join(", ")}</div>}
+                      <div className="muted">{b.item_code}</div>
+                    </td>
+                    <td>{b.batch_no ? <span className="muted">—</span> : (b.position_no || <span className="muted">—</span>)}</td>
                     <td><code>{b.semi_finished_code || "—"}</code></td>
                     <td>{b.operation_name}</td>
                     <td>{b.planned_start}</td><td>{b.planned_end}</td>

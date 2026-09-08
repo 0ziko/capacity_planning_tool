@@ -24,7 +24,7 @@ const TABS: { id: Tab; label: string; hint: string }[] = [
   { id: "revenue", label: "Ciro", hint: "Mevcut plana göre haftalık / aylık ciro" },
   { id: "compare", label: "Plan karşılaştır", hint: "Termine göre ve maksimum ciro planlarını yan yana karşılaştır" },
   { id: "progress", label: "Sipariş ilerleme", hint: "Günlük üretim verisine göre iş emri ilerlemesi" },
-  { id: "merge", label: "Birleştirme önerileri", hint: "Aynı stok kodlu siparişleri birleştir" },
+  { id: "merge", label: "Üretim partisi", hint: "Aynı stok kodlu siparişlerin üretimini birleştir (siparişler ayrı kalır)" },
   { id: "leadtime", label: "Yeni iş terminleme", hint: "Yeni bir iş için mevcut doluluğa göre bitiş" },
 ];
 
@@ -190,7 +190,17 @@ export default function Planning() {
                     </select>
                   ) : <span title={l.week_start}>{weekLong(l.week_start)}</span>}
                 </td>
-                <td><b>{l.work_center_code}</b></td><td>{l.order_no}</td><td>{l.position_no || <span className="muted">—</span>}</td><td>{l.customer}</td>
+                <td><b>{l.work_center_code}</b></td>
+                <td>
+                  {l.batch_no ? (
+                    <>
+                      <b title="Üretim partisi">{l.batch_no}</b>
+                      <div className="muted" style={{ fontSize: 11 }}>{l.batch_order_nos.join(", ")}</div>
+                    </>
+                  ) : l.order_no}
+                </td>
+                <td>{l.batch_no ? <span className="muted">—</span> : (l.position_no || <span className="muted">—</span>)}</td>
+                <td>{l.batch_no ? <span className="muted">parti</span> : l.customer}</td>
                 <td style={{ color: l.due_date < l.week_start ? "var(--bad)" : undefined }} title={l.due_date < l.week_start ? "Termin, plan haftasından önce!" : ""}>{l.due_date}</td>
                 <td>{l.item_code}</td><td>{l.operation_seq}</td>
                 <td className="num">{fmt(l.planned_hours, 2)}</td><td className="num">{fmt(l.planned_qty, 0)}</td>

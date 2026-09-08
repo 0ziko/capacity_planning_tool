@@ -18,6 +18,8 @@ from app.models.planning import (  # noqa: F401
     Order,
     PlanLine,
     ProductionActual,
+    ProductionBatch,
+    ProductionBatchOrder,
     Reservation,
     Shipment,
     StockReceipt,

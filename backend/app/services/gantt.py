@@ -7,7 +7,7 @@ from math import ceil
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
-from app.models import Item, Order, PlanLine, ProductionActual, WorkCenter
+from app.models import Item, Order, PlanLine, ProductionActual, ProductionBatch, ProductionBatchOrder, WorkCenter
 from app.schemas import GanttBar, GanttOut
 from app.services import capacity as cap
 from app.services.wip import resolve_wip, wip_index
@@ -157,6 +157,7 @@ def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: 
         db.query(PlanLine)
         .options(
             joinedload(PlanLine.order).joinedload(Order.item).joinedload(Item.operations),
+            joinedload(PlanLine.production_batch).joinedload(ProductionBatch.orders).joinedload(ProductionBatchOrder.order),
             joinedload(PlanLine.operation),
         )
         .filter(
@@ -190,7 +191,18 @@ def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: 
             ps, pe = _line_window_in_week(db, wc, wk, pl.id, week_lines)
             if pe < start or ps > end:
                 continue
-            target_qty = pl.planned_qty if pl.planned_qty > 0 else pl.order.quantity
+            if pl.production_batch:
+                target_qty = pl.planned_qty if pl.planned_qty > 0 else pl.production_batch.quantity
+                batch_no = pl.production_batch.batch_no
+                batch_nos = [f"{l.order.order_no}{f'/{l.order.position_no}' if l.order and l.order.position_no else ''}" for l in pl.production_batch.orders if l.order]
+                display_no = batch_no
+                display_pos = ""
+            else:
+                target_qty = pl.planned_qty if pl.planned_qty > 0 else pl.order.quantity
+                batch_no = ""
+                batch_nos = []
+                display_no = pl.order.order_no
+                display_pos = pl.order.position_no or ""
             pr = prod_map.get((pl.order_id, pl.operation_id), {"qty": 0.0, "hours": 0.0, "last_date": None})
             produced = float(pr["qty"])
             remaining = max(target_qty - produced, 0.0)
@@ -205,8 +217,11 @@ def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: 
                 GanttBar(
                     plan_line_id=pl.id,
                     order_id=pl.order_id,
-                    order_no=pl.order.order_no,
-                    position_no=pl.order.position_no or "",
+                    order_no=display_no,
+                    position_no=display_pos,
+                    production_batch_id=pl.production_batch_id,
+                    batch_no=batch_no,
+                    batch_order_nos=batch_nos,
                     item_code=pl.order.item.code,
                     semi_finished_code=(op.semi_finished_code if op else "") or "",
                     operation_seq=op.seq if op else 0,
@@ -219,7 +234,7 @@ def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: 
                     remaining_qty=round(remaining, 2),
                     planned_hours=round(pl.planned_hours, 2),
                     earned_hours=round(float(pr["hours"]), 2),
-                    due_date=pl.order.due_date,
+                    due_date=pl.production_batch.due_date if pl.production_batch else pl.order.due_date,
                     status=status,
                     last_prod_date=pr["last_date"],
                 )

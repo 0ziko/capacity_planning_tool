@@ -79,28 +79,30 @@ def test_schedule_progress_and_merge(client, auth):
     assert g["item_code"] == "MAM-1" and g["order_count"] == 3 and g["total_qty"] == 1750 and g["has_progress"] is True
     assert g["customers"] == ["Musteri A", "Musteri B", "Musteri C"]
 
-    # S-2 + S-3 birlestir (uretimi baslamamis olanlar)
+    # SP-2 + SP-3 uretim partisi (siparisler acik kalir)
     ids = [o["id"] for o in g["orders"] if o["order_no"] in ("SP-2", "SP-3")]
     r = client.post("/api/plan/merge", headers=auth, json={"order_ids": ids})
     assert r.status_code == 201, r.text
-    merged = r.json()
-    assert merged["quantity"] == 750 and merged["due_date"] == "2026-09-25" and merged["customer"] == "Musteri B + Musteri C"
-    assert merged["order_no"].startswith("BRL-MAM-1-")
+    batch = r.json()
+    assert batch["quantity"] == 750 and batch["due_date"] == "2026-09-25"
+    assert batch["batch_no"].startswith("URT-MAM-1-")
+    assert {o["order_no"] for o in batch["orders"]} == {"SP-2", "SP-3"}
     open_nos = sorted(o["order_no"] for o in client.get("/api/orders", headers=auth).json())
-    assert open_nos == ["BRL-MAM-1-20260925", "SP-1"]
-    merged_list = client.get("/api/orders", headers=auth, params={"status": "merged"}).json()
-    assert {o["order_no"] for o in merged_list} == {"SP-2", "SP-3"} and all(o["merged_into_id"] == merged["id"] for o in merged_list)
-    # birlesik siparis silinemez / kaynaklar duzenlenemez
-    assert client.delete(f"/api/orders/{merged['id']}", headers=auth).status_code == 400
-    assert client.put(f"/api/orders/{ids[0]}", headers=auth, json={"order_no": "SP-2", "due_date": "2026-09-25", "item_code": "MAM-1", "quantity": 1}).status_code == 400
-    # farkli stoklar birlestirilemez / tek siparis birlestirilemez
-    assert client.post("/api/plan/merge", headers=auth, json={"order_ids": [merged["id"], merged["id"]]}).status_code == 400
+    assert open_nos == ["SP-1", "SP-2", "SP-3"]
+    assert client.get("/api/orders", headers=auth, params={"status": "merged"}).json() == []
+    batches = client.get("/api/plan/production-batches", headers=auth).json()
+    assert len(batches) == 1 and batches[0]["batch_no"] == batch["batch_no"]
+    # partideki siparis duzenlenebilir
+    assert client.put(f"/api/orders/{ids[0]}", headers=auth, json={"order_no": "SP-2", "due_date": "2026-09-25", "item_code": "MAM-1", "quantity": 500}).status_code == 200
+    # tek siparis partiye alinamaz
+    assert client.post("/api/plan/merge", headers=auth, json={"order_ids": [ids[0]]}).status_code == 422
 
-    # geri al
-    r = client.delete(f"/api/plan/merge/{merged['id']}", headers=auth)
+    # partiyi dagit
+    r = client.delete(f"/api/plan/merge/{batch['id']}", headers=auth)
     assert r.status_code == 200 and r.json()["reopened"] == 2
     open_nos = sorted(o["order_no"] for o in client.get("/api/orders", headers=auth).json())
     assert open_nos == ["SP-1", "SP-2", "SP-3"]
+    assert client.get("/api/plan/production-batches", headers=auth).json() == []
 
     # plan excel'i yeni sayfayla acilir
     r = client.get(f"/api/plan/export.xlsx?start={WEEK}", headers=auth)

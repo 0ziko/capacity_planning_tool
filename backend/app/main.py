@@ -30,6 +30,15 @@ async def lifespan(_: FastAPI):
     removed = repair_orphans(engine)
     if removed:
         logging.getLogger("uvicorn.error").warning("Yetim kayitlar temizlendi: %s", removed)
+    db = SessionLocal()
+    try:
+        from app.services.production_batches import migrate_legacy_merged_orders
+
+        n = migrate_legacy_merged_orders(db)
+        if n:
+            logging.getLogger("uvicorn.error").info("Legacy birlesik siparisler uretim partisine donusturuldu: %s", n)
+    finally:
+        db.close()
     seed_admin()
     yield
 

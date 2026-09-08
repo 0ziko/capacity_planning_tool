@@ -13,6 +13,7 @@ from app.schemas import (
     MergeRequest,
     OrderIn,
     OrderOut,
+    ProductionBatchCreate,
     OrderProgressOp,
     OrderProgressOut,
     OrderScheduleOut,
@@ -170,26 +171,54 @@ def order_schedule(db: Session, wc_ids: list[int] | None, lines=None, orders: li
     if lines is None:
         lines = (
             db.query(PlanLine)
-            .options(joinedload(PlanLine.order))
+            .options(joinedload(PlanLine.order), joinedload(PlanLine.production_batch))
             .filter(PlanLine.order_id.in_([o.id for o in orders]))
             .all()
         )
+        batch_ids = {p.production_batch_id for p in lines if p.production_batch_id}
+        if batch_ids:
+            extra = (
+                db.query(PlanLine)
+                .options(joinedload(PlanLine.order), joinedload(PlanLine.production_batch))
+                .filter(PlanLine.production_batch_id.in_(batch_ids))
+                .all()
+            )
+            seen = {p.id for p in lines}
+            lines = lines + [p for p in extra if p.id not in seen]
     if wc_by_id:
         lines = [p for p in lines if p.work_center_id in wc_by_id]
+    from app.services import production_batches as pb
+
+    order_batch = pb.batch_order_map(db)
     by_order: dict[int, list[PlanLine]] = defaultdict(list)
+    by_batch: dict[int, list[PlanLine]] = defaultdict(list)
     by_wc_week: dict[tuple[int, date], list[PlanLine]] = defaultdict(list)
     for p in lines:
-        by_order[p.order_id].append(p)
+        if p.production_batch_id:
+            by_batch[p.production_batch_id].append(p)
+        else:
+            by_order[p.order_id].append(p)
         by_wc_week[(p.work_center_id, p.week_start)].append(p)
 
     out: list[OrderScheduleOut] = []
     for o in orders:
         ops = [op for op in o.item.operations if op.work_center_id in wc_by_id]
         required = sum(op.hours_for(o.quantity) for op in ops)
-        pls = by_order.get(o.id, [])
-        planned = sum(p.planned_hours for p in pls)
-        start = min((p.week_start for p in pls), default=None)
-        end_week = max((p.week_start for p in pls), default=None)
+        batch = order_batch.get(o.id)
+        if batch:
+            pls = by_batch.get(batch.id, [])
+            share = o.quantity / batch.quantity if batch.quantity else 0.0
+            planned = sum(p.planned_hours for p in pls) * share
+            start = min((p.week_start for p in pls), default=None)
+            end_week = max((p.week_start for p in pls), default=None)
+            schedule_order_id = sorted(batch.orders, key=lambda l: l.order_id)[0].order_id if batch.orders else o.id
+        else:
+            pls = by_order.get(o.id, [])
+            share = 1.0
+            planned = sum(p.planned_hours for p in pls)
+            start = min((p.week_start for p in pls), default=None)
+            end_week = max((p.week_start for p in pls), default=None)
+            schedule_order_id = o.id
         planned_end = None
         last_wc_code = ""
         if end_week is not None:
@@ -201,7 +230,7 @@ def order_schedule(db: Session, wc_ids: list[int] | None, lines=None, orders: li
                 wc = wc_by_id.get(p.work_center_id)
                 if not wc:
                     continue
-                d = _end_day_in_week(db, wc, end_week, o.id, by_wc_week[(wc.id, end_week)])
+                d = _end_day_in_week(db, wc, end_week, schedule_order_id, by_wc_week[(wc.id, end_week)])
                 candidates.append((d, wc.code))
             if candidates:
                 planned_end, last_wc_code = max(candidates)
@@ -397,101 +426,34 @@ def order_progress(db: Session, wc_ids: list[int] | None, as_of: date | None = N
     return out
 
 
-# ---------------- Birlestirme ----------------
+# ---------------- Birlestirme (legacy API -> uretim partisi) ----------------
 
-def merge_suggestions(db: Session) -> list[MergeGroup]:
-    orders = _open_orders(db)
-    groups: dict[int, list[Order]] = defaultdict(list)
-    for o in orders:
-        groups[o.item_id].append(o)
-    multi = {k: v for k, v in groups.items() if len(v) >= 2}
-    if not multi:
-        return []
-    nos = {o.order_no.upper() for v in multi.values() for o in v}
-    with_prog = set()
-    for order_no, item_id in db.query(ProductionActual.order_no, ProductionActual.item_id).filter(ProductionActual.item_id.in_(multi.keys())).distinct().all():
-        if (order_no or "").upper() in nos:
-            with_prog.add(((order_no or "").upper(), item_id))
-    out = []
-    for item_id, lst in multi.items():
-        item = lst[0].item
-        customers = []
-        for o in lst:
-            if o.customer and o.customer not in customers:
-                customers.append(o.customer)
-        out.append(
-            MergeGroup(
-                item_id=item_id,
-                item_code=item.code,
-                item_name=item.name,
-                order_count=len(lst),
-                total_qty=round(sum(o.quantity for o in lst), 2),
-                earliest_due=min(o.due_date for o in lst),
-                latest_due=max(o.due_date for o in lst),
-                customers=customers,
-                has_progress=any((o.order_no.upper(), item_id) in with_prog for o in lst),
-                orders=[order_out(o) for o in lst],
-            )
-        )
-    out.sort(key=lambda g: (g.earliest_due, g.item_code))
-    return out
+def merge_suggestions(db: Session) -> list:
+    from app.services import production_batches as pb
+
+    return pb.batch_suggestions(db)
 
 
 def merge_orders(db: Session, req: MergeRequest, username: str) -> Order:
-    ids = list(dict.fromkeys(req.order_ids))
-    orders = db.query(Order).options(joinedload(Order.item)).filter(Order.id.in_(ids)).all()
-    if len(orders) != len(ids):
-        raise ValueError("Siparislerden bazilari bulunamadi")
-    if len(orders) < 2:
-        raise ValueError("En az iki siparis secilmeli")
-    if any(o.status != "open" for o in orders):
-        raise ValueError("Yalnizca acik siparisler birlestirilebilir")
-    item_ids = {o.item_id for o in orders}
-    if len(item_ids) != 1:
-        raise ValueError("Birlestirilecek siparislerin stok kodu ayni olmali")
-    item = orders[0].item
-    orders.sort(key=lambda o: (o.due_date, o.order_no))
-    due = req.due_date or min(o.due_date for o in orders)
-    customers = []
-    for o in orders:
-        if o.customer and o.customer not in customers:
-            customers.append(o.customer)
-    order_no = (req.order_no or "").strip() or f"BRL-{item.code}-{due.strftime('%Y%m%d')}"
-    if db.query(Order).filter(Order.order_no.ilike(order_no), Order.item_id == item.id, Order.status != "merged").first():
-        raise ValueError(f"{order_no} numarali siparis zaten var; farkli bir birlesik siparis no verin")
-    total_qty = sum(o.quantity for o in orders)
-    total_rev = sum(o.quantity * (o.unit_price or 0.0) for o in orders)
-    merged = Order(
-        order_no=order_no,
-        customer=(req.customer or "").strip() or " + ".join(customers),
-        due_date=due,
-        item_id=item.id,
-        quantity=round(total_qty, 3),
-        unit_price=round(total_rev / total_qty, 4) if total_qty else 0.0,  # agirlikli ortalama fiyat
-        status="open",
-        note="Birlestirildi: " + ", ".join(f"{o.order_no} ({o.quantity:g})" for o in orders) + f" — {username}",
+    """Legacy: uretim partisi olusturur; geriye uyum icin anchor siparis dondurur."""
+    from app.services import production_batches as pb
+
+    batch = pb.create_batch(
+        db,
+        ProductionBatchCreate(
+            order_ids=req.order_ids,
+            batch_no=req.order_no,
+            due_date=req.due_date,
+            note=req.note or (f"Musteri: {req.customer}" if req.customer else None),
+        ),
+        username,
     )
-    db.add(merged)
-    db.flush()
-    for o in orders:
-        o.status = "merged"
-        o.merged_into_id = merged.id
-        db.query(PlanLine).filter(PlanLine.order_id == o.id).delete(synchronize_session=False)
-    db.commit()
-    db.refresh(merged)
-    return merged
+    anchor_id = sorted(batch.orders, key=lambda l: l.order_id)[0].order_id
+    return db.query(Order).options(joinedload(Order.item)).filter(Order.id == anchor_id).one()
 
 
 def unmerge_order(db: Session, merged_id: int) -> int:
-    merged = db.get(Order, merged_id)
-    if not merged:
-        raise ValueError("Birlesik siparis bulunamadi")
-    sources = db.query(Order).filter(Order.merged_into_id == merged_id).all()
-    if not sources:
-        raise ValueError("Bu siparis bir birlestirme sonucu degil")
-    for o in sources:
-        o.status = "open"
-        o.merged_into_id = None
-    db.delete(merged)  # plan satirlari cascade ile silinir
-    db.commit()
-    return len(sources)
+    """Legacy: merged_id artik uretim partisi id'sidir."""
+    from app.services import production_batches as pb
+
+    return pb.dissolve_batch(db, merged_id)

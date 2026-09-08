@@ -20,9 +20,10 @@ def _make_engine():
         # SQLite yabanci anahtarlari varsayilan olarak denetlemez; acilmazsa silinen is merkezine
         # bagli yetim rota/plan kayitlari kalir (PostgreSQL'de zaten zorunlu).
         @event.listens_for(eng, "connect")
-        def _fk_on(dbapi_conn, _record):
+        def _sqlite_pragmas(dbapi_conn, _record):
             cur = dbapi_conn.cursor()
             cur.execute("PRAGMA foreign_keys=ON")
+            cur.execute("PRAGMA journal_mode=WAL")
             cur.close()
 
     return eng

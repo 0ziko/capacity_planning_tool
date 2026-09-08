@@ -164,13 +164,13 @@ TEMPLATES: dict[str, dict] = {
             ("prod_date", "Tarih", ["uretimtarihi", "gun"]),
             ("semi_finished_code", "Yarımamül Kodu", ["yarimamul", "yarimamulkodu", "wip", "wipkodu"]),
             ("quantity", "Miktar", ["adet", "uretilen", "uretimmiktari"]),
-            ("order_no", "Sipariş No", ["siparis", "siparisno"]),
             ("wc_code", "İş Merkezi Kodu (opsiyonel)", ["ismerkezi", "tezgah", "ismerkezikodu"]),
             ("item_code", "Stok Kodu (opsiyonel)", ["stokkodu", "malzeme"]),
             ("operation_seq", "Operasyon Sıra (opsiyonel)", ["sira", "operasyon", "operasyonsira"]),
             ("reported_hours", "Fiili Süre (saat)", ["fiilisure", "calismasuresi", "sure"]),
+            ("order_no", "Sipariş No (opsiyonel)", ["siparis", "siparisno"]),
         ],
-        "example": ["2026-09-06", "MAM-0001-K10", 120, "SIP-2026-001", "", "", "", ""],
+        "example": ["2026-09-06", "MAM-0001-K10", 120, "", "", "", "", ""],
         "required": ["prod_date", "quantity"],
     },
     "downtime": {
@@ -361,11 +361,29 @@ def _str(v: Any) -> str:
     return str(v).strip()
 
 
+def _excel_serial_date(serial: float) -> date:
+    """Excel tarih seri numarasi (1900 tarih sistemi)."""
+    n = int(round(serial))
+    if n > 59:
+        n -= 1  # Excel 1900 artik yil hatasi
+    return date(1899, 12, 30) + timedelta(days=n)
+
+
 def _date(v: Any) -> date:
     if isinstance(v, datetime):
         return v.date()
     if isinstance(v, date):
         return v
+    if isinstance(v, (int, float)):
+        return _excel_serial_date(float(v))
+    s = str(v).strip()
+    if s.replace(".", "", 1).replace("-", "", 1).isdigit():
+        try:
+            f = float(s.replace(",", "."))
+            if f > 10_000:
+                return _excel_serial_date(f)
+        except ValueError:
+            pass
     s = str(v).strip()
     if "T" in s:
         try:
@@ -905,13 +923,16 @@ def import_orders(db: Session, rows: list[dict], remove_missing: bool = False) -
 
 
 def import_production(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
-    """Ayni gun/yarimamul/siparis satiri varsa uzerine yazar (idempotent).
+    """Ayni gun/yarimamul[/siparis] satiri varsa uzerine yazar (idempotent).
 
-    Birincil anahtar: tarih + yarimamul kodu + siparis no.
-    Yarimamul kodu rota operasyonuna cozulur; stok kodu coklu eslesmede ayirt eder.
+    Birincil eslesme: tarih + yarimamul kodu (+ siparis no; bos = genel uretim).
+    Siparis no bos birakilirsa kayit belirli bir siparise baglanmaz; siparis ilerlemesi
+    ve Gantt'ta acik siparislere termin sirasiyla (FIFO) dagitilir. Bitmis urun stogu
+    ve siparis rezervasyonu ayri sureclerdir (stock_receipts / rezervasyon).
+
     Geriye uyumluluk: yarimamul yoksa is merkezi + stok + operasyon sira ile eslesir.
     """
-    from app.services.wip import resolve_wip, wip_index
+    from app.services.wip import import_wip_production_row, wip_index
 
     ins = upd = 0
     errs = []
@@ -931,10 +952,22 @@ def import_production(db: Session, rows: list[dict]) -> tuple[int, int, list[str
             wc = None
             seq = None
             if wip_raw:
-                op = resolve_wip(db, wip_raw, _str(r.get("item_code")) or None, wip_idx)
-                item = op.item
-                wc = op.work_center
-                seq = op.seq
+                i, u = import_wip_production_row(
+                    db,
+                    prod_date=d,
+                    wip_raw=wip_raw,
+                    quantity=qty,
+                    order_no=order_no,
+                    item_code=_str(r.get("item_code")) or None,
+                    wc_code=_str(r.get("wc_code")) or None,
+                    operation_seq=_int(r.get("operation_seq"), None),
+                    reported_hours=_float(r.get("reported_hours"), None),
+                    wip_idx=wip_idx,
+                    wcs=wcs,
+                )
+                ins += i
+                upd += u
+                continue
             else:
                 wc = wcs.get(_str(r.get("wc_code")).upper())
                 if not wc:
@@ -1191,7 +1224,7 @@ def build_backup(db: Session) -> bytes:
     _ws_from_rows(wb, "Plan", ["Hafta", "İş Merkezi Kodu", "Sipariş No", "Stok Kodu", "Operasyon Id", "Planlanan Saat", "Planlanan Miktar", "Mod", "Oluşturan"],
                   [[p.week_start, wc_code.get(p.work_center_id), p.order.order_no, item_code.get(p.order.item_id), p.operation_id, p.planned_hours, p.planned_qty, p.mode, p.created_by] for p in db.query(PlanLine).order_by(PlanLine.week_start, PlanLine.work_center_id)])
     _ws_from_rows(wb, "Günlük Üretim", [c[1] for c in TEMPLATES["production"]["columns"]] + ["Kazanılan Saat"],
-                  [[p.prod_date, p.semi_finished_code or "", p.quantity, p.order_no, wc_code.get(p.work_center_id), item_code.get(p.item_id), p.operation_seq, p.reported_hours, p.earned_hours] for p in db.query(ProductionActual).order_by(ProductionActual.prod_date)])
+                  [[p.prod_date, p.semi_finished_code or "", p.quantity, wc_code.get(p.work_center_id), item_code.get(p.item_id), p.operation_seq, p.reported_hours, p.order_no or "", p.earned_hours] for p in db.query(ProductionActual).order_by(ProductionActual.prod_date)])
     _ws_from_rows(wb, "Günlük Duruşlar", [c[1] for c in TEMPLATES["downtime"]["columns"]],
                   [[d.dt_date, wc_code.get(d.work_center_id), d.reason_code, d.reason_desc, d.minutes] for d in db.query(Downtime).order_by(Downtime.dt_date)])
     _ws_from_rows(wb, "Haftalık İş Gücü", [c[1] for c in TEMPLATES["wc_weeks"]["columns"]],

@@ -89,16 +89,17 @@ def _production_map(db: Session, wc_id: int, orders_by_id: dict[int, Order], as_
     )
     orders_by_no: dict[tuple[str, int], Order] = {(o.order_no.upper(), o.item_id): o for o in orders_by_id.values()}
 
-    def op_id_for(item: Item, seq: int | None, wc: int, wip: str) -> int | None:
-        if wip:
-            try:
-                return resolve_wip(db, wip, item.code, wip_idx).id
-            except ValueError:
-                pass
+    def op_id_for(item: Item, seq: int | None, wc: int, wip: str, order_no_hint: str = "") -> int | None:
         if seq is not None:
             op = next((x for x in item.operations if x.seq == seq), None)
-        else:
-            op = next((x for x in item.operations if x.work_center_id == wc), None)
+            if op:
+                return op.id
+        if wip:
+            try:
+                return resolve_wip(db, wip, item.code, wip_idx, order_no=order_no_hint or None).id
+            except ValueError:
+                pass
+        op = next((x for x in item.operations if x.work_center_id == wc), None)
         return op.id if op else None
 
     out: dict[tuple[int, int], dict] = defaultdict(lambda: {"qty": 0.0, "hours": 0.0, "last_date": None})
@@ -111,7 +112,7 @@ def _production_map(db: Session, wc_id: int, orders_by_id: dict[int, Order], as_
         item = items_by_id.get(a.item_id)
         if not item:
             continue
-        oid = op_id_for(item, a.operation_seq, a.work_center_id, a.semi_finished_code or "")
+        oid = op_id_for(item, a.operation_seq, a.work_center_id, a.semi_finished_code or "", a.order_no or "")
         if oid is None:
             continue
         if a.order_no:

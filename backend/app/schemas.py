@@ -403,12 +403,101 @@ class RequirementQuery(BaseModel):
 PlanMode = Literal["due_date", "revenue"]
 
 
+class CoShipmentSelection(BaseModel):
+    order_no: str
+    position_nos: list[str] | None = None  # None => siparisin tum pozlari
+
+
+class CoShipmentOptions(BaseModel):
+    enabled: bool = False
+    ready_before_delivery_days: int = Field(default=3, ge=0, le=365)
+    selections: list[CoShipmentSelection] = []
+
+
+class CoShipmentExceptionOut(BaseModel):
+    code: str
+    order_no: str
+    position_nos: list[str]
+    target_ready_date: date
+    planned_ready_date: date | None = None
+    deviation_days: int | None = None
+    reason: str
+    suggestion: str | None = None
+
+
+class CoShipmentResultOut(BaseModel):
+    order_no: str
+    position_nos: list[str]
+    due_date: date
+    target_ready_date: date
+    planned_ready_date: date | None = None
+    completion_week: date | None = None
+    same_week_ok: bool
+    on_target: bool
+
+
 class AutoPlanRequest(BaseModel):
     start_week: date  # herhangi bir gun; pazartesiye yuvarlanir
     weeks: int = 12
     work_center_ids: list[int] | None = None  # None => is_planned olanlar
     replace_existing: bool = True
     mode: PlanMode = "due_date"  # due_date: termine gore; revenue: ufuk icinde maksimum ciro
+    co_shipment: CoShipmentOptions | None = None  # null / enabled=false => mevcut akis
+
+
+class PreflightNoRouting(BaseModel):
+    item_code: str
+    item_name: str
+    order_count: int
+    order_nos: list[str]
+
+
+class PreflightNoCapacity(BaseModel):
+    work_center_id: int
+    work_center_code: str
+    work_center_name: str
+    needed_hours: float
+    capacity_hours: float
+    headcount: int
+    detail: str
+
+
+class PreflightWipIssue(BaseModel):
+    kind: str  # legacy
+    item_code: str
+    operation_seq: int | None = None
+    operation_name: str = ""
+    wip_code: str = ""
+    detail: str
+
+
+class DataFreshnessCheckpoint(BaseModel):
+    key: str
+    label: str
+    import_kind: str
+    status: str  # ok | stale | missing
+    last_import_at: str | None = None
+    last_import_by: str = ""
+    last_data_date: str | None = None
+    detail: str
+
+
+class PlanPreflightOut(BaseModel):
+    can_plan: bool
+    order_count: int
+    no_routing: list[PreflightNoRouting]
+    no_capacity: list[PreflightNoCapacity]
+    daily_data: list[DataFreshnessCheckpoint]
+    today: str
+    needs_capacity_ack: bool
+    needs_daily_data_ack: bool
+
+
+class DataFreshnessOut(BaseModel):
+    today: str
+    needs_attention: bool
+    open_order_count: int
+    checkpoints: list[DataFreshnessCheckpoint]
 
 
 class PlanCompareRequest(BaseModel):

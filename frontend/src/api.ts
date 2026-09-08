@@ -16,10 +16,30 @@ export class ApiError extends Error {
   }
 }
 
+const API_TIMEOUT_MS = 20000;
+
+async function request(url: string, init: RequestInit = {}): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = window.setTimeout(() => ctrl.abort(), API_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new ApiError(0, "Sunucu yanıt vermedi (zaman aşımı). Backend çalışıyor mu?");
+    }
+    throw new ApiError(0, "Bağlantı kurulamadı. Backend (8000) ve frontend (5173) sunucularını kontrol edin.");
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 async function handle<T>(res: Response): Promise<T> {
   if (res.status === 401) {
     setToken(null);
-    window.location.href = "/login";
+    if (!window.location.pathname.startsWith("/login")) {
+      window.location.replace("/login");
+    }
+    throw new ApiError(401, "Oturum geçersiz veya süresi dolmuş");
   }
   if (!res.ok) {
     let msg = res.statusText;
@@ -52,24 +72,24 @@ export function qs(params: Record<string, unknown>): string {
 }
 
 export const api = {
-  get: <T>(url: string) => fetch(url, { headers: headers() }).then((r) => handle<T>(r)),
+  get: <T>(url: string) => request(url, { headers: headers() }).then((r) => handle<T>(r)),
   post: <T>(url: string, body?: unknown) =>
-    fetch(url, { method: "POST", headers: headers({ "Content-Type": "application/json" }), body: body === undefined ? undefined : JSON.stringify(body) }).then((r) => handle<T>(r)),
+    request(url, { method: "POST", headers: headers({ "Content-Type": "application/json" }), body: body === undefined ? undefined : JSON.stringify(body) }).then((r) => handle<T>(r)),
   put: <T>(url: string, body: unknown) =>
-    fetch(url, { method: "PUT", headers: headers({ "Content-Type": "application/json" }), body: JSON.stringify(body) }).then((r) => handle<T>(r)),
+    request(url, { method: "PUT", headers: headers({ "Content-Type": "application/json" }), body: JSON.stringify(body) }).then((r) => handle<T>(r)),
   patch: <T>(url: string, body?: unknown) =>
-    fetch(url, { method: "PATCH", headers: headers({ "Content-Type": "application/json" }), body: body === undefined ? undefined : JSON.stringify(body) }).then((r) => handle<T>(r)),
-  del: <T>(url: string) => fetch(url, { method: "DELETE", headers: headers() }).then((r) => handle<T>(r)),
+    request(url, { method: "PATCH", headers: headers({ "Content-Type": "application/json" }), body: body === undefined ? undefined : JSON.stringify(body) }).then((r) => handle<T>(r)),
+  del: <T>(url: string) => request(url, { method: "DELETE", headers: headers() }).then((r) => handle<T>(r)),
   upload: <T>(url: string, file: File, params?: Record<string, string | number | boolean | null | undefined>) => {
     const fd = new FormData();
     fd.append("file", file);
     const q = params ? qs(params) : "";
-    return fetch(`${url}${q}`, { method: "POST", headers: headers(), body: fd }).then((r) => handle<T>(r));
+    return request(`${url}${q}`, { method: "POST", headers: headers(), body: fd }).then((r) => handle<T>(r));
   },
   async uploadDownload(url: string, file: File, fallbackName = "rapor.xlsx") {
     const fd = new FormData();
     fd.append("file", file);
-    const res = await fetch(url, { method: "POST", headers: headers(), body: fd });
+    const res = await request(url, { method: "POST", headers: headers(), body: fd });
     if (res.status === 401) {
       setToken(null);
       window.location.href = "/login";
@@ -105,7 +125,7 @@ export const api = {
 };
 
 // ---- Types ----
-export type Role = "admin" | "poweruser" | "user";
+export type Role = "owner" | "admin" | "poweruser" | "user";
 export interface User { id: number; username: string; full_name: string; role: Role; is_active: boolean }
 export interface Shift { id?: number; work_center_id?: number; name: string; weekdays: string; start_time: string; end_time: string; headcount: number; efficient_hours_per_person: number | null }
 export type CapacitySource = "work_center" | "machines";
@@ -127,6 +147,19 @@ export interface OrderAnalysisRow { customer: string; market: string; due_date: 
 export interface OrderAnalysisParetoRow { customer: string; revenue: number; pct: number; cum_pct: number; order_count: number }
 export interface OrderAnalysis { rows: OrderAnalysisRow[]; total_revenue: number; domestic_revenue: number; export_revenue: number; by_customer: { customer: string; domestic: number; export: number; total: number }[]; pareto: OrderAnalysisParetoRow[]; period: string | null; due_from: string | null; due_to: string | null }
 export type PlanMode = "due_date" | "revenue";
+
+export interface CoShipmentSelection { order_no: string; position_nos: string[] | null }
+export interface CoShipmentOptions { enabled: boolean; ready_before_delivery_days: number; selections: CoShipmentSelection[] }
+export interface CoShipmentException { code: string; order_no: string; position_nos: string[]; target_ready_date: string; planned_ready_date: string | null; deviation_days: number | null; reason: string; suggestion: string | null }
+export interface CoShipmentResult { order_no: string; position_nos: string[]; due_date: string; target_ready_date: string; planned_ready_date: string | null; completion_week: string | null; same_week_ok: boolean; on_target: boolean }
+
+export interface AutoPlanRequest { start_week: string; weeks: number; work_center_ids: number[] | null; replace_existing?: boolean; mode?: PlanMode; co_shipment?: CoShipmentOptions | null }
+export interface PreflightNoRouting { item_code: string; item_name: string; order_count: number; order_nos: string[] }
+export interface PreflightNoCapacity { work_center_id: number; work_center_code: string; work_center_name: string; needed_hours: number; capacity_hours: number; headcount: number; detail: string }
+export interface PreflightWipIssue { kind: string; item_code: string; operation_seq: number | null; operation_name: string; wip_code: string; detail: string }
+export interface DataFreshnessCheckpoint { key: string; label: string; import_kind: string; status: "ok" | "stale" | "missing"; last_import_at: string | null; last_import_by: string; last_data_date: string | null; detail: string }
+export interface PlanPreflight { can_plan: boolean; order_count: number; no_routing: PreflightNoRouting[]; no_capacity: PreflightNoCapacity[]; daily_data: DataFreshnessCheckpoint[]; today: string; needs_capacity_ack: boolean; needs_daily_data_ack: boolean }
+export interface DataFreshness { today: string; needs_attention: boolean; open_order_count: number; checkpoints: DataFreshnessCheckpoint[] }
 export interface PeriodRevenue { period: string; completed_revenue: number; completed_orders: number; earned_revenue: number; cumulative_completed: number; cumulative_earned: number }
 export interface RevenueReport { start: string; end: string; total_open_revenue: number; planned_revenue: number; partial_revenue: number; unplanned_revenue: number; no_price_orders: number; weeks: PeriodRevenue[]; months: PeriodRevenue[] }
 export interface PlanScenario { mode: PlanMode; label: string; created_lines: number; planned_revenue: number; on_time: number; late: number; partial: number; unplanned: number; total_lateness_days: number; utilization_pct: number; orders: OrderSchedule[]; revenue: RevenueReport }

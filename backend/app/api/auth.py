@@ -31,9 +31,11 @@ def list_users(db: Session = Depends(get_db), _: User = Depends(require_admin)):
 
 
 @router.post("/users", response_model=UserOut, status_code=201)
-def create_user(data: UserCreate, db: Session = Depends(get_db), _: User = Depends(require_admin)):
+def create_user(data: UserCreate, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
     if data.role not in ROLES:
         raise HTTPException(400, f"Rol su degerlerden biri olmali: {', '.join(ROLES)}")
+    if data.role == "owner" and admin.role != "owner":
+        raise HTTPException(403, "Owner rolunu yalnizca owner atayabilir")
     if db.query(User).filter(User.username == data.username).first():
         raise HTTPException(400, "Bu kullanici adi zaten var")
     u = User(username=data.username, full_name=data.full_name, role=data.role, hashed_password=hash_password(data.password))
@@ -51,6 +53,10 @@ def update_user(user_id: int, data: UserUpdate, db: Session = Depends(get_db), a
     if data.role is not None:
         if data.role not in ROLES:
             raise HTTPException(400, "Gecersiz rol")
+        if data.role == "owner" and admin.role != "owner":
+            raise HTTPException(403, "Owner rolunu yalnizca owner atayabilir")
+        if u.role == "owner" and data.role != "owner" and admin.role != "owner":
+            raise HTTPException(403, "Owner rolunu yalnizca owner degistirebilir")
         u.role = data.role
     if data.full_name is not None:
         u.full_name = data.full_name

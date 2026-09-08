@@ -1,5 +1,5 @@
 import { Fragment, useState } from "react";
-import { addDays, api, fmt, mondayOf, qs, shortDate, weekLabel, weekLong, type ForecastSummary, type ItemDetail, type LoadDetail, type LeadTime, type Order, type OrderSchedule, type PlanLine, type PlanMode, type WcWeek, type WorkCenterLoad } from "../api";
+import { addDays, api, fmt, mondayOf, qs, shortDate, weekLabel, weekLong, type AutoPlanRequest, type CoShipmentOptions, type CoShipmentException, type CoShipmentResult, type ForecastSummary, type ItemDetail, type LoadDetail, type LeadTime, type Order, type OrderSchedule, type PlanLine, type PlanMode, type WcWeek, type WorkCenterLoad } from "../api";
 import { useAuth } from "../auth";
 import { Bar, ErrorText, PlanStackBar, UtilBadge, WeekInput, WcMultiSelect, useAsync, useWorkCenters } from "../components";
 import WcWeeksPanel from "./WcWeeksPanel";
@@ -11,8 +11,18 @@ import RevenuePanel from "./planning/RevenuePanel";
 import GanttPanel from "./planning/GanttPanel";
 import WcOrdersPanel from "./planning/WcOrdersPanel";
 import ProductionOutputPanel from "./planning/ProductionOutputPanel";
+import PlanPreflightModal from "./planning/PlanPreflightModal";
+import CoShipmentPanel, { defaultCoShipment } from "./planning/CoShipmentPanel";
 
-interface AutoResult { created: number; message: string; mode: PlanMode; unplanned: { order_no: string; item_code: string; operation_seq: number; work_center_code: string; hours: number }[]; skipped: { order_no: string; item_code: string; revenue: number; hours: number }[] }
+interface AutoResult {
+  created: number;
+  message: string;
+  mode: PlanMode;
+  unplanned: { order_no: string; item_code: string; operation_seq: number; work_center_code: string; hours: number }[];
+  skipped: { order_no: string; item_code: string; revenue: number; hours: number }[];
+  co_shipment_results?: CoShipmentResult[];
+  co_shipment_exceptions?: CoShipmentException[];
+}
 
 type Tab = "load" | "labor" | "gantt" | "orders" | "wc" | "revenue" | "compare" | "progress" | "merge" | "leadtime" | "output";
 const TABS: { id: Tab; label: string; hint: string }[] = [
@@ -43,17 +53,43 @@ export default function Planning() {
   const [weekFilter, setWeekFilter] = useState("");
   const [lineMode, setLineMode] = useState("");
   const [loadDetail, setLoadDetail] = useState<{ wcId: number; wcCode: string; week: string } | null>(null);
+  const [preflightOpen, setPreflightOpen] = useState(false);
+  const [coShipment, setCoShipment] = useState<CoShipmentOptions>(defaultCoShipment);
+  const openOrders = useAsync(() => api.get<Order[]>("/api/orders?status=open"), []);
   const load = useAsync(() => api.get<WorkCenterLoad[]>(`/api/plan/load${qs({ start, weeks, work_center_ids: wcIds })}`), [start, weeks, wcIds.join(",")]);
   const lines = useAsync(() => api.get<PlanLine[]>(`/api/plan/lines${qs({ start, end: addDays(start, weeks * 7 - 1), work_center_ids: wcIds, mode: lineMode || undefined })}`), [start, weeks, wcIds.join(","), lineMode]);
   const schedule = useAsync(() => api.get<OrderSchedule[]>(`/api/plan/orders${qs({ work_center_ids: wcIds })}`), [wcIds.join(",")]);
   const refresh = () => { load.reload(); lines.reload(); schedule.reload(); };
   const mergeCount = useAsync(() => api.get<unknown[]>("/api/plan/merge-suggestions").then((g) => g.length), [schedule.data?.length]);
 
+  const planReq: AutoPlanRequest = {
+    start_week: start,
+    weeks,
+    work_center_ids: wcIds.length ? wcIds : null,
+    replace_existing: true,
+    mode,
+    ...(coShipment.enabled && coShipment.selections.length
+      ? { co_shipment: coShipment }
+      : {}),
+  };
+
   const runAuto = async (skipConfirm = false) => {
-    if (!skipConfirm && !confirm(`${mode === "revenue" ? "MAKSİMUM CİRO" : "TERMİNE GÖRE"} planlanacak. Seçili iş merkezleri için mevcut OTOMATİK plan satırları silinip yeniden oluşturulacak. Manuel satırlar korunur. Devam?`)) return;
+    if (!skipConfirm) {
+      setPreflightOpen(true);
+      return;
+    }
     setBusy(true); setErr("");
     try {
-      setResult(await api.post<AutoResult>("/api/plan/auto", { start_week: start, weeks, work_center_ids: wcIds.length ? wcIds : null, replace_existing: true, mode }));
+      setResult(await api.post<AutoResult>("/api/plan/auto", planReq));
+      refresh();
+    } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
+  };
+
+  const confirmAutoPlan = async () => {
+    setPreflightOpen(false);
+    setBusy(true); setErr("");
+    try {
+      setResult(await api.post<AutoResult>("/api/plan/auto", planReq));
       refresh();
     } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
   };
@@ -97,6 +133,12 @@ export default function Planning() {
             )}
             <button className="secondary" onClick={() => api.download(`/api/plan/export.xlsx${qs({ start, weeks, work_center_ids: wcIds })}`)}>⬇ Excel</button>
           </div>
+          {can("poweruser") && mode === "due_date" && (
+            <CoShipmentPanel orders={openOrders.data ?? []} value={coShipment} onChange={setCoShipment} />
+          )}
+          {can("poweruser") && mode === "revenue" && coShipment.enabled && (
+            <p className="muted">Birlikte sevk modu yalnızca “Termine göre” planlamada kullanılabilir.</p>
+          )}
           <ErrorText err={err || load.err || lines.err} />
           {result && (
             <div className="panel">
@@ -115,6 +157,38 @@ export default function Planning() {
                   <div className="error">Ufuk içine sığmayan {result.unplanned.length} operasyon (hafta sayısını artırın veya kapasite ekleyin):</div>
                   <ul className="errors">{result.unplanned.map((u, i) => <li key={i}>{u.order_no} / {u.item_code} op.{u.operation_seq} @ {u.work_center_code}: {fmt(u.hours)} saat</li>)}</ul>
                 </>
+              )}
+              {(result.co_shipment_results?.length ?? 0) > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <h3 style={{ margin: "0 0 8px" }}>Birlikte sevk sonucu</h3>
+                  <div className="table-wrap">
+                    <table>
+                      <thead><tr><th>Sipariş</th><th>Pozlar</th><th>Termin</th><th>Hedef hazır</th><th>Planlanan hazır</th><th>Durum</th></tr></thead>
+                      <tbody>
+                        {result.co_shipment_results!.map((r) => (
+                          <tr key={r.order_no}>
+                            <td><b>{r.order_no}</b></td>
+                            <td>{r.position_nos.join(", ")}</td>
+                            <td>{new Date(r.due_date + "T12:00:00").toLocaleDateString("tr-TR")}</td>
+                            <td>{new Date(r.target_ready_date + "T12:00:00").toLocaleDateString("tr-TR")}</td>
+                            <td>{r.planned_ready_date ? new Date(r.planned_ready_date + "T12:00:00").toLocaleDateString("tr-TR") : "—"}</td>
+                            <td>{r.on_target ? <span className="badge ok">Hedefte</span> : <span className="badge warn">Sapma</span>}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+              {(result.co_shipment_exceptions?.length ?? 0) > 0 && (
+                <ul style={{ marginTop: 10, paddingLeft: 18 }}>
+                  {result.co_shipment_exceptions!.map((e, i) => (
+                    <li key={i} className="warn">
+                      <b>{e.order_no}</b> ({e.position_nos.join(", ")}): {e.reason}
+                      {e.suggestion && <span className="muted"> — {e.suggestion}</span>}
+                    </li>
+                  ))}
+                </ul>
               )}
             </div>
           )}
@@ -244,6 +318,7 @@ export default function Planning() {
       </div>
       {loadDetail && <LoadDetailModal wcId={loadDetail.wcId} wcCode={loadDetail.wcCode} week={loadDetail.week} onClose={() => setLoadDetail(null)} />}
       </>)}
+      {preflightOpen && <PlanPreflightModal req={planReq} onClose={() => setPreflightOpen(false)} onConfirm={confirmAutoPlan} />}
     </>
   );
 }

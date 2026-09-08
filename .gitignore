@@ -3,7 +3,10 @@ __pycache__/
 .venv/
 backend/.env
 backend/*.db
+backend/*.db-shm
+backend/*.db-wal
 backend/.pytest_cache/
+frontend/tsconfig.tsbuildinfo
 node_modules/
 frontend/dist/
 .vite/

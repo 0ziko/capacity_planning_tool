@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, imports, master, planning, scenarios, stock
+from app.api import auth, data, imports, master, owner, planning, scenarios, stock
 from app.core.config import get_settings
 from app.core.security import hash_password
 from app.db.migrate import ensure_columns, repair_orphans
@@ -18,7 +18,9 @@ def seed_admin() -> None:
     try:
         if not db.query(User).filter(User.role == "admin").first():
             db.add(User(username=s.first_admin_username, full_name="Yonetici", role="admin", hashed_password=hash_password(s.first_admin_password)))
-            db.commit()
+        if not db.query(User).filter(User.role == "owner").first():
+            db.add(User(username=s.first_owner_username, full_name="Owner", role="owner", hashed_password=hash_password(s.first_owner_password)))
+        db.commit()
     finally:
         db.close()
 
@@ -55,6 +57,8 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(data.router)
+app.include_router(owner.router)
 app.include_router(master.router)
 app.include_router(planning.router)
 app.include_router(imports.router)

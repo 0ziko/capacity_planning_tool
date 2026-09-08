@@ -204,14 +204,14 @@ def _op_production_totals(db: Session, item_id: int) -> dict[int, float]:
     wip_idx = wip_index(db)
     for a in db.query(ProductionActual).filter(ProductionActual.item_id == item_id).all():
         op_id = None
-        if a.semi_finished_code:
+        if a.operation_seq is not None:
+            op = next((o for o in ops if o.seq == a.operation_seq), None)
+            op_id = op.id if op else None
+        if op_id is None and a.semi_finished_code:
             try:
                 op_id = resolve_wip(db, a.semi_finished_code, item.code if item else None, wip_idx).id
             except ValueError:
                 pass
-        if op_id is None and a.operation_seq is not None:
-            op = next((o for o in ops if o.seq == a.operation_seq), None)
-            op_id = op.id if op else None
         if op_id is None:
             op = next((o for o in ops if o.work_center_id == a.work_center_id), None)
             op_id = op.id if op else None

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api, fmt, type ImportKind, type ImportResult, type OrderImportPreview } from "../api";
 import { useAuth } from "../auth";
 import { ErrorText, useAsync } from "../components";
@@ -17,13 +18,15 @@ const HINT: Record<string, string> = {
   routing: "Aşamalı tezgah sırası + çevrim süresi (sn/adet). Kapasite ihtiyacının kaynağı.",
   op_rules: "Senaryo matrisi: Kural = Bitiş (önceki bitince) ya da Çevrim (önceki N çevrim tamamlayınca). Stok Kodu boşsa ürün grubu geneli.",
   orders: "Günlük açık sipariş listesi: önce fark özeti gösterilir; hata varsa Excel raporu indirilip düzeltilir. Eşleşen satırlar güncellenir; listede olmayan açık siparişleri silmek isteğe bağlıdır.",
-  production: "Bir önceki günün üretimi. Aynı gün/iş merkezi/stok/op/sipariş satırı üzerine yazılır.",
+  production: "Günlük üretim beyanı. Yarımamül kodu + miktar yeterli; sipariş no zorunlu değildir. Boş bırakılırsa üretim belirli bir siparişe bağlanmaz — açık siparişlere termin sırasıyla (FIFO) dağıtılır. Aynı yarımamül kodu birden fazla rotada olsa bile stok kodu zorunlu değildir; plan önceliğine göre otomatik dağıtılır. Bitmiş stok bağlantısı ayrı yapılır.",
   downtime: "Bir günün duruşları yeniden yüklenirse o gün/iş merkezi için eskiler silinir.",
   stock_receipts: "Depoya giren bitmiş ürün (siparişten bağımsız). Rezervasyon Stok & Rezervasyon sayfasından yapılır.",
 };
 
 export default function Imports() {
   const { can } = useAuth();
+  const [searchParams] = useSearchParams();
+  const highlightKind = searchParams.get("kind") || "";
   const kinds = useAsync(() => api.get<ImportKind[]>("/api/imports/kinds"), []);
   const log = useAsync(() => api.get<LogRow[]>("/api/imports/log?limit=30"), []);
   const [results, setResults] = useState<Record<string, ImportResult | string>>({});
@@ -39,6 +42,7 @@ export default function Imports() {
       const r = await api.upload<ImportResult>(`/api/imports/${kind}`, file, params);
       setResults((s) => ({ ...s, [kind]: r }));
       log.reload();
+      if (!r.errors.length) window.dispatchEvent(new Event("data-imported"));
     } catch (e) {
       setResults((s) => ({ ...s, [kind]: (e as Error).message }));
     } finally {
@@ -69,6 +73,12 @@ export default function Imports() {
 
   const sorted = [...(kinds.data ?? [])].sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind));
 
+  useEffect(() => {
+    if (!highlightKind) return;
+    const el = document.getElementById(`import-kind-${highlightKind}`);
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [highlightKind, kinds.data]);
+
   return (
     <>
       <h1>Excel Import / Yedek</h1>
@@ -81,7 +91,7 @@ export default function Imports() {
         {sorted.map((k, i) => {
           const r = results[k.kind];
           return (
-            <div className="panel" key={k.kind}>
+            <div className="panel" key={k.kind} id={`import-kind-${k.kind}`} style={highlightKind === k.kind ? { borderColor: "var(--warn)", boxShadow: "0 0 0 1px var(--warn)" } : undefined}>
               <h2 style={{ marginTop: 0 }}>{i + 1}. {k.title}</h2>
               <div className="muted" style={{ marginBottom: 6 }}>{HINT[k.kind]}</div>
               <div className="muted">Sütunlar: {k.columns.map((c) => <span key={c} style={{ fontWeight: k.required.includes(c) ? 700 : 400 }}>{c}; </span>)}</div>

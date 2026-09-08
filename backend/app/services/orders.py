@@ -528,17 +528,17 @@ def order_progress(db: Session, wc_ids: list[int] | None, as_of: date | None = N
 
     wip_idx = wip_index(db)
 
-    def op_key(item: Item, seq: int | None, wc_id: int, wip_code: str = "") -> int | None:
-        if wip_code:
-            try:
-                op = resolve_wip(db, wip_code, item.code, wip_idx)
-                return op.id
-            except ValueError:
-                pass
+    def op_key(item: Item, seq: int | None, wc_id: int, wip_code: str = "", order_no_hint: str = "") -> int | None:
         if seq is not None:
             op = next((x for x in item.operations if x.seq == seq), None)
-        else:
-            op = next((x for x in item.operations if x.work_center_id == wc_id), None)
+            if op:
+                return op.id
+        if wip_code:
+            try:
+                return resolve_wip(db, wip_code, item.code, wip_idx, order_no=order_no_hint or None).id
+            except ValueError:
+                pass
+        op = next((x for x in item.operations if x.work_center_id == wc_id), None)
         return op.id if op else None
 
     items_by_id = {o.item_id: o.item for o in orders}
@@ -556,7 +556,7 @@ def order_progress(db: Session, wc_ids: list[int] | None, as_of: date | None = N
         item = items_by_id.get(a.item_id)
         if not item:
             continue
-        op_id = op_key(item, a.operation_seq, a.work_center_id, a.semi_finished_code or "")
+        op_id = op_key(item, a.operation_seq, a.work_center_id, a.semi_finished_code or "", a.order_no or "")
         if op_id is None:
             continue
         if a.order_no:

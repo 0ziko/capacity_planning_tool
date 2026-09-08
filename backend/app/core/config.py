@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 720
     first_admin_username: str = "admin"
     first_admin_password: str = "admin123"
+    first_owner_username: str = "owner"
+    first_owner_password: str = "owner123"
     cors_origins: str = "http://localhost:5173"
 
     @property

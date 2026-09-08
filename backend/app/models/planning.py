@@ -94,7 +94,10 @@ class PlanLine(Base):
 
 
 class ProductionActual(Base):
-    """Gunluk import edilen uretim sonucu (bir onceki gun)."""
+    """Gunluk import edilen uretim sonucu (bir onceki gun).
+
+    order_no bos olabilir: uretim operasyonel beyanidir; siparis baglantisi zorunlu degildir.
+    """
 
     __tablename__ = "production_actuals"
 

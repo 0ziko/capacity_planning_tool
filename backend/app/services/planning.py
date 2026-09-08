@@ -31,6 +31,7 @@ from app.schemas import (
 from app.services import capacity as cap
 from app.services import scenarios as scen
 from app.services.gantt import actual_hours_by_week
+from app.services.plan_draft import DraftLine
 
 
 def _selected_work_centers(db: Session, ids: list[int] | None) -> list[WorkCenter]:
@@ -54,22 +55,6 @@ def planned_hours_by_week(db: Session, wc_ids: list[int], start: date, end: date
 
 
 @dataclass
-class DraftLine:
-    """Kalici olmayan (simulasyon) plan satiri; PlanLine ile ayni alan adlari."""
-
-    order: Order
-    order_id: int
-    operation_id: int
-    work_center_id: int
-    week_start: date
-    planned_hours: float
-    planned_qty: float
-    mode: str = "auto"
-    production_batch_id: int | None = None
-    label: str = ""
-
-
-@dataclass
 class Simulation:
     mode: str
     start: date
@@ -80,6 +65,8 @@ class Simulation:
     skipped: list[dict]  # ciro modunda tamamen disarida birakilan siparisler
     capacity_hours: float  # ufuk icindeki toplam (manuel dusulmus) kapasite
     orders: list[Order]
+    co_shipment_results: list[dict] | None = None
+    co_shipment_exceptions: list[dict] | None = None
 
     @property
     def planned_hours(self) -> float:
@@ -208,7 +195,8 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
         .all()
     )
     if not wcs:
-        return Simulation(req.mode, start, weeks, [], [], [], [], 0.0, all_orders)
+        return Simulation(req.mode, start, weeks, [], [], [], [], 0.0, all_orders, [], [])
+
     wc_ids = [w.id for w in wcs]
     wc_by_id = {w.id: w for w in wcs}
 
@@ -230,6 +218,20 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
     unplanned: list[dict] = []
     skipped: list[dict] = []
     rules = scen.RuleLookup(db)
+    co_results: list[dict] = []
+    co_exceptions: list[dict] = []
+    co_handled: set[int] = set()
+
+    cs_opts = req.co_shipment
+    if cs_opts and cs_opts.enabled and cs_opts.selections and req.mode == "due_date":
+        from app.services import co_shipment as co_ship
+
+        co_out = co_ship.apply_co_shipment(db, cs_opts, weeks, start, wc_by_id, remaining, rules)
+        lines.extend(co_out.lines)
+        co_results = co_out.results
+        co_exceptions = co_out.exceptions
+        co_handled = co_out.handled_order_ids
+        orders = [o for o in orders if o.id not in co_handled]
 
     if req.mode == "revenue":
         def density(o: Order) -> float:
@@ -289,13 +291,23 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
             lines.extend(ls)
             unplanned.extend(un)
 
-    return Simulation(req.mode, start, weeks, wcs, lines, unplanned, skipped, capacity_total, all_orders)
+    return Simulation(
+        req.mode, start, weeks, wcs, lines, unplanned, skipped, capacity_total, all_orders, co_results, co_exceptions
+    )
 
 
 def auto_plan(db: Session, req: AutoPlanRequest, username: str) -> dict:
     sim = simulate(db, req)
     if not sim.work_centers:
-        return {"created": 0, "unplanned": [], "skipped": [], "mode": req.mode, "message": "Planlanacak is merkezi secilmedi (is merkezinde 'Planlaniyor' isaretli olmali)."}
+        return {
+            "created": 0,
+            "unplanned": [],
+            "skipped": [],
+            "mode": req.mode,
+            "message": "Planlanacak is merkezi secilmedi (is merkezinde 'Planlaniyor' isaretli olmali).",
+            "co_shipment_results": [],
+            "co_shipment_exceptions": [],
+        }
     wc_ids = [w.id for w in sim.work_centers]
     if req.replace_existing:
         db.query(PlanLine).filter(
@@ -319,7 +331,18 @@ def auto_plan(db: Session, req: AutoPlanRequest, username: str) -> dict:
         )
     db.commit()
     label = "maksimum ciro" if req.mode == "revenue" else "termine gore"
-    return {"created": len(sim.lines), "unplanned": sim.unplanned, "skipped": sim.skipped, "mode": req.mode, "message": f"{len(sim.lines)} plan satiri olusturuldu ({label})."}
+    msg = f"{len(sim.lines)} plan satiri olusturuldu ({label})."
+    if sim.co_shipment_results:
+        msg += f" Birlikte sevk modu: {len(sim.co_shipment_results)} siparis grubu."
+    return {
+        "created": len(sim.lines),
+        "unplanned": sim.unplanned,
+        "skipped": sim.skipped,
+        "mode": req.mode,
+        "message": msg,
+        "co_shipment_results": sim.co_shipment_results or [],
+        "co_shipment_exceptions": sim.co_shipment_exceptions or [],
+    }
 
 
 def add_manual_line(db: Session, line: ManualPlanLineIn, username: str) -> PlanLine:

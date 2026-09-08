@@ -11,7 +11,7 @@ from app.models import User
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
-ROLE_RANK = {"user": 1, "poweruser": 2, "admin": 3}
+ROLE_RANK = {"user": 1, "poweruser": 2, "admin": 3, "owner": 4}
 
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
@@ -38,3 +38,4 @@ def require_role(min_role: str) -> Callable:
 require_user = require_role("user")
 require_poweruser = require_role("poweruser")
 require_admin = require_role("admin")
+require_owner = require_role("owner")

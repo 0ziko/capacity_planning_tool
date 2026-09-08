@@ -5,7 +5,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
 
-ROLES = ("admin", "poweruser", "user")
+ROLES = ("owner", "admin", "poweruser", "user")
 
 
 class User(Base):

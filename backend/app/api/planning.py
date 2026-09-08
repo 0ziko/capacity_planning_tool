@@ -23,6 +23,7 @@ from app.schemas import (
     MergeImpactOut,
     MergeImpactRequest,
     MergeRequest,
+    PlanPreflightOut,
     ProductionBatchCreate,
     ProductionBatchOut,
     OrderProgressOut,
@@ -40,6 +41,7 @@ from app.schemas import (
 from app.services import analysis, capacity, excel, gantt, planning, progress, requirements, revenue
 from app.services import merge_impact as merge_impact_svc
 from app.services import orders as orders_svc
+from app.services import plan_preflight as preflight_svc
 from app.services import production_batches as pbatches
 
 router = APIRouter(prefix="/api", tags=["planning"])
@@ -87,8 +89,17 @@ def item_hours(item_code: str, quantity: float = 1, db: Session = Depends(get_db
 
 
 # ---- Planning ----
+@router.post("/plan/auto/preflight", response_model=PlanPreflightOut)
+def auto_plan_preflight(req: AutoPlanRequest, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    return preflight_svc.plan_preflight(db, req)
+
+
 @router.post("/plan/auto", response_model=dict)
 def run_auto_plan(req: AutoPlanRequest, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
+    check = preflight_svc.plan_preflight(db, req)
+    if not check.can_plan:
+        codes = ", ".join(r.item_code for r in check.no_routing[:10])
+        raise HTTPException(400, f"Acik siparislerde rotasi olmayan stok kodlari var; planlama yapilamaz: {codes}")
     return planning.auto_plan(db, req, user.username)
 
 

@@ -14,11 +14,14 @@ from app.schemas import (
     CapacityOut,
     GanttOut,
     ForecastFromLeadTimeIn,
+    ForecastSummaryOut,
     LeadTimeOut,
     LeadTimeRequest,
     LoadDetailOut,
     ManualPlanLineIn,
     MergeGroup,
+    MergeImpactOut,
+    MergeImpactRequest,
     MergeRequest,
     ProductionBatchCreate,
     ProductionBatchOut,
@@ -31,9 +34,11 @@ from app.schemas import (
     RequirementLine,
     RequirementQuery,
     RevenueOut,
+    WeeklyOutputOut,
     WorkCenterLoad,
 )
 from app.services import analysis, capacity, excel, gantt, planning, progress, requirements, revenue
+from app.services import merge_impact as merge_impact_svc
 from app.services import orders as orders_svc
 from app.services import production_batches as pbatches
 
@@ -101,10 +106,11 @@ def get_plan_lines(
     start: date | None = None,
     end: date | None = None,
     work_center_ids: list[int] | None = Query(None),
+    mode: str | None = None,
     db: Session = Depends(get_db),
     _=Depends(require_user),
 ):
-    return planning.plan_lines(db, work_center_ids, start, end)
+    return planning.plan_lines(db, work_center_ids, start, end, mode)
 
 
 @router.patch("/plan/lines/{line_id}", response_model=dict)
@@ -179,13 +185,58 @@ def load_detail_xlsx(work_center_id: int, week_start: date, db: Session = Depend
     return _xlsx(content, f"is_listesi_{detail.work_center_code}_{week_start}.xlsx")
 
 
+@router.get("/plan/weekly-output", response_model=WeeklyOutputOut)
+def get_weekly_output(
+    week_start: date,
+    work_center_ids: list[int] | None = Query(None),
+    db: Session = Depends(get_db),
+    _=Depends(require_user),
+):
+    try:
+        return planning.weekly_output(db, week_start, work_center_ids or None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/plan/weekly-output.xlsx")
+def weekly_output_xlsx(
+    week_start: date,
+    work_center_ids: list[int] | None = Query(None),
+    db: Session = Depends(get_db),
+    _=Depends(require_user),
+):
+    try:
+        out = planning.weekly_output(db, week_start, work_center_ids or None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    content = excel.build_weekly_output_xlsx(out)
+    return _xlsx(content, f"uretim_plani_{out.week_start}.xlsx")
+
+
 @router.post("/plan/leadtime/forecast", response_model=dict)
 def add_leadtime_forecast(req: ForecastFromLeadTimeIn, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
     try:
-        n = planning.add_forecast_from_leadtime(db, req, user.username)
+        order_id, n = planning.add_forecast_from_leadtime(db, req, user.username)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"created": n, "message": f"{n} tahmin plan satiri eklendi; sonraki terminlemelerde doluluk hesaba katilir."}
+    return {
+        "created": n,
+        "order_id": order_id,
+        "message": f"{n} tahmin plan satiri eklendi; sonraki terminlemelerde doluluk hesaba katilir.",
+    }
+
+
+@router.get("/plan/forecast", response_model=list[ForecastSummaryOut])
+def get_forecasts(db: Session = Depends(get_db), _=Depends(require_user)):
+    return planning.list_forecasts(db)
+
+
+@router.delete("/plan/forecast/{order_id}", status_code=204)
+def delete_forecast_order(order_id: int, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    try:
+        planning.delete_forecast(db, order_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
 
 
 @router.delete("/plan/forecast", status_code=204)
@@ -220,13 +271,28 @@ def get_order_schedule(work_center_ids: list[int] | None = Query(None), db: Sess
 
 # ---- Uretim partisi (eski ad: birlestirme) ----
 @router.get("/plan/merge-suggestions", response_model=list[MergeGroup])
-def get_merge_suggestions(db: Session = Depends(get_db), _=Depends(require_user)):
-    return pbatches.batch_suggestions(db)
+def get_merge_suggestions(tolerance_days: int = Query(5, ge=0, le=365), db: Session = Depends(get_db), _=Depends(require_user)):
+    return pbatches.batch_suggestions(db, tolerance_days)
 
 
 @router.get("/plan/production-batches", response_model=list[ProductionBatchOut])
 def get_production_batches(status: str = "open", db: Session = Depends(get_db), _=Depends(require_user)):
     return pbatches.list_batches(db, status)
+
+
+@router.post("/plan/merge/impact", response_model=MergeImpactOut)
+def preview_merge_impact(req: MergeImpactRequest, db: Session = Depends(get_db), _=Depends(require_user)):
+    try:
+        auto = AutoPlanRequest(
+            start_week=req.start_week,
+            weeks=req.weeks,
+            work_center_ids=req.work_center_ids,
+            replace_existing=True,
+            mode=req.mode,
+        )
+        return merge_impact_svc.preview_merge_impact(db, req.merge_groups, auto)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @router.post("/plan/merge", response_model=ProductionBatchOut, status_code=201)

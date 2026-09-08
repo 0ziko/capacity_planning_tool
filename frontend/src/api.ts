@@ -114,6 +114,7 @@ export interface WorkCenter {
   id: number; code: string; name: string; description: string; is_active: boolean; is_planned: boolean;
   capacity_unit_hours: number; default_efficient_hours: number;
   area_code: string; area_name: string; capacity_source: CapacitySource;
+  planning_reserve_pct: number;
   shifts: Shift[]; machines: Machine[];
   employee_count: number; machine_employee_count: number; capacity_headcount: number;
 }
@@ -142,12 +143,16 @@ export interface OrderProgress {
   order_id: number; order_no: string; position_no: string; customer: string; item_code: string; quantity: number; due_date: string; required_hours: number; earned_hours: number; produced_qty: number; pct: number;
   status: "not_started" | "in_progress" | "completed"; first_prod_date: string | null; last_prod_date: string | null; ops: OrderProgressOp[];
 }
-export interface MergeGroup { item_id: number; item_code: string; item_name: string; order_count: number; total_qty: number; earliest_due: string; latest_due: string; customers: string[]; has_progress: boolean; orders: Order[] }
+export interface MergeGroup { item_id: number; item_code: string; item_name: string; order_count: number; total_qty: number; earliest_due: string; latest_due: string; customers: string[]; has_progress: boolean; recommended: boolean; due_spread_days: number; tolerance_days: number; cluster_key: string; orders: Order[] }
 export interface ProductionBatchOrder { order_id: number; order_no: string; position_no: string; customer: string; due_date: string; quantity: number }
 export interface ProductionBatch { id: number; batch_no: string; item_id: number; item_code: string; item_name: string; due_date: string; quantity: number; note: string; status: string; orders: ProductionBatchOrder[] }
 export interface Capacity { work_center_id: number; work_center_code: string; start: string; end: string; capacity_hours: number; capacity_units: number; unit_hours: number; days: { day: string; hours: number }[] }
-export interface WeekLoad { week_start: string; capacity_hours: number; planned_hours: number; utilization: number; actual_hours: number; actual_utilization: number; remaining_hours: number; remaining_days: number; idle_hours: number; capacity_units: number; planned_units: number; actual_units: number }
+export interface ForecastLoadDetail { order_no: string; item_code: string; hours: number }
+export interface WeekLoad { week_start: string; capacity_hours: number; planning_capacity_hours: number; planned_hours: number; forecast_hours: number; firm_planned_hours: number; forecast_details: ForecastLoadDetail[]; utilization: number; actual_hours: number; actual_utilization: number; remaining_hours: number; remaining_days: number; idle_hours: number; capacity_units: number; planned_units: number; actual_units: number }
 export interface WorkCenterLoad { work_center_id: number; work_center_code: string; weeks: WeekLoad[] }
+export interface MergeLoadDelta { work_center_id: number; work_center_code: string; week_start: string; before_hours: number; after_hours: number; delta_hours: number }
+export interface MergeDelayRow { order_id: number; order_no: string; position_no: string; customer: string; item_code: string; due_date: string; before_end: string | null; after_end: string | null; delay_days: number; before_lateness: number | null; after_lateness: number | null }
+export interface MergeImpact { merge_count: number; order_count: number; delayed_count: number; delayed_orders: MergeDelayRow[]; load_deltas: MergeLoadDelta[]; batches: { batch_no: string; item_code: string; quantity: number; order_count: number; order_nos: string[]; due_date: string }[]; note: string }
 export interface GanttBar {
   plan_line_id: number; order_id: number; order_no: string; position_no: string;
   production_batch_id: number | null; batch_no: string; batch_order_nos: string[];
@@ -164,8 +169,11 @@ export interface PlanLine { id: number; order_id: number; order_no: string; posi
 export interface LoadDetailRow { plan_line_id: number; item_code: string; item_name: string; semi_finished_code: string; operation_name: string; order_no: string; position_no: string; customer: string; batch_no: string; batch_order_nos: string[]; operation_seq: number; planned_hours: number; planned_qty: number; planned_start: string | null; planned_end: string | null; mode: string }
 export interface LoadDetailParetoRow { item_code: string; hours: number; pct: number; cum_pct: number }
 export interface LoadDetail { work_center_id: number; work_center_code: string; week_start: string; total_hours: number; total_qty: number; rows: LoadDetailRow[]; pareto: LoadDetailParetoRow[] }
+export interface WeeklyOutputWc { work_center_id: number; work_center_code: string; total_qty: number; rows: LoadDetailRow[] }
+export interface WeeklyOutput { week_start: string; week_end: string; work_centers: WeeklyOutputWc[]; total_jobs: number; total_qty: number }
 export interface LeadTimeStep { operation_seq: number; operation_name: string; work_center_code: string; hours: number; start: string; end: string; start_rule: string }
 export interface LeadTime { item_code: string; quantity: number; total_hours: number; start: string; end: string; steps: LeadTimeStep[] }
+export interface ForecastSummary { order_id: number; order_no: string; item_code: string; item_name: string; quantity: number; due_date: string; total_hours: number; line_count: number; week_from: string | null; week_to: string | null; created_at: string | null }
 export interface Progress { work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; expected_hours_to_date: number; actual_hours_to_date: number; remaining_hours: number; remaining_days: number; working_days: number; elapsed_days: number; status: string }
 export interface ImportKind { kind: string; title: string; columns: string[]; required: string[] }
 

@@ -16,7 +16,7 @@ from app.schemas import (
     ProductionBatchOut,
     ProductionBatchSuggestion,
 )
-from app.services.orders import order_out
+from app.services.orders import effective_due, order_out
 
 
 def batched_order_ids(db: Session) -> set[int]:
@@ -54,8 +54,65 @@ def list_batches(db: Session, status: str = "open") -> list[ProductionBatchOut]:
     return [batch_out(b) for b in rows]
 
 
-def batch_suggestions(db: Session) -> list[ProductionBatchSuggestion]:
+def _cluster_orders_by_tolerance(orders: list[Order], tolerance_days: int) -> list[list[Order]]:
+    """Terminleri birbirine tolerance_days icinde olan siparis kumeleri (en az 2 siparis)."""
+    sorted_o = sorted(orders, key=effective_due)
+    clusters: list[list[Order]] = []
+    i = 0
+    while i < len(sorted_o):
+        cluster = [sorted_o[i]]
+        j = i + 1
+        while j < len(sorted_o) and (effective_due(sorted_o[j]) - effective_due(cluster[0])).days <= tolerance_days:
+            cluster.append(sorted_o[j])
+            j += 1
+        if len(cluster) >= 2:
+            clusters.append(cluster)
+        i = j if j > i + 1 else i + 1
+    return clusters
+
+
+def _due_spread(orders: list[Order]) -> tuple[date, date, int]:
+    dues = [effective_due(o) for o in orders]
+    earliest, latest = min(dues), max(dues)
+    return earliest, latest, (latest - earliest).days
+
+
+def _suggestion_from_orders(
+    item_id: int,
+    item: Item,
+    orders: list[Order],
+    *,
+    recommended: bool,
+    tolerance_days: int,
+    cluster_key: str,
+    with_prog: set[tuple[str, int]],
+) -> ProductionBatchSuggestion:
+    earliest, latest, spread = _due_spread(orders)
+    customers: list[str] = []
+    for o in orders:
+        if o.customer and o.customer not in customers:
+            customers.append(o.customer)
+    return ProductionBatchSuggestion(
+        item_id=item_id,
+        item_code=item.code,
+        item_name=item.name,
+        order_count=len(orders),
+        total_qty=round(sum(o.quantity for o in orders), 2),
+        earliest_due=earliest,
+        latest_due=latest,
+        customers=customers,
+        has_progress=any((o.order_no.upper(), item_id) in with_prog for o in orders),
+        recommended=recommended,
+        due_spread_days=spread,
+        tolerance_days=tolerance_days,
+        cluster_key=cluster_key,
+        orders=[order_out(o) for o in orders],
+    )
+
+
+def batch_suggestions(db: Session, tolerance_days: int = 5) -> list[ProductionBatchSuggestion]:
     """Ayni stok kodunda birden fazla acik siparis (partide olmayan) -> uretim birlestirme onerisi."""
+    tolerance_days = max(0, int(tolerance_days))
     in_batch = batched_order_ids(db)
     orders = (
         db.query(Order)
@@ -77,28 +134,40 @@ def batch_suggestions(db: Session) -> list[ProductionBatchSuggestion]:
     for order_no, item_id in db.query(ProductionActual.order_no, ProductionActual.item_id).filter(ProductionActual.item_id.in_(multi.keys())).distinct().all():
         if (order_no or "").upper() in nos:
             with_prog.add(((order_no or "").upper(), item_id))
-    out = []
+    out: list[ProductionBatchSuggestion] = []
     for item_id, lst in multi.items():
         item = lst[0].item
-        customers = []
-        for o in lst:
-            if o.customer and o.customer not in customers:
-                customers.append(o.customer)
-        out.append(
-            ProductionBatchSuggestion(
-                item_id=item_id,
-                item_code=item.code,
-                item_name=item.name,
-                order_count=len(lst),
-                total_qty=round(sum(o.quantity for o in lst), 2),
-                earliest_due=min(o.due_date for o in lst),
-                latest_due=max(o.due_date for o in lst),
-                customers=customers,
-                has_progress=any((o.order_no.upper(), item_id) in with_prog for o in lst),
-                orders=[order_out(o) for o in lst],
+        clusters = _cluster_orders_by_tolerance(lst, tolerance_days)
+        seen_sigs: set[tuple[int, ...]] = set()
+        for ci, cluster in enumerate(clusters):
+            sig = tuple(o.id for o in cluster)
+            seen_sigs.add(sig)
+            out.append(
+                _suggestion_from_orders(
+                    item_id,
+                    item,
+                    cluster,
+                    recommended=True,
+                    tolerance_days=tolerance_days,
+                    cluster_key=f"{item_id}-r-{ci}",
+                    with_prog=with_prog,
+                )
             )
-        )
-    out.sort(key=lambda g: (g.earliest_due, g.item_code))
+        _, _, spread_all = _due_spread(lst)
+        sig_all = tuple(o.id for o in lst)
+        if spread_all > tolerance_days and sig_all not in seen_sigs:
+            out.append(
+                _suggestion_from_orders(
+                    item_id,
+                    item,
+                    lst,
+                    recommended=False,
+                    tolerance_days=tolerance_days,
+                    cluster_key=f"{item_id}-opt",
+                    with_prog=with_prog,
+                )
+            )
+    out.sort(key=lambda g: (not g.recommended, g.earliest_due, g.item_code, g.cluster_key))
     return out
 
 

@@ -29,6 +29,8 @@ class WorkCenter(Base):
     #   work_center -> vardiya kisi sayisi, yoksa is merkezine bagli aktif personel (varsayilan)
     #   machines    -> bu is merkezinin aktif makinelerine atanmis aktif personel (makine detayi aktif)
     capacity_source: Mapped[str] = mapped_column(String(16), default="work_center")
+    # Planlamada bos birakilacak kapasite payi (0=%%100 doluluk hedefi, 10=plan en fazla kapasitenin %%90'i)
+    planning_reserve_pct: Mapped[float] = mapped_column(Float, default=0.0)
 
     shifts: Mapped[list["WorkCenterShift"]] = relationship(
         back_populates="work_center", cascade="all, delete-orphan", order_by="WorkCenterShift.id"

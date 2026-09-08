@@ -66,6 +66,11 @@ tr:hover td { background: #f8fafc; }
 .bar.actual > span { background: var(--ok); }
 .bar > span.warn { background: var(--warn); }
 .bar > span.bad { background: var(--bad); }
+.bar.plan-stack { display: flex; flex-direction: row; }
+.bar.plan-stack > span.firm { background: var(--warn); }
+.bar.plan-stack > span.firm.bad { background: var(--bad); }
+.bar.plan-stack > span.forecast { background: #9333ea; opacity: 0.92; }
+.bar.plan-stack > span.over { background: #dc2626; }
 
 /* Gantt */
 .gantt-wrap { overflow-x: auto; padding: 0 !important; }
@@ -180,3 +185,20 @@ table.dash-load td.dash-hours { white-space: nowrap; width: 108px; }
 table.dash-load td.dash-bar { width: 120px; vertical-align: middle; }
 table.dash-load td:first-child,
 table.dash-load th:first-child { width: 120px; }
+
+/* Haftalık üretim planı çıktısı */
+.production-output-body { margin-top: 8px; }
+.production-output-header { margin-bottom: 16px; }
+.production-wc-block { margin-bottom: 20px; page-break-inside: avoid; }
+.production-wc-block h3 { font-size: 14px; margin: 0 0 6px; color: var(--primary); }
+.production-wc-block table { border: 1px solid var(--border); border-radius: 6px; }
+.production-wc-block th { position: static; }
+.production-wip-summary th { background: #e8f0fe; }
+
+@media print {
+  .sidebar, .tabs, .no-print, h1, .panel.row { display: none !important; }
+  .content { padding: 0; max-width: none; }
+  .production-wc-block { break-inside: avoid; margin-bottom: 24px; }
+  .production-wc-block table { font-size: 11px; }
+  th, td { padding: 4px 6px; }
+}

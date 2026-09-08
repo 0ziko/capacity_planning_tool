@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { api, fmt, mondayOf, qs, type Capacity, type CapacitySource, type Machine, type Shift, type WorkCenter } from "../api";
 import { useAuth } from "../auth";
 import { ErrorText, useAsync, useWorkCenters } from "../components";
@@ -7,17 +7,46 @@ import WcWeeksPanel from "./WcWeeksPanel";
 const DAYS = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"];
 const emptyWc = {
   code: "", name: "", description: "", is_active: true, is_planned: false, capacity_unit_hours: 10, default_efficient_hours: 4,
-  area_code: "", area_name: "", capacity_source: "work_center" as CapacitySource,
+  area_code: "", area_name: "", capacity_source: "work_center" as CapacitySource, planning_reserve_pct: 0,
 };
 const emptyShift: Shift = { name: "Gündüz", weekdays: "0,1,2,3,4", start_time: "08:00", end_time: "18:00", headcount: 0, efficient_hours_per_person: null };
 const emptyMachine: Machine = { code: "", name: "", description: "", is_active: true };
 
 const SOURCE_LABEL: Record<CapacitySource, string> = { work_center: "İş merkezi personeli", machines: "Makine atamaları" };
+const SOURCE_SHORT: Record<CapacitySource, string> = { work_center: "Personel", machines: "Makine" };
 
-/** API'ye gonderilecek is merkezi govdesi (hesaplanan/iliskili alanlar cikarilir). */
+type WcFilters = {
+  code: string;
+  area: string;
+  planned: "" | "yes" | "no";
+  source: "" | CapacitySource;
+  active: "" | "yes" | "no";
+};
+
+const EMPTY_FILTERS: WcFilters = { code: "", area: "", planned: "", source: "", active: "" };
+
 function wcBody(wc: Partial<WorkCenter>) {
   const { id: _id, shifts: _s, machines: _m, employee_count: _e, machine_employee_count: _me, capacity_headcount: _ch, ...rest } = wc;
   return { ...emptyWc, ...rest };
+}
+
+function filterWcs(rows: WorkCenter[], f: WcFilters): WorkCenter[] {
+  return rows.filter((wc) => {
+    if (f.code) {
+      const q = f.code.toLocaleLowerCase("tr");
+      if (!wc.code.toLocaleLowerCase("tr").includes(q) && !wc.name.toLocaleLowerCase("tr").includes(q)) return false;
+    }
+    if (f.area) {
+      const q = f.area.toLocaleLowerCase("tr");
+      if (!wc.area_code.toLocaleLowerCase("tr").includes(q) && !wc.area_name.toLocaleLowerCase("tr").includes(q)) return false;
+    }
+    if (f.planned === "yes" && !wc.is_planned) return false;
+    if (f.planned === "no" && wc.is_planned) return false;
+    if (f.source && wc.capacity_source !== f.source) return false;
+    if (f.active === "yes" && !wc.is_active) return false;
+    if (f.active === "no" && wc.is_active) return false;
+    return true;
+  });
 }
 
 export default function WorkCenters() {
@@ -26,24 +55,15 @@ export default function WorkCenters() {
   const [week, setWeek] = useState(mondayOf(new Date()));
   const [edit, setEdit] = useState<Partial<WorkCenter> | null>(null);
   const [err, setErr] = useState("");
-  const [groupByArea, setGroupByArea] = useState(true);
+  const [filters, setFilters] = useState<WcFilters>({ ...EMPTY_FILTERS });
+  const [openId, setOpenId] = useState<number | null>(null);
+  const [detailTab, setDetailTab] = useState<"shifts" | "machines" | "weeks">("shifts");
   const cap = useAsync(() => api.get<Capacity[]>(`/api/capacity${qs({ start: week })}`), [week, wcs.length]);
   const capBy = Object.fromEntries((cap.data ?? []).map((c) => [c.work_center_id, c]));
   const canEdit = can("poweruser");
   const refresh = () => { reload(); cap.reload(); };
 
-  // Alan kodu -> is merkezleri (alan tanimsizlar en sonda)
-  const groups = useMemo(() => {
-    const m = new Map<string, { name: string; wcs: WorkCenter[] }>();
-    for (const wc of wcs) {
-      const key = wc.area_code || "";
-      const g = m.get(key) ?? { name: wc.area_name || "", wcs: [] };
-      if (!g.name && wc.area_name) g.name = wc.area_name;
-      g.wcs.push(wc);
-      m.set(key, g);
-    }
-    return Array.from(m.entries()).sort(([a], [b]) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b, "tr")));
-  }, [wcs]);
+  const filtered = useMemo(() => filterWcs(wcs, filters), [wcs, filters]);
   const areaOptions = useMemo(() => {
     const seen = new Map<string, string>();
     for (const wc of wcs) if (wc.area_code && !seen.has(wc.area_code)) seen.set(wc.area_code, wc.area_name);
@@ -63,16 +83,19 @@ export default function WorkCenters() {
       setErr((e as Error).message);
     }
   };
+
   const remove = async (wc: WorkCenter) => {
     if (!confirm(`${wc.code} silinsin mi? Bağlı vardiyalar ve makineler silinir.`)) return;
     setErr("");
     try {
       await api.del(`/api/workcenters/${wc.id}`);
+      if (openId === wc.id) setOpenId(null);
       refresh();
     } catch (e) {
       setErr((e as Error).message);
     }
   };
+
   const patch = async (wc: WorkCenter, changes: Partial<WorkCenter>) => {
     setErr("");
     try {
@@ -83,8 +106,14 @@ export default function WorkCenters() {
     }
   };
 
-  const totalMachines = wcs.reduce((s, w) => s + w.machines.length, 0);
-  const machineMode = wcs.filter((w) => w.capacity_source === "machines").length;
+  const openRow = (wc: WorkCenter) => {
+    if (openId === wc.id) {
+      setOpenId(null);
+      return;
+    }
+    setOpenId(wc.id);
+    setDetailTab("shifts");
+  };
 
   return (
     <>
@@ -94,19 +123,12 @@ export default function WorkCenters() {
           Kapasite haftası
           <input type="date" value={week} onChange={(e) => setWeek(mondayOf(new Date(e.target.value)))} />
         </label>
-        <label style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-          <input type="checkbox" checked={groupByArea} onChange={(e) => setGroupByArea(e.target.checked)} /> Alana göre grupla
-        </label>
         {canEdit && <button onClick={() => setEdit({ ...emptyWc })}>+ Yeni iş merkezi</button>}
-        <span className="muted">
-          {wcs.length} iş merkezi · {areaOptions.length} alan · {totalMachines} makine
-          {machineMode > 0 && <> · {machineMode} iş merkezinde kapasite makine atamalarından</>}
-        </span>
+        <button className="secondary small" onClick={() => setFilters({ ...EMPTY_FILTERS })}>Filtreleri temizle</button>
+        <span className="muted">{filtered.length} / {wcs.length} iş merkezi</span>
       </div>
       <p className="muted" style={{ marginTop: -6 }}>
-        Pilot yaklaşım: yalnızca “Planlanıyor” işaretli iş merkezleri otomatik planlamaya girer.
-        <b> Kapasite kaynağı</b>: <i>İş merkezi personeli</i> → vardiya kişi sayısı, yoksa iş merkezine bağlı personel;
-        <i> Makine atamaları</i> → yalnızca bu iş merkezinin aktif makinelerine atanmış personel sayılır (makine detayını aktifleştirmek için).
+        Satıra tıklayarak vardiya, makine ve haftalık iş gücü detaylarını açın. Yalnızca <b>Planlanıyor</b> işaretli iş merkezleri otomatik planlamaya girer.
       </p>
       <ErrorText err={err || cap.err} />
 
@@ -142,7 +164,10 @@ export default function WorkCenters() {
           </div>
           <div className="row">
             <label>1 birim = saat<input type="number" step="0.5" value={edit.capacity_unit_hours ?? 10} onChange={(e) => setEdit({ ...edit, capacity_unit_hours: Number(e.target.value) })} /></label>
-            <label>Kişi başı verimli saat (varsayılan)<input type="number" step="0.25" value={edit.default_efficient_hours ?? 4} onChange={(e) => setEdit({ ...edit, default_efficient_hours: Number(e.target.value) })} /></label>
+            <label>Kişi başı verimli saat<input type="number" step="0.25" value={edit.default_efficient_hours ?? 4} onChange={(e) => setEdit({ ...edit, default_efficient_hours: Number(e.target.value) })} /></label>
+            <label title="Planlamada boş bırakılacak kapasite payı">Atıl kapasite %
+              <input type="number" min={0} max={99} step={1} value={edit.planning_reserve_pct ?? 0} onChange={(e) => setEdit({ ...edit, planning_reserve_pct: Math.min(99, Math.max(0, Number(e.target.value))) })} style={{ width: 72 }} />
+            </label>
             <label>Planlanıyor<input type="checkbox" checked={!!edit.is_planned} onChange={(e) => setEdit({ ...edit, is_planned: e.target.checked })} /></label>
             <label>Aktif<input type="checkbox" checked={edit.is_active ?? true} onChange={(e) => setEdit({ ...edit, is_active: e.target.checked })} /></label>
             <button onClick={save}>Kaydet</button>
@@ -155,37 +180,102 @@ export default function WorkCenters() {
         <table>
           <thead>
             <tr>
-              <th>Kod</th><th>Ad</th>{!groupByArea && <th>Alan</th>}<th>Planlanıyor</th>
-              <th className="num" title="Kapasite hesabında kullanılan kişi sayısı (vardiya kişi sayısı girilmişse o geçerlidir)">Kişi</th>
-              <th>Kapasite kaynağı</th><th>Makineler</th><th>Vardiyalar</th>
-              <th className="num" title="Seçili haftanın kapasitesi; 'Haftalık' ile hafta hafta iş gücü istisnaları">Haftalık kapasite (saat)</th><th className="num">Birim</th><th></th>
+              <th></th>
+              <th>Kod</th>
+              <th>Alan</th>
+              <th>Plan</th>
+              <th className="num">Kişi</th>
+              <th>Kaynak</th>
+              <th className="num">Mak / Var</th>
+              <th className="num">Kapasite (sa)</th>
+              <th className="num">Atıl %</th>
+              <th>Durum</th>
+            </tr>
+            <tr style={{ background: "#f8fafc" }}>
+              <td></td>
+              <td><input placeholder="Kod / ad" value={filters.code} onChange={(e) => setFilters({ ...filters, code: e.target.value })} style={{ width: "100%", minWidth: 72 }} /></td>
+              <td><input placeholder="Alan" value={filters.area} onChange={(e) => setFilters({ ...filters, area: e.target.value })} style={{ width: "100%", minWidth: 64 }} /></td>
+              <td>
+                <select value={filters.planned} onChange={(e) => setFilters({ ...filters, planned: e.target.value as WcFilters["planned"] })}>
+                  <option value="">Tümü</option>
+                  <option value="yes">Planlanan</option>
+                  <option value="no">Planlanmayan</option>
+                </select>
+              </td>
+              <td></td>
+              <td>
+                <select value={filters.source} onChange={(e) => setFilters({ ...filters, source: e.target.value as WcFilters["source"] })}>
+                  <option value="">Tümü</option>
+                  <option value="work_center">Personel</option>
+                  <option value="machines">Makine</option>
+                </select>
+              </td>
+              <td></td>
+              <td></td>
+              <td></td>
+              <td>
+                <select value={filters.active} onChange={(e) => setFilters({ ...filters, active: e.target.value as WcFilters["active"] })}>
+                  <option value="">Tümü</option>
+                  <option value="yes">Aktif</option>
+                  <option value="no">Pasif</option>
+                </select>
+              </td>
             </tr>
           </thead>
           <tbody>
-            {(groupByArea ? groups : [["", { name: "", wcs }] as const]).map(([areaCode, g]) => (
-              <GroupRows
-                key={areaCode || "__none"}
-                header={groupByArea ? (areaCode ? `${areaCode} — ${g.name || areaCode}` : "Alan tanımsız") : null}
-                colSpan={groupByArea ? 10 : 11}
-              >
-                {g.wcs.map((wc) => (
-                  <WcRow
-                    key={wc.id}
-                    wc={wc}
-                    cap={capBy[wc.id]}
-                    week={week}
-                    canEdit={canEdit}
-                    showArea={!groupByArea}
-                    onEdit={() => setEdit(wc)}
-                    onDelete={() => remove(wc)}
-                    onTogglePlanned={() => patch(wc, { is_planned: !wc.is_planned })}
-                    onSource={(s) => patch(wc, { capacity_source: s })}
-                    onChanged={refresh}
-                  />
-                ))}
-              </GroupRows>
-            ))}
-            {wcs.length === 0 && <tr><td colSpan={11} className="muted">İş merkezi yok. “+ Yeni iş merkezi” ile ekleyin veya Excel Import kullanın.</td></tr>}
+            {filtered.map((wc) => {
+              const c = capBy[wc.id];
+              const isMachines = wc.capacity_source === "machines";
+              const noAssigned = isMachines && wc.machine_employee_count === 0;
+              const open = openId === wc.id;
+              return (
+                <Fragment key={wc.id}>
+                  <tr
+                    onClick={() => openRow(wc)}
+                    style={{ cursor: "pointer", opacity: wc.is_active ? 1 : 0.55, background: open ? "#f0f7ff" : undefined }}
+                  >
+                    <td>{open ? "▼" : "▶"}</td>
+                    <td><b>{wc.code}</b> <span className="muted">{wc.name}</span></td>
+                    <td>{wc.area_code ? <span title={wc.area_name}>{wc.area_code}</span> : <span className="muted">—</span>}</td>
+                    <td>{wc.is_planned ? <span className="badge ok">plan</span> : <span className="badge muted">—</span>}</td>
+                    <td className="num" title={`Personel: ${wc.employee_count} · Makine atamalı: ${wc.machine_employee_count}`}>
+                      {wc.capacity_headcount}
+                    </td>
+                    <td>{SOURCE_SHORT[wc.capacity_source]}</td>
+                    <td className="num">{wc.machines.length} / {wc.shifts.length}</td>
+                    <td className="num">{c ? fmt(c.capacity_hours, 0) : "…"}</td>
+                    <td className="num">{wc.planning_reserve_pct > 0 ? fmt(wc.planning_reserve_pct, 0) : "—"}</td>
+                    <td>
+                      {!wc.is_active && <span className="badge muted">pasif</span>}
+                      {noAssigned && <span className="badge warn">personel yok</span>}
+                      {wc.is_active && !noAssigned && wc.is_planned && <span className="badge ok">aktif</span>}
+                    </td>
+                  </tr>
+                  {open && (
+                    <tr>
+                      <td colSpan={10} style={{ background: "#f8fafc", padding: 0 }}>
+                        <WcDetail
+                          wc={wc}
+                          cap={c}
+                          week={week}
+                          tab={detailTab}
+                          setTab={setDetailTab}
+                          canEdit={canEdit}
+                          onEdit={() => setEdit(wc)}
+                          onDelete={() => remove(wc)}
+                          onTogglePlanned={() => patch(wc, { is_planned: !wc.is_planned })}
+                          onSource={(s) => patch(wc, { capacity_source: s })}
+                          onChanged={refresh}
+                        />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
+            {filtered.length === 0 && (
+              <tr><td colSpan={10} className="muted">{wcs.length === 0 ? "İş merkezi yok. «+ Yeni iş merkezi» veya Excel Import kullanın." : "Filtreye uyan kayıt yok."}</td></tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -193,81 +283,42 @@ export default function WorkCenters() {
   );
 }
 
-function GroupRows({ header, colSpan, children }: { header: string | null; colSpan: number; children: React.ReactNode }) {
-  return (
-    <>
-      {header && (
-        <tr>
-          <td colSpan={colSpan} style={{ background: "#eef2f7", fontWeight: 600, padding: "6px 8px" }}>{header}</td>
-        </tr>
-      )}
-      {children}
-    </>
-  );
-}
-
-function WcRow({ wc, cap, week, canEdit, showArea, onEdit, onDelete, onTogglePlanned, onSource, onChanged }: {
-  wc: WorkCenter; cap?: Capacity; week: string; canEdit: boolean; showArea: boolean;
-  onEdit: () => void; onDelete: () => void; onTogglePlanned: () => void; onSource: (s: CapacitySource) => void; onChanged: () => void;
+function WcDetail({ wc, cap, week, tab, setTab, canEdit, onEdit, onDelete, onTogglePlanned, onSource, onChanged }: {
+  wc: WorkCenter; cap?: Capacity; week: string; tab: "shifts" | "machines" | "weeks"; setTab: (t: "shifts" | "machines" | "weeks") => void;
+  canEdit: boolean; onEdit: () => void; onDelete: () => void; onTogglePlanned: () => void; onSource: (s: CapacitySource) => void; onChanged: () => void;
 }) {
-  const [open, setOpen] = useState<"" | "shifts" | "machines" | "weeks">("");
-  const toggle = (k: "shifts" | "machines" | "weeks") => setOpen(open === k ? "" : k);
   const isMachines = wc.capacity_source === "machines";
-  const noAssigned = isMachines && wc.machine_employee_count === 0;
   return (
-    <>
-      <tr style={{ opacity: wc.is_active ? 1 : 0.5 }}>
-        <td><b>{wc.code}</b></td>
-        <td>{wc.name}</td>
-        {showArea && <td>{wc.area_code ? <span title={wc.area_name}>{wc.area_code}</span> : <span className="muted">—</span>}</td>}
-        <td><input type="checkbox" checked={wc.is_planned} disabled={!canEdit} onChange={onTogglePlanned} /></td>
-        <td className="num" title={`İş merkezi personeli: ${wc.employee_count} · Makinelere atanan: ${wc.machine_employee_count}`}>
-          {wc.capacity_headcount}
-          {isMachines && <span className="muted"> / {wc.employee_count}</span>}
-        </td>
-        <td>
-          <select value={wc.capacity_source} disabled={!canEdit} onChange={(e) => onSource(e.target.value as CapacitySource)} title="Kapasite kişi sayısının kaynağı">
-            <option value="work_center">{SOURCE_LABEL.work_center}</option>
-            <option value="machines">{SOURCE_LABEL.machines}</option>
-          </select>
-          {noAssigned && <div className="muted" style={{ color: "#b45309", fontSize: 12 }}>⚠ Makinelere atanmış personel yok → kapasite 0</div>}
-        </td>
-        <td>
-          <button className={`secondary small${open === "machines" ? " active" : ""}`} onClick={() => toggle("machines")}>
-            {wc.machines.length} makine {open === "machines" ? "▲" : "▼"}
-          </button>
-        </td>
-        <td>
-          <button className={`secondary small${open === "shifts" ? " active" : ""}`} onClick={() => toggle("shifts")}>
-            {wc.shifts.length} vardiya {open === "shifts" ? "▲" : "▼"}
-          </button>
-        </td>
-        <td className="num">
-          {cap ? fmt(cap.capacity_hours) : "…"}{" "}
-          <button className={`secondary small${open === "weeks" ? " active" : ""}`} title="Hafta hafta iş gücü (kişi / verimli saat / gün) — haftaya özel istisna tanımla" onClick={() => toggle("weeks")}>
-            Haftalık {open === "weeks" ? "▲" : "▼"}
-          </button>
-        </td>
-        <td className="num">{cap ? `${fmt(cap.capacity_units)} (× ${wc.capacity_unit_hours} sa)` : ""}</td>
-        <td>
-          {canEdit && (
-            <>
-              <button className="secondary small" onClick={onEdit}>Düzenle</button>{" "}
-              <button className="danger small" onClick={onDelete}>Sil</button>
-            </>
-          )}
-        </td>
-      </tr>
-      {open && (
-        <tr>
-          <td colSpan={showArea ? 11 : 10} style={{ background: "#f8fafc" }}>
-            {open === "shifts" && <Shifts wc={wc} canEdit={canEdit} onChanged={onChanged} />}
-            {open === "machines" && <Machines wc={wc} canEdit={canEdit} onChanged={onChanged} />}
-            {open === "weeks" && <WcWeeksPanel wcId={wc.id} start={week} weeks={12} canEdit={canEdit} onChanged={onChanged} />}
-          </td>
-        </tr>
+    <div style={{ padding: 12 }} onClick={(e) => e.stopPropagation()}>
+      <div className="row" style={{ marginBottom: 10, alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <span className="muted">
+          Birim: {wc.capacity_unit_hours} sa · Varsayılan {wc.default_efficient_hours} sa/kişi
+          {cap && <> · {fmt(cap.capacity_units, 0)} birim</>}
+        </span>
+        {canEdit && (
+          <>
+            <button className="secondary small" onClick={onEdit}>Düzenle</button>
+            <button className="secondary small" onClick={onTogglePlanned}>{wc.is_planned ? "Planlamadan çıkar" : "Planlamaya al"}</button>
+            <select value={wc.capacity_source} onChange={(e) => onSource(e.target.value as CapacitySource)} style={{ fontSize: 12 }}>
+              <option value="work_center">{SOURCE_LABEL.work_center}</option>
+              <option value="machines">{SOURCE_LABEL.machines}</option>
+            </select>
+            <button className="danger small" onClick={onDelete}>Sil</button>
+          </>
+        )}
+      </div>
+      <div className="tabs" style={{ margin: "0 0 10px" }}>
+        <button type="button" className={`tab ${tab === "shifts" ? "active" : ""}`} onClick={() => setTab("shifts")}>Vardiyalar ({wc.shifts.length})</button>
+        <button type="button" className={`tab ${tab === "machines" ? "active" : ""}`} onClick={() => setTab("machines")}>Makineler ({wc.machines.length})</button>
+        <button type="button" className={`tab ${tab === "weeks" ? "active" : ""}`} onClick={() => setTab("weeks")}>Haftalık iş gücü</button>
+      </div>
+      {tab === "shifts" && <Shifts wc={wc} canEdit={canEdit} onChanged={onChanged} />}
+      {tab === "machines" && <Machines wc={wc} canEdit={canEdit} onChanged={onChanged} />}
+      {tab === "weeks" && <WcWeeksPanel wcId={wc.id} start={week} weeks={12} canEdit={canEdit} onChanged={onChanged} />}
+      {isMachines && wc.machine_employee_count === 0 && (
+        <p className="muted" style={{ color: "#b45309", marginTop: 8 }}>Kapasite kaynağı «Makine» seçili ama makinelere atanmış personel yok — kapasite 0 hesaplanır.</p>
       )}
-    </>
+    </div>
   );
 }
 
@@ -288,7 +339,7 @@ function Machines({ wc, canEdit, onChanged }: { wc: WorkCenter; canEdit: boolean
     }
   };
   const remove = async (m: Machine) => {
-    if (!confirm(`${m.code} makinesi silinsin mi? Bu makineye atanmış personelin makine ataması kaldırılır.`)) return;
+    if (!confirm(`${m.code} makinesi silinsin mi?`)) return;
     setErr("");
     try {
       await api.del(`/api/machines/${m.id}`);
@@ -298,41 +349,37 @@ function Machines({ wc, canEdit, onChanged }: { wc: WorkCenter; canEdit: boolean
     }
   };
   return (
-    <div style={{ padding: "6px 0" }}>
-      <table style={{ width: "auto" }}>
-        <thead><tr><th>Makine kodu</th><th>Ad</th><th>Açıklama</th><th>Aktif</th><th className="num">Atanan personel</th><th></th></tr></thead>
-        <tbody>
-          {wc.machines.map((m) => (
-            <tr key={m.id} style={{ opacity: m.is_active ? 1 : 0.5 }}>
-              <td><b>{m.code}</b></td>
-              <td>{m.name}</td>
-              <td className="muted">{m.description}</td>
-              <td>{m.is_active ? "E" : "H"}</td>
-              <td className="num">{m.employee_count ?? 0}</td>
-              <td>{canEdit && (<><button className="secondary small" onClick={() => setDraft(m)}>Düzenle</button> <button className="danger small" onClick={() => remove(m)}>Sil</button></>)}</td>
-            </tr>
-          ))}
-          {wc.machines.length === 0 && (
-            <tr><td colSpan={6} className="muted">Makine tanımı yok. Makine detayı isteğe bağlıdır; “Kapasite kaynağı = Makine atamaları” seçildiğinde yalnızca makinelere atanan personel sayılır.</td></tr>
-          )}
-        </tbody>
-      </table>
-      <p className="muted" style={{ margin: "6px 0 0" }}>
-        Personelin makineye atanması <b>Personel</b> sayfasından yapılır (personel satırı → Makine). Toplu yükleme için Excel Import → “Makineler” / “Personel” (Makine Kodu sütunu).
-      </p>
+    <div>
+      <div className="table-wrap">
+        <table>
+          <thead><tr><th>Kod</th><th>Ad</th><th>Açıklama</th><th>Aktif</th><th className="num">Personel</th><th></th></tr></thead>
+          <tbody>
+            {wc.machines.map((m) => (
+              <tr key={m.id} style={{ opacity: m.is_active ? 1 : 0.5 }}>
+                <td><b>{m.code}</b></td>
+                <td>{m.name}</td>
+                <td className="muted">{m.description || "—"}</td>
+                <td>{m.is_active ? "E" : "H"}</td>
+                <td className="num">{m.employee_count ?? 0}</td>
+                <td>{canEdit && (<><button className="secondary small" onClick={() => setDraft(m)}>Düzenle</button>{" "}<button className="danger small" onClick={() => remove(m)}>Sil</button></>)}</td>
+              </tr>
+            ))}
+            {wc.machines.length === 0 && <tr><td colSpan={6} className="muted">Makine tanımı yok.</td></tr>}
+          </tbody>
+        </table>
+      </div>
       {canEdit && !draft && <button className="secondary small" style={{ marginTop: 6 }} onClick={() => setDraft({ ...emptyMachine })}>+ Makine ekle</button>}
       {draft && (
         <div className="row" style={{ marginTop: 8 }}>
-          <label>Makine kodu<input value={draft.code} placeholder={`örn. ${wc.code}-01`} onChange={(e) => setDraft({ ...draft, code: e.target.value })} /></label>
+          <label>Kod<input value={draft.code} placeholder={`${wc.code}-01`} onChange={(e) => setDraft({ ...draft, code: e.target.value })} /></label>
           <label>Ad<input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></label>
           <label>Açıklama<input value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></label>
           <label>Aktif<input type="checkbox" checked={draft.is_active} onChange={(e) => setDraft({ ...draft, is_active: e.target.checked })} /></label>
           <button onClick={save} disabled={!draft.code.trim()}>Kaydet</button>
           <button className="secondary" onClick={() => setDraft(null)}>Vazgeç</button>
-          <ErrorText err={err} />
         </div>
       )}
-      {!draft && <ErrorText err={err} />}
+      <ErrorText err={err} />
     </div>
   );
 }
@@ -360,36 +407,32 @@ function Shifts({ wc, canEdit, onChanged }: { wc: WorkCenter; canEdit: boolean; 
     setDraft({ ...draft, weekdays: Array.from(set).sort().join(",") });
   };
   return (
-    <div style={{ padding: "6px 0" }}>
-      <table style={{ width: "auto" }}>
-        <thead><tr><th>Vardiya</th><th>Günler</th><th>Saat</th><th className="num">Kişi</th><th className="num">Kişi başı verimli saat</th><th className="num">Günlük verimli saat</th><th></th></tr></thead>
-        <tbody>
-          {wc.shifts.map((s) => {
-            const hc = isMachines ? wc.machine_employee_count : s.headcount > 0 ? s.headcount : wc.employee_count;
-            const eff = s.efficient_hours_per_person ?? wc.default_efficient_hours;
-            return (
-              <tr key={s.id}>
-                <td>{s.name}</td>
-                <td>{s.weekdays.split(",").filter(Boolean).map((d) => DAYS[Number(d)]).join(" ")}</td>
-                <td>{s.start_time.slice(0, 5)}–{s.end_time.slice(0, 5)}</td>
-                <td className="num">
-                  {isMachines
-                    ? <span className="muted" title="Kapasite kaynağı makine atamaları: vardiya kişi sayısı yok sayılır">{hc} (makine)</span>
-                    : s.headcount > 0 ? s.headcount : <span className="muted">{hc} (personel)</span>}
-                </td>
-                <td className="num">{s.efficient_hours_per_person ?? <span className="muted">{eff} (vars.)</span>}</td>
-                <td className="num">{fmt(hc * eff)}</td>
-                <td>{canEdit && (<><button className="secondary small" onClick={() => setDraft(s)}>Düzenle</button> <button className="danger small" onClick={async () => { await api.del(`/api/shifts/${s.id}`); onChanged(); }}>Sil</button></>)}</td>
-              </tr>
-            );
-          })}
-          {wc.shifts.length === 0 && (
-            <tr><td colSpan={7} className="muted">
-              Vardiya tanımı yok — varsayılan Pzt–Cum 08:00–18:00, {isMachines ? "makinelere atanan personel" : "personel"} sayısı × {wc.default_efficient_hours} saat kullanılır.
-            </td></tr>
-          )}
-        </tbody>
-      </table>
+    <div>
+      <div className="table-wrap">
+        <table>
+          <thead><tr><th>Vardiya</th><th>Günler</th><th>Saat</th><th className="num">Kişi</th><th className="num">Verimli sa/kişi</th><th className="num">Günlük sa</th><th></th></tr></thead>
+          <tbody>
+            {wc.shifts.map((s) => {
+              const hc = isMachines ? wc.machine_employee_count : s.headcount > 0 ? s.headcount : wc.employee_count;
+              const eff = s.efficient_hours_per_person ?? wc.default_efficient_hours;
+              return (
+                <tr key={s.id}>
+                  <td>{s.name}</td>
+                  <td>{s.weekdays.split(",").filter(Boolean).map((d) => DAYS[Number(d)]).join(" ")}</td>
+                  <td>{s.start_time.slice(0, 5)}–{s.end_time.slice(0, 5)}</td>
+                  <td className="num">{hc}</td>
+                  <td className="num">{eff}</td>
+                  <td className="num">{fmt(hc * eff)}</td>
+                  <td>{canEdit && (<><button className="secondary small" onClick={() => setDraft(s)}>Düzenle</button>{" "}<button className="danger small" onClick={async () => { await api.del(`/api/shifts/${s.id}`); onChanged(); }}>Sil</button></>)}</td>
+                </tr>
+              );
+            })}
+            {wc.shifts.length === 0 && (
+              <tr><td colSpan={7} className="muted">Vardiya yok — varsayılan Pzt–Cum mesai kullanılır.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
       {canEdit && !draft && <button className="secondary small" style={{ marginTop: 6 }} onClick={() => setDraft({ ...emptyShift })}>+ Vardiya ekle</button>}
       {draft && (
         <div className="row" style={{ marginTop: 8 }}>
@@ -397,13 +440,13 @@ function Shifts({ wc, canEdit, onChanged }: { wc: WorkCenter; canEdit: boolean; 
           <label>Günler<div>{DAYS.map((d, i) => <label key={i} style={{ display: "inline-flex", gap: 2, marginRight: 6, flexDirection: "row" }}><input type="checkbox" checked={draft.weekdays.split(",").includes(String(i))} onChange={() => toggleDay(i)} />{d}</label>)}</div></label>
           <label>Başlangıç<input type="time" value={draft.start_time.slice(0, 5)} onChange={(e) => setDraft({ ...draft, start_time: e.target.value })} /></label>
           <label>Bitiş<input type="time" value={draft.end_time.slice(0, 5)} onChange={(e) => setDraft({ ...draft, end_time: e.target.value })} /></label>
-          <label>Kişi sayısı (0 = personel listesi)<input type="number" value={draft.headcount} onChange={(e) => setDraft({ ...draft, headcount: Number(e.target.value) })} /></label>
-          <label>Kişi başı verimli saat (boş = vars.)<input type="number" step="0.25" value={draft.efficient_hours_per_person ?? ""} onChange={(e) => setDraft({ ...draft, efficient_hours_per_person: e.target.value === "" ? null : Number(e.target.value) })} /></label>
+          <label>Kişi (0=personel)<input type="number" value={draft.headcount} onChange={(e) => setDraft({ ...draft, headcount: Number(e.target.value) })} /></label>
+          <label>Verimli sa/kişi<input type="number" step="0.25" value={draft.efficient_hours_per_person ?? ""} onChange={(e) => setDraft({ ...draft, efficient_hours_per_person: e.target.value === "" ? null : Number(e.target.value) })} /></label>
           <button onClick={save}>Kaydet</button>
           <button className="secondary" onClick={() => setDraft(null)}>Vazgeç</button>
-          <ErrorText err={err} />
         </div>
       )}
+      <ErrorText err={err} />
     </div>
   );
 }

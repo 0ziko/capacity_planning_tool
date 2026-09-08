@@ -213,6 +213,23 @@ export function Bar({ ratio, cls = "" }: { ratio: number; cls?: string }) {
   );
 }
 
+/** Plan doluluk cubugu: turuncu = kesin plan, mor = tahmin payi. */
+export function PlanStackBar({ utilization, forecastHours, planningCapacity }: { utilization: number; forecastHours: number; planningCapacity: number }) {
+  const cap = planningCapacity > 0 ? planningCapacity : 1;
+  const totalW = Math.min(utilization * 100, 100);
+  const fcW = Math.min((forecastHours / cap) * 100, totalW);
+  const firmW = Math.max(totalW - fcW, 0);
+  const over = utilization > 1.0001;
+  const tone = over ? "bad" : utilization > 0.9 ? "warn" : "";
+  return (
+    <div className="bar plan-stack">
+      <span className={`firm ${tone}`} style={{ width: `${firmW}%` }} />
+      {fcW > 0.3 && <span className="forecast" style={{ width: `${fcW}%` }} />}
+      {over && <span className="over bad" style={{ width: `${Math.min((utilization - 1) * 100, 20)}%` }} />}
+    </div>
+  );
+}
+
 export function StatusBadge({ s }: { s: string }) {
   const map: Record<string, [string, string]> = {
     ahead: ["ok", "Önde"],

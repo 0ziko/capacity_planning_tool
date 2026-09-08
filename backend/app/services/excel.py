@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import re
 import unicodedata
+from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 from typing import Any, Callable
 
@@ -1399,3 +1400,47 @@ def build_load_detail_xlsx(detail) -> bytes:
             "Pareto": (pareto_hdr, pareto_rows),
         }
     )
+
+
+def build_weekly_output_xlsx(out) -> bytes:
+    """Haftalık üretim planı — tüm iş merkezleri, üretim ekibi çıktısı."""
+    detail_hdr = ["İş Merkezi", "Yarımamül Kodu", "Adet", "Op.", "Operasyon", "Sipariş", "Bitmiş Ürün", "Başlangıç", "Bitiş"]
+    summary_hdr = ["İş Merkezi", "Yarımamül Kodu", "Toplam Adet"]
+    detail_rows: list[list] = []
+    summary_rows: list[list] = []
+    wip_totals: dict[tuple[str, str], float] = defaultdict(float)
+
+    for wc in out.work_centers:
+        for r in wc.rows:
+            order = r.order_no + (f" / {r.position_no}" if r.position_no else "")
+            if r.batch_order_nos:
+                order = f"{r.order_no} ({', '.join(r.batch_order_nos)})"
+            wip = (r.semi_finished_code or "").strip() or r.item_code
+            wip_totals[(wc.work_center_code, wip)] += r.planned_qty
+            detail_rows.append([
+                wc.work_center_code,
+                wip,
+                r.planned_qty,
+                r.operation_seq,
+                r.operation_name,
+                order,
+                r.item_code,
+                r.planned_start or "",
+                r.planned_end or "",
+            ])
+        detail_rows.append([wc.work_center_code, "", "", "", f"Alt toplam — {len(wc.rows)} iş", "", "", "", ""])
+
+    for (wc_code, wip), qty in sorted(wip_totals.items(), key=lambda x: (x[0][0], x[0][1])):
+        summary_rows.append([wc_code, wip, round(qty, 2)])
+
+    summary_rows.append(["", "GENEL TOPLAM", round(out.total_qty, 2)])
+    meta = [
+        ["Hafta", f"{out.week_start} — {out.week_end}"],
+        ["İş merkezi sayısı", len(out.work_centers)],
+        ["Toplam iş satırı", out.total_jobs],
+    ]
+    return build_report({
+        "Özet": (["Alan", "Değer"], meta),
+        "Yarımamül Özet": (summary_hdr, summary_rows),
+        "Üretim Detay": (detail_hdr, detail_rows),
+    })

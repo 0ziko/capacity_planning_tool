@@ -4,8 +4,8 @@ import { useAuth } from "../auth";
 import { ErrorText, useAsync } from "../components";
 import RevenueAnalysis from "./orders/RevenueAnalysis";
 
-const STATUS_LABEL: Record<string, string> = { open: "Açık", closed: "Kapalı" };
-const PLAN_LABEL: Record<string, string> = { unplanned: "Planlanmadı", partial: "Kısmi", late: "Gecikmeli", on_time: "Zamanında", no_ops: "Rota yok", closed: "Kapalı" };
+const STATUS_LABEL: Record<string, string> = { open: "Açık", closed: "Kapalı", forecast: "Tahmin" };
+const PLAN_LABEL: Record<string, string> = { unplanned: "Planlanmadı", planned: "Planlanan", partial: "Kısmi", late: "Gecikmeli", on_time: "Zamanında", no_ops: "Rota yok", closed: "Kapalı", forecast: "Tahmin" };
 const RES_LABEL: Record<string, string> = { none: "Rezerv yok", partial: "Kısmi rezerv", full: "Tam rezerv" };
 const MARKET_LABEL: Record<string, string> = { domestic: "Yerli", export: "Yurtdışı" };
 
@@ -68,12 +68,12 @@ export default function Orders() {
       {tab === "orders" && (
         <>
           <div className="panel row">
-            <label>Durum<select value={status} onChange={(e) => setStatus(e.target.value)}><option value="open">Açık</option><option value="closed">Kapalı</option><option value="">Tümü</option></select></label>
+            <label>Durum<select value={status} onChange={(e) => setStatus(e.target.value)}><option value="open">Açık</option><option value="forecast">Tahmin</option><option value="closed">Kapalı</option><option value="">Tümü</option></select></label>
             <label>Sipariş no<input value={orderNo} onChange={(e) => setOrderNo(e.target.value)} placeholder="filtre" /></label>
             <label>Poz no<input value={position} onChange={(e) => setPosition(e.target.value)} placeholder="filtre" /></label>
             <label>Müşteri<input value={customer} onChange={(e) => setCustomer(e.target.value)} placeholder="filtre" /></label>
             <label>Pazar<select value={market} onChange={(e) => setMarket(e.target.value)}><option value="">Tümü</option><option value="domestic">Yerli</option><option value="export">Yurtdışı</option></select></label>
-            <label>Plan durumu<select value={planStatus} onChange={(e) => setPlanStatus(e.target.value)}><option value="">Tümü</option><option value="unplanned">Planlanmadı</option><option value="partial">Kısmi</option><option value="late">Gecikmeli</option><option value="on_time">Zamanında</option><option value="no_ops">Rota yok</option></select></label>
+            <label>Plan durumu<select value={planStatus} onChange={(e) => setPlanStatus(e.target.value)}><option value="">Tümü</option><option value="planned">Planlanan</option><option value="forecast">Tahmin</option><option value="unplanned">Planlanmadı</option><option value="partial">Kısmi</option><option value="late">Gecikmeli</option><option value="on_time">Zamanında</option><option value="no_ops">Rota yok</option></select></label>
             <label>Rezervasyon<select value={resStatus} onChange={(e) => setResStatus(e.target.value)}><option value="">Tümü</option><option value="none">Rezerv yok</option><option value="partial">Kısmi</option><option value="full">Tam</option></select></label>
             <label>Termin (başlangıç)<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
             <label>Termin (bitiş)<input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
@@ -99,6 +99,7 @@ export default function Orders() {
                   <tr key={o.id}>
                     <td>
                       {o.order_no}
+                      {o.status === "forecast" && <span className="badge ok" style={{ marginLeft: 6 }}>tahmin</span>}
                       {o.status === "closed" && <span className="badge muted" style={{ marginLeft: 6 }}>kapalı</span>}
                     </td>
                     <td>{o.position_no || <span className="muted">—</span>}</td>
@@ -111,11 +112,11 @@ export default function Orders() {
                     <td className="num">{fmt(o.quantity, 0)}</td>
                     <td className="num" style={{ color: o.unit_price ? undefined : "var(--muted)" }}>{o.unit_price ? fmt(o.unit_price, 2) : "—"}</td>
                     <td className="num">{o.revenue ? fmt(o.revenue, 0) : "—"}</td>
-                    <td><span className={`badge ${o.plan_status === "on_time" ? "ok" : o.plan_status === "late" ? "bad" : o.plan_status === "unplanned" ? "warn" : "muted"}`}>{PLAN_LABEL[o.plan_status] ?? o.plan_status}</span></td>
+                    <td><span className={`badge ${o.plan_status === "forecast" ? "ok" : o.plan_status === "on_time" ? "ok" : o.plan_status === "late" ? "bad" : o.plan_status === "unplanned" ? "warn" : "muted"}`}>{PLAN_LABEL[o.plan_status] ?? o.plan_status}</span></td>
                     <td><span className={`badge ${o.reservation_status === "full" ? "ok" : o.reservation_status === "none" ? "warn" : "muted"}`}>{RES_LABEL[o.reservation_status] ?? o.reservation_status}</span></td>
                     <td className="muted" title={o.note}>{o.note.length > 30 ? o.note.slice(0, 30) + "…" : o.note}</td>
                     <td style={{ whiteSpace: "nowrap" }}>
-                      {can("poweruser") && o.status !== "merged" && (
+                      {can("poweruser") && o.status !== "merged" && o.status !== "forecast" && (
                         <>
                           <button className="secondary small" onClick={() => { setEditing(o); setMsg(""); }}>Düzenle</button>{" "}
                           {o.status === "open"

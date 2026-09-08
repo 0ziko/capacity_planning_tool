@@ -19,9 +19,13 @@ from app.schemas import (
     LoadDetailOut,
     LoadDetailParetoRow,
     LoadDetailRow,
+    ForecastSummaryOut,
+    ForecastLoadDetail,
     ManualPlanLineIn,
     PlanLineOut,
     WeekLoad,
+    WeeklyOutputOut,
+    WeeklyOutputWc,
     WorkCenterLoad,
 )
 from app.services import capacity as cap
@@ -180,7 +184,7 @@ def _batch_hours(batch: ProductionBatch, wc_by_id: dict[int, WorkCenter]) -> flo
     return sum(op.hours_for(batch.quantity) for op in item.operations if op.work_center_id in wc_by_id)
 
 
-def simulate(db: Session, req: AutoPlanRequest) -> Simulation:
+def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = None) -> Simulation:
     """Otomatik plani hesaplar, veritabanina yazmaz.
 
     due_date: siparisler termin sirasiyla yerlestirilir; sigmayan kisim 'unplanned'.
@@ -192,8 +196,10 @@ def simulate(db: Session, req: AutoPlanRequest) -> Simulation:
     start = cap.week_start(req.start_week)
     weeks = [start + timedelta(weeks=i) for i in range(req.weeks)]
     wcs = _selected_work_centers(db, req.work_center_ids)
-    orders = _open_orders_with_ops(db)
-    batches = pbatches.open_batches_with_ops(db)
+    extra_batches = extra_batches or []
+    extra_order_ids = {link.order_id for b in extra_batches for link in b.orders}
+    orders = [o for o in _open_orders_with_ops(db) if o.id not in extra_order_ids]
+    batches = list(pbatches.open_batches_with_ops(db)) + list(extra_batches)
     all_orders = (
         db.query(Order)
         .options(joinedload(Order.item).joinedload(Item.operations))
@@ -206,12 +212,18 @@ def simulate(db: Session, req: AutoPlanRequest) -> Simulation:
     wc_ids = [w.id for w in wcs]
     wc_by_id = {w.id: w for w in wcs}
 
-    # kalan kapasite = kapasite - manuel yerlestirilmis saatler
+    # kalan kapasite = planlanabilir kapasite - mevcut plan (manuel + tahmin + otomatik)
     manual = planned_hours_by_week(db, wc_ids, start, weeks[-1], mode="manual")
+    forecast = planned_hours_by_week(db, wc_ids, start, weeks[-1], mode="forecast")
+    auto = planned_hours_by_week(db, wc_ids, start, weeks[-1], mode="auto")
     remaining: dict[tuple[int, date], float] = {}
     for w in wcs:
         for wk in weeks:
-            remaining[(w.id, wk)] = max(cap.week_capacity_hours(db, w, wk) - manual.get((w.id, wk), 0.0), 0.0)
+            plan_cap = cap.planning_capacity_hours(db, w, wk)
+            used = manual.get((w.id, wk), 0.0) + forecast.get((w.id, wk), 0.0)
+            if not req.replace_existing:
+                used += auto.get((w.id, wk), 0.0)
+            remaining[(w.id, wk)] = max(plan_cap - used, 0.0)
     capacity_total = sum(remaining.values())
 
     lines: list[DraftLine] = []
@@ -334,7 +346,7 @@ def add_manual_line(db: Session, line: ManualPlanLineIn, username: str) -> PlanL
     return pl
 
 
-def plan_lines(db: Session, wc_ids: list[int] | None, start: date | None, end: date | None) -> list[PlanLineOut]:
+def plan_lines(db: Session, wc_ids: list[int] | None, start: date | None, end: date | None, mode: str | None = None) -> list[PlanLineOut]:
     q = db.query(PlanLine).options(
         joinedload(PlanLine.order).joinedload(Order.item),
         joinedload(PlanLine.production_batch).joinedload(ProductionBatch.orders).joinedload(ProductionBatchOrder.order),
@@ -347,6 +359,8 @@ def plan_lines(db: Session, wc_ids: list[int] | None, start: date | None, end: d
         q = q.filter(PlanLine.week_start >= cap.week_start(start))
     if end:
         q = q.filter(PlanLine.week_start <= end)
+    if mode:
+        q = q.filter(PlanLine.mode == mode)
     out = []
     for pl in q.order_by(PlanLine.week_start, PlanLine.work_center_id, PlanLine.id).all():
         if pl.order is None or pl.operation is None or pl.work_center is None:
@@ -394,6 +408,29 @@ def load(db: Session, wc_ids: list[int] | None, start: date, weeks: int) -> list
         return []
     wk_list = [start + timedelta(weeks=i) for i in range(weeks)]
     planned = planned_hours_by_week(db, [w.id for w in wcs], start, wk_list[-1])
+    forecast = planned_hours_by_week(db, [w.id for w in wcs], start, wk_list[-1], mode="forecast")
+    forecast_pls = (
+        db.query(PlanLine)
+        .options(joinedload(PlanLine.order).joinedload(Order.item))
+        .filter(
+            PlanLine.work_center_id.in_([w.id for w in wcs]),
+            PlanLine.week_start >= start,
+            PlanLine.week_start <= wk_list[-1],
+            PlanLine.mode == "forecast",
+        )
+        .all()
+    )
+    fc_detail: dict[tuple[int, date], list[ForecastLoadDetail]] = defaultdict(list)
+    for pl in forecast_pls:
+        if not pl.order:
+            continue
+        fc_detail[(pl.work_center_id, pl.week_start)].append(
+            ForecastLoadDetail(
+                order_no=pl.order.order_no,
+                item_code=pl.order.item.code if pl.order.item else "",
+                hours=round(pl.planned_hours, 2),
+            )
+        )
     actual = actual_hours_by_week(db, [w.id for w in wcs], start, wk_list[-1])
     result = []
     for w in wcs:
@@ -401,26 +438,32 @@ def load(db: Session, wc_ids: list[int] | None, start: date, weeks: int) -> list
         unit = w.capacity_unit_hours or 1.0
         ovl = cap.Overrides(db, w.id)
         for wk in wk_list:
-            c = cap.week_capacity_hours(db, w, wk)
+            c_raw = cap.week_capacity_hours(db, w, wk)
+            c_plan = cap.planning_capacity_hours(db, w, wk)
             p = planned.get((w.id, wk), 0.0)
+            fc = forecast.get((w.id, wk), 0.0)
             a = actual.get((w.id, wk), 0.0)
             remaining = max(p - a, 0.0)
-            idle = max(c - p, 0.0)
+            idle = max(c_plan - p, 0.0)
             n_days = len(cap.working_days(w, wk, wk + timedelta(days=6), ovl))
-            daily_cap = c / n_days if n_days else 0.0
+            daily_cap = c_raw / n_days if n_days else 0.0
             rem_days = remaining / daily_cap if daily_cap > 0 else 0.0
             rows.append(
                 WeekLoad(
                     week_start=wk,
-                    capacity_hours=round(c, 2),
+                    capacity_hours=round(c_raw, 2),
+                    planning_capacity_hours=round(c_plan, 2),
                     planned_hours=round(p, 2),
-                    utilization=round(p / c, 3) if c > 0 else 0.0,
+                    forecast_hours=round(fc, 2),
+                    firm_planned_hours=round(max(p - fc, 0.0), 2),
+                    forecast_details=fc_detail.get((w.id, wk), []),
+                    utilization=round(p / c_plan, 3) if c_plan > 0 else 0.0,
                     actual_hours=round(a, 2),
-                    actual_utilization=round(a / c, 3) if c > 0 else 0.0,
+                    actual_utilization=round(a / c_raw, 3) if c_raw > 0 else 0.0,
                     remaining_hours=round(remaining, 2),
                     remaining_days=round(rem_days, 2),
                     idle_hours=round(idle, 2),
-                    capacity_units=round(c / unit, 2),
+                    capacity_units=round(c_raw / unit, 2),
                     planned_units=round(p / unit, 2),
                     actual_units=round(a / unit, 2),
                 )
@@ -431,19 +474,34 @@ def load(db: Session, wc_ids: list[int] | None, start: date, weeks: int) -> list
 
 # ---------------- Terminleme (lead time) ----------------
 
+_WEEK_FULL_EPS = 0.5  # haftalik plan ~%100 ise kalan saatle baslama (249.9/250 bug)
+
+
+def _week_room_hours(db: Session, wc: WorkCenter, wk: date, planned_week: dict[date, float]) -> float:
+    """Haftada kalan planlanabilir saat; dolu haftada 0."""
+    cap_h = cap.planning_capacity_hours(db, wc, wk)
+    used = planned_week.get(wk, 0.0)
+    if used >= cap_h - _WEEK_FULL_EPS:
+        return 0.0
+    return cap_h - used
+
+
 def _daily_free_hours(db: Session, wc: WorkCenter, day: date, emp: int, planned_week: dict[date, float], wdays_cache: dict[date, int], ovl: cap.Overrides) -> float:
     total = cap.daily_capacity_hours(wc, day, emp, ovl.get(day))
     if total <= 0:
         return 0.0
     wk = cap.week_start(day)
+    week_room = _week_room_hours(db, wc, wk, planned_week)
+    if week_room <= _WEEK_FULL_EPS:
+        return 0.0
     if wk not in wdays_cache:
         wdays_cache[wk] = len(cap.working_days(wc, wk, wk + timedelta(days=6), ovl)) or 1
     used = planned_week.get(wk, 0.0) / wdays_cache[wk]
-    return max(total - used, 0.0)
+    return max(min(total - used, week_room), 0.0)
 
 
 def _schedule_op(db: Session, wc: WorkCenter, hours: float, earliest: datetime, planned_week: dict[date, float]) -> tuple[datetime, datetime]:
-    """Bir operasyonu 'earliest' aninda baslayarak is merkezinin bos kapasitesine yayar; (baslangic, bitis) dondurur."""
+    """Bir operasyonu 'earliest' anindan itibaren ilk gercek bos kapasiteye yerlestirir."""
     emp = cap.employee_count(db, wc)
     ovl = cap.Overrides(db, wc.id)
     wdays_cache: dict[date, int] = {}
@@ -453,31 +511,34 @@ def _schedule_op(db: Session, wc: WorkCenter, hours: float, earliest: datetime, 
     step_start: datetime | None = None
     step_end = cursor
     guard = 0
-    while hours_left > 1e-6 and guard < 400:
+    while hours_left > _WEEK_FULL_EPS and guard < 730:
         guard += 1
+        wk = cap.week_start(day)
+        if _week_room_hours(db, wc, wk, planned_week) <= _WEEK_FULL_EPS:
+            day = wk + timedelta(days=7)
+            cursor = datetime.combine(day, cap.first_shift_start(wc, day, ovl.get(day)))
+            continue
         ov = ovl.get(day)
         free = _daily_free_hours(db, wc, day, emp, planned_week, wdays_cache, ovl)
-        if free > 1e-6:
+        if free > _WEEK_FULL_EPS:
             day_start = datetime.combine(day, cap.first_shift_start(wc, day, ov))
             hc = max(cap.daily_headcount(wc, day, emp, ov), 1)
             nominal_per_day = cap.daily_nominal_hours(wc, day, emp, ov) / hc
             if day == cursor.date() and cursor > day_start:
-                # ayni gun icinde daha once biten operasyondan sonra basla
                 frac_used = (cursor - day_start).total_seconds() / 3600.0
                 free = max(free * (1 - min(frac_used / max(nominal_per_day, 1.0), 1.0)), 0.0)
                 day_start = cursor
-            if free > 1e-6:
-                take = min(free, hours_left)
+            week_room = _week_room_hours(db, wc, wk, planned_week)
+            take = min(free, hours_left, week_room)
+            if take > _WEEK_FULL_EPS:
                 daily_eff = cap.daily_capacity_hours(wc, day, emp, ov)
-                # verimli saatleri nominal mesai saatine oranla yay
                 elapsed_nominal = (take / daily_eff) * nominal_per_day if daily_eff > 0 else take
                 if step_start is None:
                     step_start = day_start
                 step_end = day_start + timedelta(hours=elapsed_nominal)
                 hours_left -= take
-                wk = cap.week_start(day)
                 planned_week[wk] = planned_week.get(wk, 0.0) + take
-        if hours_left > 1e-6:
+        if hours_left > _WEEK_FULL_EPS:
             day += timedelta(days=1)
             cursor = datetime.combine(day, cap.first_shift_start(wc, day, ovl.get(day)))
     if step_start is None:
@@ -564,7 +625,7 @@ def lead_time(db: Session, req: LeadTimeRequest) -> LeadTimeOut:
     )
 
 
-def load_detail(db: Session, work_center_id: int, week_start: date) -> LoadDetailOut:
+def load_detail(db: Session, work_center_id: int, week_start: date, *, firm_only: bool = False) -> LoadDetailOut:
     from app.services.gantt import _line_window_in_week
 
     wc = db.get(WorkCenter, work_center_id)
@@ -579,8 +640,10 @@ def load_detail(db: Session, work_center_id: int, week_start: date) -> LoadDetai
             joinedload(PlanLine.operation),
         )
         .filter(PlanLine.work_center_id == work_center_id, PlanLine.week_start == wk)
-        .all()
     )
+    if firm_only:
+        pls = pls.filter(PlanLine.mode != "forecast")
+    pls = pls.all()
     rows: list[LoadDetailRow] = []
     for pl in sorted(pls, key=lambda p: (effective_due(p.order), p.order.order_no, p.order_id, p.operation.seq, p.id)):
         if pl.order is None or pl.operation is None:
@@ -654,11 +717,46 @@ def load_detail(db: Session, work_center_id: int, week_start: date) -> LoadDetai
     )
 
 
-def add_forecast_from_leadtime(db: Session, req: ForecastFromLeadTimeIn, username: str) -> int:
-    """Terminleme sonucunu tahmin plan satirlari olarak kaydeder; sonraki terminlemelerde doluluk hesaba katilir."""
+def weekly_output(db: Session, week_start: date, work_center_ids: list[int] | None = None) -> WeeklyOutputOut:
+    """Haftalık üretim planı — iş merkezi bazlı, tahmin hariç."""
+    wk = cap.week_start(week_start)
+    week_end = wk + timedelta(days=4)
+    q = db.query(WorkCenter).filter(WorkCenter.is_active.is_(True), WorkCenter.is_planned.is_(True))
+    if work_center_ids:
+        q = q.filter(WorkCenter.id.in_(work_center_ids))
+    wcs = q.order_by(WorkCenter.code).all()
+    sections: list[WeeklyOutputWc] = []
+    total_jobs = 0
+    total_qty = 0.0
+    for wc in wcs:
+        detail = load_detail(db, wc.id, wk, firm_only=True)
+        if not detail.rows:
+            continue
+        rows = sorted(detail.rows, key=lambda r: (r.planned_start or "", r.order_no, r.operation_seq))
+        sections.append(
+            WeeklyOutputWc(
+                work_center_id=wc.id,
+                work_center_code=wc.code,
+                total_qty=detail.total_qty,
+                rows=rows,
+            )
+        )
+        total_jobs += len(rows)
+        total_qty += detail.total_qty
+    return WeeklyOutputOut(
+        week_start=wk,
+        week_end=week_end,
+        work_centers=sections,
+        total_jobs=total_jobs,
+        total_qty=round(total_qty, 2),
+    )
+
+
+def add_forecast_from_leadtime(db: Session, req: ForecastFromLeadTimeIn, username: str) -> tuple[int, int]:
+    """Terminleme sonucunu tahmin plan satirlari olarak kaydeder; kapasite asimi engellenir. (order_id, satir_sayisi)"""
     item = (
         db.query(Item)
-        .options(joinedload(Item.operations))
+        .options(joinedload(Item.operations).joinedload(RoutingOperation.work_center))
         .filter(Item.code == req.item_code)
         .first()
     )
@@ -666,7 +764,29 @@ def add_forecast_from_leadtime(db: Session, req: ForecastFromLeadTimeIn, usernam
         raise ValueError("Stok kodu bulunamadi")
     if not req.steps:
         raise ValueError("Operasyon adimi yok")
+
+    step_dates = [datetime.strptime(s.start[:10], "%Y-%m-%d").date() for s in req.steps]
     end_dt = datetime.strptime(req.steps[-1].end[:10], "%Y-%m-%d").date()
+    horizon_start = cap.week_start(min(step_dates))
+    horizon_end = cap.week_start(end_dt) + timedelta(weeks=16)
+    weeks: list[date] = []
+    wk = horizon_start
+    while wk <= horizon_end:
+        weeks.append(wk)
+        wk += timedelta(weeks=1)
+
+    wc_ids = list({op.work_center_id for op in item.operations})
+    wcs = {w.id: w for w in db.query(WorkCenter).filter(WorkCenter.id.in_(wc_ids)).all()}
+    existing = planned_hours_by_week(db, wc_ids, horizon_start, horizon_end)
+    remaining: dict[tuple[int, date], float] = {}
+    for wc_id in wc_ids:
+        wc = wcs.get(wc_id)
+        if not wc:
+            continue
+        for week in weeks:
+            used = existing.get((wc_id, week), 0.0)
+            remaining[(wc_id, week)] = _week_room_hours(db, wc, week, {week: used})
+
     label = (req.label or "").strip() or f"TAH-{item.code}-{datetime.now():%m%d%H%M}"
     order = Order(
         order_no=label,
@@ -679,27 +799,52 @@ def add_forecast_from_leadtime(db: Session, req: ForecastFromLeadTimeIn, usernam
     )
     db.add(order)
     db.flush()
+
     created = 0
+    unplaced: list[str] = []
     for step in req.steps:
         op = next((o for o in item.operations if o.seq == step.operation_seq), None)
         if not op:
             continue
         start_day = datetime.strptime(step.start[:10], "%Y-%m-%d").date()
-        db.add(
-            PlanLine(
-                order_id=order.id,
-                operation_id=op.id,
-                work_center_id=op.work_center_id,
-                week_start=cap.week_start(start_day),
-                planned_hours=round(step.hours, 3),
-                planned_qty=round(req.quantity, 2),
-                mode="forecast",
-                created_by=username,
-            )
-        )
-        created += 1
+        start_wk = cap.week_start(start_day)
+        idx = weeks.index(start_wk) if start_wk in weeks else 0
+        hours_left = float(step.hours)
+        total_hours = hours_left
+        while hours_left > 1e-6 and idx < len(weeks):
+            week = weeks[idx]
+            avail = remaining.get((op.work_center_id, week), 0.0)
+            if avail > _WEEK_FULL_EPS:
+                take = min(avail, hours_left)
+                qty = req.quantity * (take / total_hours) if total_hours > 0 else 0.0
+                db.add(
+                    PlanLine(
+                        order_id=order.id,
+                        operation_id=op.id,
+                        work_center_id=op.work_center_id,
+                        week_start=week,
+                        planned_hours=round(take, 3),
+                        planned_qty=round(qty, 2),
+                        mode="forecast",
+                        created_by=username,
+                    )
+                )
+                remaining[(op.work_center_id, week)] = avail - take
+                hours_left -= take
+                created += 1
+            if hours_left > 1e-6:
+                idx += 1
+        if hours_left > _WEEK_FULL_EPS:
+            wc = wcs.get(op.work_center_id)
+            code = wc.code if wc else "?"
+            unplaced.append(f"{code} ({round(hours_left, 1)} sa)")
+
+    if unplaced:
+        db.rollback()
+        raise ValueError("Kapasite yetersiz — plana eklenemedi: " + ", ".join(unplaced))
+
     db.commit()
-    return created
+    return order.id, created
 
 
 def clear_forecast_plans(db: Session, work_center_ids: list[int] | None = None) -> int:
@@ -710,5 +855,48 @@ def clear_forecast_plans(db: Session, work_center_ids: list[int] | None = None) 
     n = q.delete(synchronize_session=False)
     if forecast_order_ids:
         db.query(Order).filter(Order.id.in_(forecast_order_ids), Order.status == "forecast").delete(synchronize_session=False)
+    db.commit()
+    return n
+
+
+def list_forecasts(db: Session) -> list[ForecastSummaryOut]:
+    """Plana eklenmis terminleme tahminleri (forecast siparis + plan satirlari)."""
+    orders = (
+        db.query(Order)
+        .options(joinedload(Order.item))
+        .filter(Order.status == "forecast")
+        .order_by(Order.created_at.desc(), Order.id.desc())
+        .all()
+    )
+    out: list[ForecastSummaryOut] = []
+    for o in orders:
+        pls = db.query(PlanLine).filter(PlanLine.order_id == o.id, PlanLine.mode == "forecast").order_by(PlanLine.week_start).all()
+        if not pls:
+            continue
+        weeks = [p.week_start for p in pls]
+        out.append(
+            ForecastSummaryOut(
+                order_id=o.id,
+                order_no=o.order_no,
+                item_code=o.item.code if o.item else "",
+                item_name=o.item.name if o.item else "",
+                quantity=o.quantity,
+                due_date=o.due_date,
+                total_hours=round(sum(p.planned_hours for p in pls), 2),
+                line_count=len(pls),
+                week_from=weeks[0],
+                week_to=weeks[-1],
+                created_at=o.created_at,
+            )
+        )
+    return out
+
+
+def delete_forecast(db: Session, order_id: int) -> int:
+    order = db.get(Order, order_id)
+    if not order or order.status != "forecast":
+        raise ValueError("Tahmin siparisi bulunamadi")
+    n = db.query(PlanLine).filter(PlanLine.order_id == order_id, PlanLine.mode == "forecast").delete(synchronize_session=False)
+    db.delete(order)
     db.commit()
     return n

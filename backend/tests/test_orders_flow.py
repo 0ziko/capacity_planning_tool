@@ -54,6 +54,11 @@ def test_schedule_progress_and_merge(client, auth):
     assert s1["required_hours"] == 30 and s1["planned_hours"] == 30 and s1["coverage_pct"] == 100
     assert s1["planned_start"] == WEEK.isoformat()
     assert s1["planned_end"] is not None and s1["plan_status"] == "on_time"
+    # plan durumu filtresi: planlanan = on_time + partial + late
+    planned = client.get("/api/orders", headers=auth, params={"status": "open", "plan_status": "planned"}).json()
+    assert any(o["order_no"] == "SP-1" for o in planned)
+    unplanned = client.get("/api/orders", headers=auth, params={"status": "open", "plan_status": "unplanned"}).json()
+    assert all(o["order_no"] != "SP-1" for o in unplanned)
     assert s1["lateness_days"] <= 0
     # tumu ilk haftaya sigar (52.5 saat < 200 / 100 kapasite); bitis gunu hafta icinde
     assert WEEK <= date.fromisoformat(s1["planned_end"]) <= WEEK + timedelta(days=4)
@@ -73,9 +78,11 @@ def test_schedule_progress_and_merge(client, auth):
     r = client.get("/api/progress/orders.xlsx", headers=auth)
     assert r.status_code == 200 and r.content[:2] == b"PK"
 
-    # birlestirme onerisi: 3 siparis ayni stok
-    groups = client.get("/api/plan/merge-suggestions", headers=auth).json()
-    assert len(groups) == 1
+    # birlestirme onerisi: 3 siparis ayni stok (terminler 7+ gun arayla -> opsiyonel grup)
+    groups = client.get("/api/plan/merge-suggestions", headers=auth, params={"tolerance_days": 5}).json()
+    assert len(groups) == 1 and groups[0]["recommended"] is False and groups[0]["order_count"] == 3
+    rec = client.get("/api/plan/merge-suggestions", headers=auth, params={"tolerance_days": 30}).json()
+    assert any(g["recommended"] and g["order_count"] == 3 for g in rec)
     g = groups[0]
     assert g["item_code"] == "MAM-1" and g["order_count"] == 3 and g["total_qty"] == 1750 and g["has_progress"] is True
     assert g["customers"] == ["Musteri A", "Musteri B", "Musteri C"]

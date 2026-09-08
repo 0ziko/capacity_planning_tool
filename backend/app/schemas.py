@@ -78,6 +78,7 @@ class WorkCenterIn(BaseModel):
     area_code: str = ""
     area_name: str = ""
     capacity_source: CapacitySource = "work_center"
+    planning_reserve_pct: float = Field(default=0.0, ge=0, le=99)
 
 
 class WorkCenterOut(WorkCenterIn, ORM):
@@ -268,10 +269,59 @@ class MergeGroup(BaseModel):
     latest_due: date
     customers: list[str]
     has_progress: bool
+    recommended: bool = True
+    due_spread_days: int = 0
+    tolerance_days: int = 0
+    cluster_key: str = ""
     orders: list[OrderOut]
 
 
 ProductionBatchSuggestion = MergeGroup  # alias
+
+
+class MergePreviewGroup(BaseModel):
+    order_ids: list[int]
+
+
+class MergeDelayRow(BaseModel):
+    order_id: int
+    order_no: str
+    position_no: str = ""
+    customer: str
+    item_code: str
+    due_date: date
+    before_end: date | None = None
+    after_end: date | None = None
+    delay_days: int = 0
+    before_lateness: int | None = None
+    after_lateness: int | None = None
+
+
+class MergeLoadDelta(BaseModel):
+    work_center_id: int
+    work_center_code: str
+    week_start: date
+    before_hours: float
+    after_hours: float
+    delta_hours: float
+
+
+class MergeImpactRequest(BaseModel):
+    merge_groups: list[MergePreviewGroup]
+    start_week: date
+    weeks: int = 12
+    work_center_ids: list[int] | None = None
+    mode: Literal["due_date", "revenue"] = "due_date"
+
+
+class MergeImpactOut(BaseModel):
+    merge_count: int
+    order_count: int
+    delayed_count: int
+    delayed_orders: list[MergeDelayRow]
+    load_deltas: list[MergeLoadDelta]
+    batches: list[dict]
+    note: str = ""
 
 
 class ProductionBatchOrderOut(BaseModel):
@@ -463,16 +513,26 @@ class PlanLineOut(ORM):
 class WeekLoad(BaseModel):
     week_start: date
     capacity_hours: float
+    planning_capacity_hours: float = 0.0
     planned_hours: float
-    utilization: float  # plan / kapasite
+    forecast_hours: float = 0.0
+    firm_planned_hours: float = 0.0
+    forecast_details: list["ForecastLoadDetail"] = []
+    utilization: float  # plan / planlanabilir kapasite
     actual_hours: float = 0.0
     actual_utilization: float = 0.0  # gerceklesen uretim / kapasite
     remaining_hours: float = 0.0  # plan - gerceklesen (kalan plan)
     remaining_days: float = 0.0  # kalan saat / gunluk verimli kapasite
-    idle_hours: float = 0.0  # kapasite - plan (atil kapasite)
+    idle_hours: float = 0.0  # planlanabilir kapasite - plan (atil)
     capacity_units: float
     planned_units: float
     actual_units: float = 0.0
+
+
+class ForecastLoadDetail(BaseModel):
+    order_no: str
+    item_code: str
+    hours: float
 
 
 class WorkCenterLoad(BaseModel):
@@ -550,6 +610,20 @@ class ForecastFromLeadTimeIn(BaseModel):
     steps: list[LeadTimeStep]
 
 
+class ForecastSummaryOut(BaseModel):
+    order_id: int
+    order_no: str
+    item_code: str
+    item_name: str
+    quantity: float
+    due_date: date
+    total_hours: float
+    line_count: int
+    week_from: date | None = None
+    week_to: date | None = None
+    created_at: datetime | None = None
+
+
 class LoadDetailRow(BaseModel):
     plan_line_id: int = 0
     item_code: str
@@ -584,6 +658,21 @@ class LoadDetailOut(BaseModel):
     total_qty: float
     rows: list[LoadDetailRow]
     pareto: list[LoadDetailParetoRow]
+
+
+class WeeklyOutputWc(BaseModel):
+    work_center_id: int
+    work_center_code: str
+    total_qty: float
+    rows: list[LoadDetailRow]
+
+
+class WeeklyOutputOut(BaseModel):
+    week_start: date
+    week_end: date
+    work_centers: list[WeeklyOutputWc]
+    total_jobs: int
+    total_qty: float
 
 
 # ---- Progress ----

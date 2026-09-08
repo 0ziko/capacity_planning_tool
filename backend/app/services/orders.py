@@ -74,7 +74,10 @@ def enrich_orders(db: Session, orders: list[Order]) -> list[OrderOut]:
         else:
             row.reservation_status = "partial"
         if o.status != "open":
-            row.plan_status = "closed"
+            if o.status == "forecast":
+                row.plan_status = "forecast"
+            else:
+                row.plan_status = "closed"
         elif o.id in sched_map:
             row.plan_status = sched_map[o.id].plan_status
         else:
@@ -89,7 +92,12 @@ def filter_enriched_orders(
     reservation_status: str | None = None,
 ) -> list[OrderOut]:
     if plan_status:
-        rows = [r for r in rows if r.plan_status == plan_status]
+        if plan_status == "planned":
+            rows = [r for r in rows if r.plan_status in ("partial", "late", "on_time")]
+        elif plan_status == "forecast":
+            rows = [r for r in rows if r.plan_status == "forecast"]
+        else:
+            rows = [r for r in rows if r.plan_status == plan_status]
     if reservation_status:
         rows = [r for r in rows if r.reservation_status == reservation_status]
     return rows
@@ -201,7 +209,9 @@ def list_orders(
     from sqlalchemy import func
 
     q = db.query(Order).options(joinedload(Order.item))
-    if status:
+    if plan_status == "forecast" and status == "open":
+        q = q.filter(Order.status == "forecast")
+    elif status:
         q = q.filter(Order.status == status)
     if due_from:
         q = q.filter(func.coalesce(Order.revised_due_date, Order.due_date) >= due_from)
@@ -355,9 +365,16 @@ def _end_day_in_week(db: Session, wc: WorkCenter, wk: date, order_id: int, lines
     return wdays[idx]
 
 
-def order_schedule(db: Session, wc_ids: list[int] | None, lines=None, orders: list[Order] | None = None) -> list[OrderScheduleOut]:
+def order_schedule(
+    db: Session,
+    wc_ids: list[int] | None,
+    lines=None,
+    orders: list[Order] | None = None,
+    sim_batches: dict[int, tuple[float, list[int]]] | None = None,
+) -> list[OrderScheduleOut]:
     """lines verilmezse veritabanindaki plan satirlari kullanilir; verilirse (simulasyon)
-    order_id / work_center_id / week_start / planned_hours / order alanlari olan nesneler beklenir."""
+    order_id / work_center_id / week_start / planned_hours / order alanlari olan nesneler beklenir.
+    sim_batches: sanal uretim partisi {batch_id: (toplam_miktar, [siparis_id...])}."""
     wcs = _planned_wcs(db, wc_ids)
     wc_by_id = {w.id: w for w in wcs}
     orders = orders if orders is not None else _open_orders(db)
@@ -385,6 +402,11 @@ def order_schedule(db: Session, wc_ids: list[int] | None, lines=None, orders: li
     from app.services import production_batches as pb
 
     order_batch = pb.batch_order_map(db)
+    sim_order_batch: dict[int, int] = {}
+    if sim_batches:
+        for bid, (qty, oids) in sim_batches.items():
+            for oid in oids:
+                sim_order_batch[oid] = bid
     by_order: dict[int, list[PlanLine]] = defaultdict(list)
     by_batch: dict[int, list[PlanLine]] = defaultdict(list)
     by_wc_week: dict[tuple[int, date], list[PlanLine]] = defaultdict(list)
@@ -400,7 +422,16 @@ def order_schedule(db: Session, wc_ids: list[int] | None, lines=None, orders: li
         ops = [op for op in o.item.operations if op.work_center_id in wc_by_id]
         required = sum(op.hours_for(o.quantity) for op in ops)
         batch = order_batch.get(o.id)
-        if batch:
+        sim_bid = sim_order_batch.get(o.id)
+        if sim_bid is not None:
+            bqty, _ = sim_batches[sim_bid]
+            pls = by_batch.get(sim_bid, [])
+            share = o.quantity / bqty if bqty else 0.0
+            planned = sum(p.planned_hours for p in pls) * share
+            start = min((p.week_start for p in pls), default=None)
+            end_week = max((p.week_start for p in pls), default=None)
+            schedule_order_id = sorted(sim_batches[sim_bid][1])[0]
+        elif batch:
             pls = by_batch.get(batch.id, [])
             share = o.quantity / batch.quantity if batch.quantity else 0.0
             planned = sum(p.planned_hours for p in pls) * share

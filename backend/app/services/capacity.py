@@ -215,6 +215,13 @@ def week_capacity_hours(db: Session, wc: WorkCenter, wk: date) -> float:
     return capacity_for_range(db, wc, wk, wk + timedelta(days=6)).capacity_hours
 
 
+def planning_capacity_hours(db: Session, wc: WorkCenter, wk: date) -> float:
+    """Planlama/terminleme icin kullanilabilir kapasite (atil rezerv dusulmus)."""
+    raw = week_capacity_hours(db, wc, wk)
+    pct = max(0.0, min(float(getattr(wc, "planning_reserve_pct", 0.0) or 0.0), 99.0))
+    return raw * (1.0 - pct / 100.0)
+
+
 def week_profile(db: Session, wc: WorkCenter, wk: date) -> dict:
     """Bir haftanin etkin is gucu ozeti: kisi, kisi basi verimli saat, calisma gunu, kapasite + istisna kaydi."""
     wk = week_start(wk)

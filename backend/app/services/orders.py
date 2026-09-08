@@ -95,9 +95,40 @@ def filter_enriched_orders(
     return rows
 
 
-def orders_analysis(db: Session, status: str | None = "open", market: str | None = None, due_from: date | None = None, due_to: date | None = None) -> dict:
-    from app.schemas import OrderAnalysisOut, OrderAnalysisRow
+def analysis_period_range(period: str | None) -> tuple[date | None, date | None]:
+    """Termin (effective_due) bazli donem: bu ay basindan N ay sonuna kadar."""
+    import calendar
 
+    if not period:
+        return None, None
+    months = {"1m": 1, "3m": 3, "6m": 6, "1y": 12}.get(period)
+    if not months:
+        return None, None
+    start = date.today().replace(day=1)
+
+    def add_months(d: date, n: int) -> date:
+        y, m = d.year, d.month + n
+        while m > 12:
+            m -= 12
+            y += 1
+        return date(y, m, min(d.day, calendar.monthrange(y, m)[1]))
+
+    end = add_months(start, months) - timedelta(days=1)
+    return start, end
+
+
+def orders_analysis(
+    db: Session,
+    status: str | None = "open",
+    market: str | None = None,
+    due_from: date | None = None,
+    due_to: date | None = None,
+    period: str | None = None,
+) -> dict:
+    from app.schemas import OrderAnalysisOut, OrderAnalysisParetoRow, OrderAnalysisRow
+
+    if period and not due_from and not due_to:
+        due_from, due_to = analysis_period_range(period)
     q = db.query(Order).options(joinedload(Order.item))
     if status:
         q = q.filter(Order.status == status)
@@ -108,6 +139,7 @@ def orders_analysis(db: Session, status: str | None = "open", market: str | None
         orders = [o for o in orders if (not due_from or effective_due(o) >= due_from) and (not due_to or effective_due(o) <= due_to)]
     enriched = enrich_orders(db, orders)
     agg: dict[tuple[str, str, date], OrderAnalysisRow] = {}
+    cust_orders: dict[str, int] = defaultdict(int)
     for r in enriched:
         ed = r.effective_due_date or r.due_date
         key = (r.customer or "—", r.market, ed)
@@ -115,6 +147,7 @@ def orders_analysis(db: Session, status: str | None = "open", market: str | None
             agg[key] = OrderAnalysisRow(customer=key[0], market=key[1], due_date=key[2], order_count=0, revenue=0.0)
         agg[key].order_count += 1
         agg[key].revenue = round(agg[key].revenue + r.revenue, 2)
+        cust_orders[r.customer or "—"] += 1
     rows = sorted(agg.values(), key=lambda x: (x.due_date, x.customer, x.market))
     total = round(sum(r.revenue for r in rows), 2)
     dom = round(sum(r.revenue for r in rows if r.market == "domestic"), 2)
@@ -126,12 +159,30 @@ def orders_analysis(db: Session, status: str | None = "open", market: str | None
             by_cust[c] = {"customer": c, "domestic": 0.0, "export": 0.0, "total": 0.0}
         by_cust[c][r.market] = round(by_cust[c][r.market] + r.revenue, 2)
         by_cust[c]["total"] = round(by_cust[c]["total"] + r.revenue, 2)
+    by_customer = sorted(by_cust.values(), key=lambda x: -x["total"])
+    pareto: list[OrderAnalysisParetoRow] = []
+    cum = 0.0
+    for c in by_customer:
+        cum += c["total"]
+        pareto.append(
+            OrderAnalysisParetoRow(
+                customer=c["customer"],
+                revenue=c["total"],
+                pct=round(c["total"] / total * 100, 1) if total > 0 else 0.0,
+                cum_pct=round(cum / total * 100, 1) if total > 0 else 0.0,
+                order_count=cust_orders.get(c["customer"], 0),
+            )
+        )
     return OrderAnalysisOut(
         rows=rows,
         total_revenue=total,
         domestic_revenue=dom,
         export_revenue=exp,
-        by_customer=sorted(by_cust.values(), key=lambda x: -x["total"]),
+        by_customer=by_customer,
+        pareto=pareto,
+        period=period,
+        due_from=due_from,
+        due_to=due_to,
     )
 
 

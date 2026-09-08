@@ -1,15 +1,19 @@
 import { useEffect, useState } from "react";
-import { api, fmt, qs, type Item, type Order, type OrderAnalysis, type OrderIn } from "../api";
+import { api, fmt, qs, type Item, type Order, type OrderIn } from "../api";
 import { useAuth } from "../auth";
 import { ErrorText, useAsync } from "../components";
+import RevenueAnalysis from "./orders/RevenueAnalysis";
 
 const STATUS_LABEL: Record<string, string> = { open: "Açık", closed: "Kapalı" };
 const PLAN_LABEL: Record<string, string> = { unplanned: "Planlanmadı", partial: "Kısmi", late: "Gecikmeli", on_time: "Zamanında", no_ops: "Rota yok", closed: "Kapalı" };
 const RES_LABEL: Record<string, string> = { none: "Rezerv yok", partial: "Kısmi rezerv", full: "Tam rezerv" };
 const MARKET_LABEL: Record<string, string> = { domestic: "Yerli", export: "Yurtdışı" };
 
+type Tab = "orders" | "revenue";
+
 export default function Orders() {
   const { can } = useAuth();
+  const [tab, setTab] = useState<Tab>("orders");
   const [status, setStatus] = useState("open");
   const [position, setPosition] = useState("");
   const [customer, setCustomer] = useState("");
@@ -35,16 +39,11 @@ export default function Orders() {
   };
 
   const orders = useAsync(() => api.get<Order[]>(`/api/orders${qs(filterParams)}`), [JSON.stringify(filterParams)]);
-  const analysis = useAsync(
-    () => api.get<OrderAnalysis>(`/api/orders/analysis${qs({ status, market: market || undefined, due_from: from || undefined, due_to: to || undefined })}`),
-    [status, market, from, to]
-  );
 
   const afterSave = (o: Order, created: boolean) => {
     setEditing(null);
     setMsg(`${o.order_no}${o.position_no ? ` / poz ${o.position_no}` : ""} / ${o.item_code} ${created ? "eklendi" : "güncellendi"}.`);
     orders.reload();
-    analysis.reload();
   };
 
   const remove = async (o: Order) => {
@@ -53,125 +52,91 @@ export default function Orders() {
       await api.del(`/api/orders/${o.id}`);
       setMsg(`${o.order_no} silindi.`);
       orders.reload();
-      analysis.reload();
     } catch (e) { setMsg((e as Error).message); }
   };
 
   return (
     <>
       <h1>Siparişler</h1>
-      <div className="panel row">
-        <label>Durum<select value={status} onChange={(e) => setStatus(e.target.value)}><option value="open">Açık</option><option value="closed">Kapalı</option><option value="">Tümü</option></select></label>
-        <label>Sipariş no<input value={orderNo} onChange={(e) => setOrderNo(e.target.value)} placeholder="filtre" /></label>
-        <label>Poz no<input value={position} onChange={(e) => setPosition(e.target.value)} placeholder="filtre" /></label>
-        <label>Müşteri<input value={customer} onChange={(e) => setCustomer(e.target.value)} placeholder="filtre" /></label>
-        <label>Pazar<select value={market} onChange={(e) => setMarket(e.target.value)}><option value="">Tümü</option><option value="domestic">Yerli</option><option value="export">Yurtdışı</option></select></label>
-        <label>Plan durumu<select value={planStatus} onChange={(e) => setPlanStatus(e.target.value)}><option value="">Tümü</option><option value="unplanned">Planlanmadı</option><option value="partial">Kısmi</option><option value="late">Gecikmeli</option><option value="on_time">Zamanında</option><option value="no_ops">Rota yok</option></select></label>
-        <label>Rezervasyon<select value={resStatus} onChange={(e) => setResStatus(e.target.value)}><option value="">Tümü</option><option value="none">Rezerv yok</option><option value="partial">Kısmi</option><option value="full">Tam</option></select></label>
-        <label>Termin (başlangıç)<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
-        <label>Termin (bitiş)<input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
-        {can("poweruser") && <button onClick={() => { setEditing("new"); setMsg(""); }} disabled={editing === "new"}>+ Yeni sipariş</button>}
+      <div className="tabs">
+        <button type="button" className={`tab ${tab === "orders" ? "active" : ""}`} onClick={() => setTab("orders")}>Sipariş listesi</button>
+        <button type="button" className={`tab ${tab === "revenue" ? "active" : ""}`} onClick={() => setTab("revenue")}>Ciro analizi</button>
       </div>
-      <ErrorText err={orders.err || analysis.err} />
-      {msg && <div className="success" style={{ marginBottom: 8 }}>{msg}</div>}
-      {editing && <OrderForm initial={editing === "new" ? null : editing} onSaved={afterSave} onCancel={() => setEditing(null)} />}
 
-      <div className="panel" style={{ marginBottom: 14 }}>
-        <h2 style={{ marginTop: 0 }}>Ciro analizi <span className="muted">(müşteri × termin, yerli / yurtdışı)</span></h2>
-        <div className="row" style={{ marginBottom: 10 }}>
-          <div className="kpi"><span className="v">{fmt(analysis.data?.total_revenue, 0)}</span><span className="l">Toplam ciro</span></div>
-          <div className="kpi"><span className="v">{fmt(analysis.data?.domestic_revenue, 0)}</span><span className="l">Yerli</span></div>
-          <div className="kpi"><span className="v">{fmt(analysis.data?.export_revenue, 0)}</span><span className="l">Yurtdışı</span></div>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-          <div className="table-wrap" style={{ maxHeight: 240 }}>
+      {tab === "revenue" && <RevenueAnalysis />}
+
+      {tab === "orders" && (
+        <>
+          <div className="panel row">
+            <label>Durum<select value={status} onChange={(e) => setStatus(e.target.value)}><option value="open">Açık</option><option value="closed">Kapalı</option><option value="">Tümü</option></select></label>
+            <label>Sipariş no<input value={orderNo} onChange={(e) => setOrderNo(e.target.value)} placeholder="filtre" /></label>
+            <label>Poz no<input value={position} onChange={(e) => setPosition(e.target.value)} placeholder="filtre" /></label>
+            <label>Müşteri<input value={customer} onChange={(e) => setCustomer(e.target.value)} placeholder="filtre" /></label>
+            <label>Pazar<select value={market} onChange={(e) => setMarket(e.target.value)}><option value="">Tümü</option><option value="domestic">Yerli</option><option value="export">Yurtdışı</option></select></label>
+            <label>Plan durumu<select value={planStatus} onChange={(e) => setPlanStatus(e.target.value)}><option value="">Tümü</option><option value="unplanned">Planlanmadı</option><option value="partial">Kısmi</option><option value="late">Gecikmeli</option><option value="on_time">Zamanında</option><option value="no_ops">Rota yok</option></select></label>
+            <label>Rezervasyon<select value={resStatus} onChange={(e) => setResStatus(e.target.value)}><option value="">Tümü</option><option value="none">Rezerv yok</option><option value="partial">Kısmi</option><option value="full">Tam</option></select></label>
+            <label>Termin (başlangıç)<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
+            <label>Termin (bitiş)<input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
+            {can("poweruser") && <button onClick={() => { setEditing("new"); setMsg(""); }} disabled={editing === "new"}>+ Yeni sipariş</button>}
+          </div>
+          <ErrorText err={orders.err} />
+          {msg && <div className="success" style={{ marginBottom: 8 }}>{msg}</div>}
+          {editing && <OrderForm initial={editing === "new" ? null : editing} onSaved={afterSave} onCancel={() => setEditing(null)} />}
+
+          <h2>{STATUS_LABEL[status] ?? "Tüm"} siparişler</h2>
+          <div className="table-wrap">
             <table>
-              <thead><tr><th>Müşteri</th><th>Termin</th><th>Pazar</th><th className="num">Sipariş</th><th className="num">Ciro</th></tr></thead>
+              <thead>
+                <tr>
+                  <th>Sipariş</th><th>Poz</th><th>Müşteri</th><th>Pazar</th>
+                  <th>Termin</th><th>Revize termin</th><th>Plan termin</th>
+                  <th>Stok</th><th className="num">Miktar</th><th className="num">Birim fiyat</th><th className="num">Ciro</th>
+                  <th>Plan</th><th>Rezerv</th><th>Not</th><th></th>
+                </tr>
+              </thead>
               <tbody>
-                {analysis.data?.rows.map((r, i) => (
-                  <tr key={i}>
-                    <td>{r.customer}</td>
-                    <td>{r.due_date}</td>
-                    <td>{MARKET_LABEL[r.market] ?? r.market}</td>
-                    <td className="num">{r.order_count}</td>
-                    <td className="num">{fmt(r.revenue, 0)}</td>
+                {orders.data?.map((o) => (
+                  <tr key={o.id}>
+                    <td>
+                      {o.order_no}
+                      {o.status === "closed" && <span className="badge muted" style={{ marginLeft: 6 }}>kapalı</span>}
+                    </td>
+                    <td>{o.position_no || <span className="muted">—</span>}</td>
+                    <td>{o.customer}</td>
+                    <td>{MARKET_LABEL[o.market] ?? o.market}</td>
+                    <td>{o.due_date}</td>
+                    <td>{o.revised_due_date || <span className="muted">—</span>}</td>
+                    <td><b>{o.effective_due_date}</b></td>
+                    <td><b>{o.item_code}</b> <span className="muted">{o.item_name}</span></td>
+                    <td className="num">{fmt(o.quantity, 0)}</td>
+                    <td className="num" style={{ color: o.unit_price ? undefined : "var(--muted)" }}>{o.unit_price ? fmt(o.unit_price, 2) : "—"}</td>
+                    <td className="num">{o.revenue ? fmt(o.revenue, 0) : "—"}</td>
+                    <td><span className={`badge ${o.plan_status === "on_time" ? "ok" : o.plan_status === "late" ? "bad" : o.plan_status === "unplanned" ? "warn" : "muted"}`}>{PLAN_LABEL[o.plan_status] ?? o.plan_status}</span></td>
+                    <td><span className={`badge ${o.reservation_status === "full" ? "ok" : o.reservation_status === "none" ? "warn" : "muted"}`}>{RES_LABEL[o.reservation_status] ?? o.reservation_status}</span></td>
+                    <td className="muted" title={o.note}>{o.note.length > 30 ? o.note.slice(0, 30) + "…" : o.note}</td>
+                    <td style={{ whiteSpace: "nowrap" }}>
+                      {can("poweruser") && o.status !== "merged" && (
+                        <>
+                          <button className="secondary small" onClick={() => { setEditing(o); setMsg(""); }}>Düzenle</button>{" "}
+                          {o.status === "open"
+                            ? <button className="secondary small" onClick={async () => { await api.patch(`/api/orders/${o.id}/status?status=closed`); orders.reload(); }}>Kapat</button>
+                            : <button className="secondary small" onClick={async () => { await api.patch(`/api/orders/${o.id}/status?status=open`); orders.reload(); }}>Aç</button>}{" "}
+                          <button className="danger small" onClick={() => remove(o)}>Sil</button>
+                        </>
+                      )}
+                    </td>
                   </tr>
                 ))}
-                {!analysis.data?.rows.length && <tr><td colSpan={5} className="muted">Veri yok.</td></tr>}
+                {orders.data?.length === 0 && <tr><td colSpan={15} className="muted">Sipariş yok.</td></tr>}
               </tbody>
             </table>
           </div>
-          <div className="table-wrap" style={{ maxHeight: 240 }}>
-            <table>
-              <thead><tr><th>Müşteri</th><th className="num">Yerli</th><th className="num">Yurtdışı</th><th className="num">Toplam</th></tr></thead>
-              <tbody>
-                {analysis.data?.by_customer.map((c) => (
-                  <tr key={c.customer}>
-                    <td>{c.customer}</td>
-                    <td className="num">{fmt(c.domestic, 0)}</td>
-                    <td className="num">{fmt(c.export, 0)}</td>
-                    <td className="num"><b>{fmt(c.total, 0)}</b></td>
-                  </tr>
-                ))}
-                {!analysis.data?.by_customer.length && <tr><td colSpan={4} className="muted">Veri yok.</td></tr>}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      <h2>{STATUS_LABEL[status] ?? "Tüm"} siparişler</h2>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Sipariş</th><th>Poz</th><th>Müşteri</th><th>Pazar</th>
-              <th>Termin</th><th>Revize termin</th><th>Plan termin</th>
-              <th>Stok</th><th className="num">Miktar</th><th className="num">Birim fiyat</th><th className="num">Ciro</th>
-              <th>Plan</th><th>Rezerv</th><th>Not</th><th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {orders.data?.map((o) => (
-              <tr key={o.id}>
-                <td>
-                  {o.order_no}
-                  {o.status === "closed" && <span className="badge muted" style={{ marginLeft: 6 }}>kapalı</span>}
-                </td>
-                <td>{o.position_no || <span className="muted">—</span>}</td>
-                <td>{o.customer}</td>
-                <td>{MARKET_LABEL[o.market] ?? o.market}</td>
-                <td>{o.due_date}</td>
-                <td>{o.revised_due_date || <span className="muted">—</span>}</td>
-                <td><b>{o.effective_due_date}</b></td>
-                <td><b>{o.item_code}</b> <span className="muted">{o.item_name}</span></td>
-                <td className="num">{fmt(o.quantity, 0)}</td>
-                <td className="num" style={{ color: o.unit_price ? undefined : "var(--muted)" }}>{o.unit_price ? fmt(o.unit_price, 2) : "—"}</td>
-                <td className="num">{o.revenue ? fmt(o.revenue, 0) : "—"}</td>
-                <td><span className={`badge ${o.plan_status === "on_time" ? "ok" : o.plan_status === "late" ? "bad" : o.plan_status === "unplanned" ? "warn" : "muted"}`}>{PLAN_LABEL[o.plan_status] ?? o.plan_status}</span></td>
-                <td><span className={`badge ${o.reservation_status === "full" ? "ok" : o.reservation_status === "none" ? "warn" : "muted"}`}>{RES_LABEL[o.reservation_status] ?? o.reservation_status}</span></td>
-                <td className="muted" title={o.note}>{o.note.length > 30 ? o.note.slice(0, 30) + "…" : o.note}</td>
-                <td style={{ whiteSpace: "nowrap" }}>
-                  {can("poweruser") && o.status !== "merged" && (
-                    <>
-                      <button className="secondary small" onClick={() => { setEditing(o); setMsg(""); }}>Düzenle</button>{" "}
-                      {o.status === "open"
-                        ? <button className="secondary small" onClick={async () => { await api.patch(`/api/orders/${o.id}/status?status=closed`); orders.reload(); }}>Kapat</button>
-                        : <button className="secondary small" onClick={async () => { await api.patch(`/api/orders/${o.id}/status?status=open`); orders.reload(); }}>Aç</button>}{" "}
-                      <button className="danger small" onClick={() => remove(o)}>Sil</button>
-                    </>
-                  )}
-                </td>
-              </tr>
-            ))}
-            {orders.data?.length === 0 && <tr><td colSpan={15} className="muted">Sipariş yok.</td></tr>}
-          </tbody>
-        </table>
-      </div>
-      <p className="muted">
-        {orders.data?.length ?? 0} sipariş · toplam ciro <b>{fmt(orders.data?.reduce((s, o) => s + (o.revenue || 0), 0), 0)}</b>
-        {!!orders.data?.some((o) => !o.unit_price) && <> · <span style={{ color: "var(--warn)" }}>{orders.data.filter((o) => !o.unit_price).length} siparişte birim fiyat yok</span></>}
-      </p>
+          <p className="muted">
+            {orders.data?.length ?? 0} sipariş · toplam ciro <b>{fmt(orders.data?.reduce((s, o) => s + (o.revenue || 0), 0), 0)}</b>
+            {!!orders.data?.some((o) => !o.unit_price) && <> · <span style={{ color: "var(--warn)" }}>{orders.data.filter((o) => !o.unit_price).length} siparişte birim fiyat yok</span></>}
+          </p>
+        </>
+      )}
     </>
   );
 }

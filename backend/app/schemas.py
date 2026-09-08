@@ -182,12 +182,24 @@ class OrderAnalysisRow(BaseModel):
     revenue: float
 
 
+class OrderAnalysisParetoRow(BaseModel):
+    customer: str
+    revenue: float
+    pct: float
+    cum_pct: float
+    order_count: int = 0
+
+
 class OrderAnalysisOut(BaseModel):
     rows: list[OrderAnalysisRow]
     total_revenue: float
     domestic_revenue: float
     export_revenue: float
     by_customer: list[dict]  # {customer, domestic, export, total}
+    pareto: list[OrderAnalysisParetoRow] = []
+    period: str | None = None
+    due_from: date | None = None
+    due_to: date | None = None
 
 
 class OrderScheduleOut(BaseModel):

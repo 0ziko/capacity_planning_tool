@@ -373,10 +373,11 @@ def orders_analysis(
     market: str | None = None,
     due_from: date | None = None,
     due_to: date | None = None,
+    period: str | None = None,
     db: Session = Depends(get_db),
     _=Depends(require_user),
 ):
-    return orders_svc.orders_analysis(db, status, market, due_from, due_to)
+    return orders_svc.orders_analysis(db, status, market, due_from, due_to, period)
 
 
 @router.post("/orders", response_model=OrderOut, status_code=201)

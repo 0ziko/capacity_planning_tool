@@ -10,6 +10,41 @@ const PERIODS: { id: string; label: string }[] = [
 ];
 
 const MARKET_LABEL: Record<string, string> = { domestic: "Yerli", export: "Yurtdışı" };
+const PARETO_CHART_THRESHOLD = 80;
+
+/** Grafik: kümülatif ciro %80'e ulaşana kadar müşteriler ayrı; geri kalanı Diğer. */
+function paretoChartBuckets(pareto: OrderAnalysis["pareto"], total: number) {
+  if (!pareto.length) return [];
+  const top: OrderAnalysis["pareto"] = [];
+  let cumRev = 0;
+  let restStart = pareto.length;
+  for (let i = 0; i < pareto.length; i++) {
+    top.push(pareto[i]);
+    cumRev += pareto[i].revenue;
+    if (total > 0 && (cumRev / total) * 100 >= PARETO_CHART_THRESHOLD) {
+      restStart = i + 1;
+      break;
+    }
+  }
+  const rest = pareto.slice(restStart);
+  const merged = rest.length
+    ? [
+        ...top,
+        {
+          customer: `Diğer (${rest.length} müşteri)`,
+          revenue: rest.reduce((s, r) => s + r.revenue, 0),
+          pct: rest.reduce((s, r) => s + r.pct, 0),
+          cum_pct: 100,
+          order_count: rest.reduce((s, r) => s + r.order_count, 0),
+        },
+      ]
+    : top;
+  let cum = 0;
+  return merged.map((d) => {
+    cum += d.revenue;
+    return { ...d, cum_pct: total > 0 ? (cum / total) * 100 : 0 };
+  });
+}
 
 export default function RevenueAnalysis() {
   const [period, setPeriod] = useState("3m");
@@ -21,16 +56,7 @@ export default function RevenueAnalysis() {
 
   const pareto = analysis.data?.pareto ?? [];
   const total = analysis.data?.total_revenue ?? 0;
-  const top = pareto.slice(0, 14);
-  const rest = pareto.slice(14);
-  const merged = rest.length
-    ? [...top, { customer: `Diğer (${rest.length} müşteri)`, revenue: rest.reduce((s, r) => s + r.revenue, 0), pct: rest.reduce((s, r) => s + r.pct, 0), cum_pct: 100, order_count: rest.reduce((s, r) => s + r.order_count, 0) }]
-    : top;
-  let cum = 0;
-  const chartData = merged.map((d) => {
-    cum += d.revenue;
-    return { ...d, cum_pct: total > 0 ? (cum / total) * 100 : 0 };
-  });
+  const chartData = paretoChartBuckets(pareto, total);
 
   return (
     <>
@@ -61,7 +87,7 @@ export default function RevenueAnalysis() {
           </div>
           <div className="panel">
             <h2 style={{ marginTop: 0 }}>Pareto — müşteri × ciro</h2>
-            <p className="muted" style={{ marginTop: -6 }}>Sütunlar müşteri cirosu; kırmızı çizgi kümülatif pay (%). Açık siparişler, seçili termin penceresinde.</p>
+            <p className="muted" style={{ marginTop: -6 }}>Sütunlar müşteri cirosu; kırmızı çizgi kümülatif pay (%). Grafikte kümülatif ciro %{PARETO_CHART_THRESHOLD}&apos;a ulaştıktan sonraki müşteriler <b>Diğer</b> olarak birleştirilir; tam liste alttaki tabloda.</p>
             {chartData.length > 0 ? <ParetoChart data={chartData} total={total} /> : <p className="muted">Seçili dönemde sipariş yok.</p>}
           </div>
           <div className="table-wrap">

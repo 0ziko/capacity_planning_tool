@@ -12,13 +12,14 @@ export default function Orders() {
   const { can } = useAuth();
   const { wcs } = useWorkCenters();
   const [status, setStatus] = useState("open");
+  const [position, setPosition] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [wcIds, setWcIds] = useState<number[]>([]);
   const [selCodes, setSelCodes] = useState<string[]>([]);
   const [editing, setEditing] = useState<Order | "new" | null>(null);
   const [msg, setMsg] = useState("");
-  const orders = useAsync(() => api.get<Order[]>(`/api/orders${qs({ status, due_from: from, due_to: to })}`), [status, from, to]);
+  const orders = useAsync(() => api.get<Order[]>(`/api/orders${qs({ status, due_from: from, due_to: to, position: position || undefined })}`), [status, from, to, position]);
   const req = useAsync(
     () => api.post<ReqOut>("/api/requirements", { work_center_ids: wcIds.length ? wcIds : null, item_codes: selCodes.length ? selCodes : null, due_from: from || null, due_to: to || null }),
     [wcIds.join(","), selCodes.join(","), from, to, orders.data?.length]
@@ -27,7 +28,7 @@ export default function Orders() {
   const unitOf = (wcId: number) => wcs.find((w) => w.id === wcId)?.capacity_unit_hours ?? 10;
   const afterSave = (o: Order, created: boolean) => {
     setEditing(null);
-    setMsg(`${o.order_no} / ${o.item_code} ${created ? "eklendi" : "güncellendi"}.`);
+    setMsg(`${o.order_no}${o.position_no ? ` / poz ${o.position_no}` : ""} / ${o.item_code} ${created ? "eklendi" : "güncellendi"}.`);
     orders.reload();
   };
   const remove = async (o: Order) => {
@@ -44,6 +45,7 @@ export default function Orders() {
       <h1>Siparişler & İş Gücü İhtiyacı</h1>
       <div className="panel row">
         <label>Durum<select value={status} onChange={(e) => setStatus(e.target.value)}><option value="open">Açık</option><option value="closed">Kapalı</option><option value="merged">Birleştirilmiş</option><option value="">Tümü</option></select></label>
+        <label>Poz no<input value={position} onChange={(e) => setPosition(e.target.value)} placeholder="filtre" /></label>
         <label>Termin (başlangıç)<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
         <label>Termin (bitiş)<input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
         <WcMultiSelect wcs={wcs} value={wcIds} onChange={setWcIds} />
@@ -59,7 +61,7 @@ export default function Orders() {
           <h2>{STATUS_LABEL[status] ?? "Tüm"} siparişler <span className="muted">(satıra tıklayarak ihtiyaç hesabını seçili stoklara daraltın)</span></h2>
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Sipariş</th><th>Müşteri</th><th>Termin</th><th>Stok</th><th className="num">Miktar</th><th className="num">Birim fiyat</th><th className="num">Ciro</th><th>Not</th><th></th></tr></thead>
+              <thead><tr><th>Sipariş</th><th>Poz</th><th>Müşteri</th><th>Termin</th><th>Stok</th><th className="num">Miktar</th><th className="num">Birim fiyat</th><th className="num">Ciro</th><th>Not</th><th></th></tr></thead>
               <tbody>
                 {orders.data?.map((o) => (
                   <tr key={o.id} onClick={() => toggleCode(o.item_code)} style={{ cursor: "pointer", background: selCodes.includes(o.item_code) ? "#e3f2fd" : undefined }}>
@@ -68,6 +70,7 @@ export default function Orders() {
                       {o.status === "merged" && <span className="badge muted" style={{ marginLeft: 6 }} title={`Birleşik sipariş id ${o.merged_into_id}`}>birleştirildi</span>}
                       {o.status === "closed" && <span className="badge muted" style={{ marginLeft: 6 }}>kapalı</span>}
                     </td>
+                    <td>{o.position_no || <span className="muted">—</span>}</td>
                     <td>{o.customer}</td><td>{o.due_date}</td>
                     <td><b>{o.item_code}</b> <span className="muted">{o.item_name}</span></td>
                     <td className="num">{fmt(o.quantity, 0)}</td>
@@ -87,7 +90,7 @@ export default function Orders() {
                     </td>
                   </tr>
                 ))}
-                {orders.data?.length === 0 && <tr><td colSpan={9} className="muted">Sipariş yok.</td></tr>}
+                {orders.data?.length === 0 && <tr><td colSpan={10} className="muted">Sipariş yok.</td></tr>}
               </tbody>
             </table>
           </div>
@@ -121,6 +124,7 @@ export default function Orders() {
 function OrderForm({ initial, onSaved, onCancel }: { initial: Order | null; onSaved: (o: Order, created: boolean) => void; onCancel: () => void }) {
   const [form, setForm] = useState<OrderIn>({
     order_no: initial?.order_no ?? "",
+    position_no: initial?.position_no ?? "",
     customer: initial?.customer ?? "",
     due_date: initial?.due_date ?? "",
     item_code: initial?.item_code ?? "",
@@ -142,7 +146,7 @@ function OrderForm({ initial, onSaved, onCancel }: { initial: Order | null; onSa
   const submit = async () => {
     setErr(""); setBusy(true);
     try {
-      const body = { ...form, order_no: form.order_no.trim(), item_code: form.item_code.trim() };
+      const body = { ...form, order_no: form.order_no.trim(), position_no: form.position_no.trim(), item_code: form.item_code.trim() };
       const o = initial ? await api.put<Order>(`/api/orders/${initial.id}`, body) : await api.post<Order>("/api/orders", body);
       onSaved(o, !initial);
     } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
@@ -152,6 +156,7 @@ function OrderForm({ initial, onSaved, onCancel }: { initial: Order | null; onSa
       <h2 style={{ marginTop: 0 }}>{initial ? `Siparişi düzenle — ${initial.order_no}` : "Yeni sipariş"}</h2>
       <div className="row" style={{ alignItems: "flex-end" }}>
         <label>Sipariş no *<input value={form.order_no} onChange={(e) => set("order_no", e.target.value)} placeholder="örn. SP-2026-001" autoFocus /></label>
+        <label title="Aynı sipariş numarasında birden fazla satır için pozisyon no">Poz no<input value={form.position_no} onChange={(e) => set("position_no", e.target.value)} placeholder="örn. 10" /></label>
         <label>Müşteri<input value={form.customer} onChange={(e) => set("customer", e.target.value)} /></label>
         <label>
           Stok kodu *

@@ -162,13 +162,13 @@ export default function ComparePanel({ start, weeks, wcIds, onApplied }: { start
             <table>
               <thead>
                 <tr>
-                  <th>Sipariş</th><th>Müşteri</th><th>Stok</th><th className="num">Miktar</th><th className="num">Ciro</th><th>Termin</th>
+                  <th>Sipariş</th><th>Poz</th><th>Müşteri</th><th>Stok</th><th className="num">Miktar</th><th className="num">Ciro</th><th>Termin</th>
                   <th colSpan={2} className="grp due">📅 Termine göre</th>
                   <th colSpan={2} className="grp rev">💰 Maksimum ciro</th>
                   <th>Fark</th>
                 </tr>
                 <tr className="sub">
-                  <th colSpan={6}></th>
+                  <th colSpan={7}></th>
                   <th>Bitiş</th><th>Durum</th>
                   <th>Bitiş</th><th>Durum</th>
                   <th></th>
@@ -177,7 +177,7 @@ export default function ComparePanel({ start, weeks, wcIds, onApplied }: { start
               <tbody>
                 {rows.map((r) => (
                   <tr key={r.order_id}>
-                    <td><b>{r.order_no}</b></td><td>{r.customer}</td><td>{r.item_code}</td>
+                    <td><b>{r.order_no}</b></td><td>{r.position_no || <span className="muted">—</span>}</td><td>{r.customer}</td><td>{r.item_code}</td>
                     <td className="num">{fmt(r.quantity, 0)}</td><td className="num">{r.revenue ? fmt(r.revenue, 0) : "—"}</td><td>{r.due_date}</td>
                     <td className="grp due">{r.due_end ?? "-"}{r.due_lateness !== null && r.due_lateness > 0 && <span className="muted"> (+{r.due_lateness}g)</span>}</td>
                     <td className="grp due"><PlanStatusBadge s={r.due_status} /></td>
@@ -186,7 +186,7 @@ export default function ComparePanel({ start, weeks, wcIds, onApplied }: { start
                     <td><DiffBadge d={r.diff} /></td>
                   </tr>
                 ))}
-                {rows.length === 0 && <tr><td colSpan={11} className="muted">Bu filtrede sipariş yok{filter === "diff" && " — iki plan tüm siparişlerde aynı sonucu veriyor"}.</td></tr>}
+                {rows.length === 0 && <tr><td colSpan={12} className="muted">Bu filtrede sipariş yok{filter === "diff" && " — iki plan tüm siparişlerde aynı sonucu veriyor"}.</td></tr>}
               </tbody>
             </table>
           </div>

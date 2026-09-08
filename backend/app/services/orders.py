@@ -7,7 +7,7 @@ from math import ceil
 
 from sqlalchemy.orm import Session, joinedload
 
-from app.models import Item, Order, PlanLine, ProductionActual, RoutingOperation, WorkCenter
+from app.models import Item, Order, PlanLine, ProductionActual, Reservation, RoutingOperation, Shipment, WorkCenter
 from app.schemas import (
     MergeGroup,
     MergeRequest,
@@ -44,9 +44,28 @@ def _open_orders(db: Session) -> list[Order]:
         db.query(Order)
         .options(joinedload(Order.item).joinedload(Item.operations).joinedload(RoutingOperation.work_center))
         .filter(Order.status == "open")
-        .order_by(Order.due_date, Order.order_no, Order.id)
+        .order_by(Order.due_date, Order.order_no, Order.position_no, Order.id)
         .all()
     )
+
+
+def _order_lookup_key(order_no: str, position_no: str, item_id: int) -> tuple:
+    """Siparis eslestirme: poz no varsa (siparis,poz); yoksa geriye uyum (siparis,stok)."""
+    on = order_no.strip().upper()
+    pos = (position_no or "").strip().upper()
+    if pos:
+        return ("pos", on, pos)
+    return ("item", on, item_id)
+
+
+def _index_orders(orders: list[Order]) -> dict[tuple, Order]:
+    idx: dict[tuple, Order] = {}
+    for o in orders:
+        if o.position_no:
+            idx[("pos", o.order_no.upper(), o.position_no.upper())] = o
+        else:
+            idx[("item", o.order_no.upper(), o.item_id)] = o
+    return idx
 
 
 # ---------------- Tekil siparis CRUD ----------------
@@ -57,11 +76,16 @@ def create_order(db: Session, data: OrderIn) -> Order:
         item = db.query(Item).filter(Item.code.ilike(data.item_code.strip())).first()
     if not item:
         raise ValueError(f"Stok kodu bulunamadi: {data.item_code} (once Stok/BOM/Rota ekranindan tanimlayin)")
-    dup = db.query(Order).filter(Order.order_no.ilike(data.order_no.strip()), Order.item_id == item.id).first()
-    if dup:
-        raise ValueError(f"{data.order_no} / {item.code} siparisi zaten var (id={dup.id}); duzenlemek icin mevcut satiri kullanin")
+    pos = (data.position_no or "").strip()
+    key = _order_lookup_key(data.order_no, pos, item.id)
+    idx = _index_orders(db.query(Order).filter(Order.status != "merged").all())
+    if key in idx:
+        dup = idx[key]
+        label = f"{data.order_no} / poz {pos}" if pos else f"{data.order_no} / {item.code}"
+        raise ValueError(f"{label} siparisi zaten var (id={dup.id}); duzenlemek icin mevcut satiri kullanin")
     o = Order(
         order_no=data.order_no.strip(),
+        position_no=pos,
         customer=data.customer.strip(),
         due_date=data.due_date,
         item_id=item.id,
@@ -82,6 +106,7 @@ def update_order(db: Session, o: Order, data: OrderIn) -> Order:
         raise ValueError(f"Stok kodu bulunamadi: {data.item_code}")
     item_changed = item.id != o.item_id
     o.order_no = data.order_no.strip()
+    o.position_no = (data.position_no or "").strip()
     o.customer = data.customer.strip()
     o.due_date = data.due_date
     o.item_id = item.id
@@ -94,6 +119,19 @@ def update_order(db: Session, o: Order, data: OrderIn) -> Order:
     db.commit()
     db.refresh(o)
     return o
+
+
+def bulk_delete_orders(db: Session, order_ids: list[int]) -> int:
+    """Acik siparisleri toplu siler; plan, rezervasyon ve sevk baglantilarini temizler."""
+    if not order_ids:
+        return 0
+    if db.query(Order).filter(Order.merged_into_id.in_(order_ids)).first():
+        raise ValueError("Silinecek siparislerden biri birlesik siparis; once birlestirmeyi geri alin")
+    db.query(PlanLine).filter(PlanLine.order_id.in_(order_ids)).delete(synchronize_session=False)
+    db.query(Reservation).filter(Reservation.order_id.in_(order_ids)).delete(synchronize_session=False)
+    db.query(Shipment).filter(Shipment.order_id.in_(order_ids)).delete(synchronize_session=False)
+    db.query(Order).filter(Order.merged_into_id.in_(order_ids)).update({Order.merged_into_id: None}, synchronize_session=False)
+    return db.query(Order).filter(Order.id.in_(order_ids)).delete(synchronize_session=False)
 
 
 # ---------------- Plan sonucu: siparis bitis tarihleri ----------------
@@ -182,6 +220,7 @@ def order_schedule(db: Session, wc_ids: list[int] | None, lines=None, orders: li
             OrderScheduleOut(
                 order_id=o.id,
                 order_no=o.order_no,
+                position_no=o.position_no or "",
                 customer=o.customer,
                 item_code=o.item.code,
                 item_name=o.item.name,
@@ -340,6 +379,7 @@ def order_progress(db: Session, wc_ids: list[int] | None, as_of: date | None = N
             OrderProgressOut(
                 order_id=o.id,
                 order_no=o.order_no,
+                position_no=o.position_no or "",
                 customer=o.customer,
                 item_code=o.item.code,
                 quantity=o.quantity,

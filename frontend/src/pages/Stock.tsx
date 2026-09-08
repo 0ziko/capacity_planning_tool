@@ -20,11 +20,13 @@ export default function Stock() {
   const { can } = useAuth();
   const canEdit = can("poweruser");
   const [tab, setTab] = useState<Tab>("free");
+  const [position, setPosition] = useState("");
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
   const summary = useAsync(() => api.get<StockRow[]>("/api/stock/summary"), []);
-  const reservations = useAsync(() => api.get<Reservation[]>("/api/stock/reservations"), []);
-  const orders = useAsync(() => api.get<OrderStockRow[]>("/api/stock/orders"), []);
+  const posQ = position.trim() || undefined;
+  const reservations = useAsync(() => api.get<Reservation[]>(`/api/stock/reservations${qs({ position: posQ })}`), [position]);
+  const orders = useAsync(() => api.get<OrderStockRow[]>(`/api/stock/orders${qs({ position: posQ })}`), [position]);
   const refresh = () => { summary.reload(); reservations.reload(); orders.reload(); };
 
   const run = async (fn: () => Promise<unknown>, okMsg?: string) => {
@@ -57,6 +59,7 @@ export default function Stock() {
       </p>
 
       <div className="panel row" style={{ alignItems: "center" }}>
+        <label>Poz no<input value={position} onChange={(e) => setPosition(e.target.value)} placeholder="filtre" style={{ width: 100 }} /></label>
         <span><b>{fmt(totFree, 0)}</b> serbest · <b>{fmt(totRes, 0)}</b> rezerve ({manualCount} manuel) · <b>{fmt(totDemand, 0)}</b> açık talep · {rows.filter((r) => r.free > 0).length} üründe serbest stok var</span>
         {canEdit && <button onClick={autoAll} disabled={totFree <= 0} title="Tüm ürünlerde serbest stoğu açık siparişlere termin sırasıyla rezerve et">⚡ Tümünü otomatik rezerve et</button>}
         {canEdit && <ReceiptForm onAdded={() => run(async () => null, "Depo girişi kaydedildi.")} onError={setErr} />}
@@ -81,7 +84,7 @@ export default function Stock() {
         onMove={(id, orderId) => run(() => api.patch(`/api/stock/reservations/${id}/move${qs({ order_id: orderId })}`), "Rezervasyon taşındı.")} />}
       {tab === "orders" && <OrdersTab rows={orders.data ?? []} summary={rows} canEdit={canEdit} onReserve={(orderId, itemId, qty) => run(() => api.post("/api/stock/reservations", { item_id: itemId, order_id: orderId, quantity: qty }), "Rezervasyon yapıldı.")} />}
       {tab === "receipts" && <Receipts canEdit={canEdit} onChanged={refresh} />}
-      {tab === "shipments" && <Shipments canEdit={canEdit} onChanged={refresh} />}
+      {tab === "shipments" && <Shipments canEdit={canEdit} onChanged={refresh} position={posQ} />}
     </>
   );
 }
@@ -138,18 +141,18 @@ function ManualReserve({ item, orders, onReserve, onClose }: { item: StockRow; o
       <h2 style={{ marginTop: 0 }}>Manuel rezervasyon — {item.item_code} <span className="muted" style={{ fontWeight: 400 }}>{item.item_name} · serbest {fmt(item.free, 0)}</span></h2>
       <div className="table-wrap">
         <table style={{ width: "auto" }}>
-          <thead><tr><th></th><th>Sipariş</th><th>Müşteri</th><th>Termin</th><th className="num">Miktar</th><th className="num">Rezerve</th><th className="num">Sevk</th><th className="num">Kalan</th><th>Plan bitişi</th></tr></thead>
+          <thead><tr><th></th><th>Sipariş</th><th>Poz</th><th>Müşteri</th><th>Termin</th><th className="num">Miktar</th><th className="num">Rezerve</th><th className="num">Sevk</th><th className="num">Kalan</th><th>Plan bitişi</th></tr></thead>
           <tbody>
             {orders.map((x) => (
               <tr key={x.order_id} style={{ cursor: "pointer", background: orderId === x.order_id ? "#eef2ff" : undefined }} onClick={() => pickOrder(x.order_id)}>
                 <td><input type="radio" checked={orderId === x.order_id} onChange={() => pickOrder(x.order_id)} /></td>
-                <td><b>{x.order_no}</b></td><td>{x.customer}</td><td>{x.due_date}</td>
+                <td><b>{x.order_no}</b></td><td>{x.position_no || <span className="muted">—</span>}</td><td>{x.customer}</td><td>{x.due_date}</td>
                 <td className="num">{fmt(x.quantity, 0)}</td><td className="num">{fmt(x.reserved, 0)}</td><td className="num">{fmt(x.shipped, 0)}</td>
                 <td className="num" style={{ fontWeight: 600 }}>{fmt(x.remaining, 0)}</td>
                 <td className="muted">{x.planned_end ?? "-"}</td>
               </tr>
             ))}
-            {orders.length === 0 && <tr><td colSpan={9} className="muted">Bu ürün için kalan ihtiyacı olan açık sipariş yok.</td></tr>}
+            {orders.length === 0 && <tr><td colSpan={10} className="muted">Bu ürün için kalan ihtiyacı olan açık sipariş yok.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -176,21 +179,21 @@ function Reservations({ rows, orders, canEdit, onShip, onRelease, onMove }: {
   const [note, setNote] = useState("");
   const [target, setTarget] = useState<number | "">("");
   const [filter, setFilter] = useState("");
-  const shown = rows.filter((r) => !filter || r.item_code.toLowerCase().includes(filter.toLowerCase()) || r.order_no.toLowerCase().includes(filter.toLowerCase()) || r.customer.toLowerCase().includes(filter.toLowerCase()));
+  const shown = rows.filter((r) => !filter || r.item_code.toLowerCase().includes(filter.toLowerCase()) || r.order_no.toLowerCase().includes(filter.toLowerCase()) || (r.position_no || "").toLowerCase().includes(filter.toLowerCase()) || r.customer.toLowerCase().includes(filter.toLowerCase()));
   return (
     <>
       <div className="row" style={{ margin: "8px 0" }}>
-        <label>Ara<input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="stok / sipariş / müşteri" /></label>
+        <label>Ara<input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="stok / sipariş / poz / müşteri" /></label>
         <span className="muted">Rezervasyon = depodaki ürünün bir siparişe ayrılması. Sevk edilince stoktan düşer; kaldırılınca serbest stoğa döner.</span>
       </div>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>Stok</th><th>Sipariş</th><th>Müşteri</th><th>Termin</th><th className="num">Sipariş miktarı</th><th className="num">Rezerve</th><th>Kaynak</th><th>Not</th><th>Oluşturan</th><th></th></tr></thead>
+          <thead><tr><th>Stok</th><th>Sipariş</th><th>Poz</th><th>Müşteri</th><th>Termin</th><th className="num">Sipariş miktarı</th><th className="num">Rezerve</th><th>Kaynak</th><th>Not</th><th>Oluşturan</th><th></th></tr></thead>
           <tbody>
             {shown.map((r) => (
               <tr key={r.id}>
                 <td><b>{r.item_code}</b> <span className="muted">{r.item_name}</span></td>
-                <td><b>{r.order_no}</b></td><td>{r.customer}</td><td>{r.due_date}</td>
+                <td><b>{r.order_no}</b></td><td>{r.position_no || <span className="muted">—</span>}</td><td>{r.customer}</td><td>{r.due_date}</td>
                 <td className="num">{fmt(r.order_qty, 0)}</td><td className="num" style={{ fontWeight: 600 }}>{fmt(r.quantity, 0)}</td>
                 <td>{r.source === "manual" ? <span className="badge ok">manuel</span> : <span className="badge muted" title="Termin sırasına göre otomatik; manuel rezervasyona yer açmak için çözülebilir">otomatik</span>}</td>
                 <td className="muted">{r.note}</td><td className="muted">{r.created_by}</td>
@@ -203,13 +206,13 @@ function Reservations({ rows, orders, canEdit, onShip, onRelease, onMove }: {
                 </td>
               </tr>
             ))}
-            {shown.length === 0 && <tr><td colSpan={10} className="muted">Rezervasyon yok. Serbest stok sekmesinden manuel ya da otomatik rezervasyon yapın.</td></tr>}
+            {shown.length === 0 && <tr><td colSpan={11} className="muted">Rezervasyon yok. Serbest stok sekmesinden manuel ya da otomatik rezervasyon yapın.</td></tr>}
           </tbody>
         </table>
       </div>
       {ship && (
         <div className="panel row" style={{ alignItems: "flex-end", borderLeft: "4px solid var(--ok)" }}>
-          <span><b>Sevk:</b> {ship.item_code} → {ship.order_no} ({ship.customer}) · rezerve {fmt(ship.quantity, 0)}</span>
+          <span><b>Sevk:</b> {ship.item_code} → {ship.order_no}{ship.position_no ? ` / poz ${ship.position_no}` : ""} ({ship.customer}) · rezerve {fmt(ship.quantity, 0)}</span>
           <label>Miktar<input type="number" min={0} max={ship.quantity} step={1} value={qty} onChange={(e) => setQty(e.target.value)} style={{ width: 110 }} /></label>
           <label>Sevk tarihi<input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></label>
           <label>Not<input value={note} onChange={(e) => setNote(e.target.value)} placeholder="irsaliye no vb." /></label>
@@ -224,7 +227,7 @@ function Reservations({ rows, orders, canEdit, onShip, onRelease, onMove }: {
             <select value={target} onChange={(e) => setTarget(Number(e.target.value))}>
               <option value="">Seçin</option>
               {orders.filter((o) => o.item_id === move.item_id && o.order_id !== move.order_id && o.remaining > 0).map((o) => (
-                <option key={o.order_id} value={o.order_id}>{o.order_no} · {o.customer} · termin {o.due_date} · kalan {fmt(o.remaining, 0)}</option>
+                <option key={o.order_id} value={o.order_id}>{o.order_no}{o.position_no ? ` / poz ${o.position_no}` : ""} · {o.customer} · termin {o.due_date} · kalan {fmt(o.remaining, 0)}</option>
               ))}
             </select>
           </label>
@@ -250,14 +253,14 @@ function OrdersTab({ rows, summary, canEdit, onReserve }: { rows: OrderStockRow[
       </div>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>Sipariş</th><th>Müşteri</th><th>Termin</th><th>Stok</th><th className="num">Miktar</th><th className="num">Rezerve</th><th className="num">Sevk</th><th className="num">Kalan</th><th className="num">Serbest stok</th><th>Plan bitişi</th><th>Durum</th><th></th></tr></thead>
+          <thead><tr><th>Sipariş</th><th>Poz</th><th>Müşteri</th><th>Termin</th><th>Stok</th><th className="num">Miktar</th><th className="num">Rezerve</th><th className="num">Sevk</th><th className="num">Kalan</th><th className="num">Serbest stok</th><th>Plan bitişi</th><th>Durum</th><th></th></tr></thead>
           <tbody>
             {shown.map((r) => {
               const free = freeBy.get(r.item_id) ?? 0;
               const late = r.planned_end && r.planned_end > r.due_date;
               return (
                 <tr key={r.order_id}>
-                  <td><b>{r.order_no}</b></td><td>{r.customer}</td><td>{r.due_date}</td>
+                  <td><b>{r.order_no}</b></td><td>{r.position_no || <span className="muted">—</span>}</td><td>{r.customer}</td><td>{r.due_date}</td>
                   <td>{r.item_code} <span className="muted">{r.item_name}</span></td>
                   <td className="num">{fmt(r.quantity, 0)}</td><td className="num">{fmt(r.reserved, 0)}</td><td className="num">{fmt(r.shipped, 0)}</td>
                   <td className="num" style={{ fontWeight: 600 }}>{fmt(r.remaining, 0)}</td>
@@ -273,7 +276,7 @@ function OrdersTab({ rows, summary, canEdit, onReserve }: { rows: OrderStockRow[
                 </tr>
               );
             })}
-            {shown.length === 0 && <tr><td colSpan={12} className="muted">Açık sipariş yok.</td></tr>}
+            {shown.length === 0 && <tr><td colSpan={13} className="muted">Açık sipariş yok.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -347,8 +350,8 @@ function Receipts({ canEdit, onChanged }: { canEdit: boolean; onChanged: () => v
 }
 
 // ---------------- Sevkler ----------------
-function Shipments({ canEdit, onChanged }: { canEdit: boolean; onChanged: () => void }) {
-  const rows = useAsync(() => api.get<Shipment[]>("/api/stock/shipments"), []);
+function Shipments({ canEdit, onChanged, position }: { canEdit: boolean; onChanged: () => void; position?: string }) {
+  const rows = useAsync(() => api.get<Shipment[]>(`/api/stock/shipments${qs({ position })}`), [position]);
   const [err, setErr] = useState("");
   const undo = async (s: Shipment) => {
     if (!confirm(`${s.order_no} · ${fmt(s.quantity, 0)} adet sevk geri alınsın mı? Stok geri gelir ve aynı siparişe manuel rezervasyon olarak bağlanır.`)) return;
@@ -361,16 +364,16 @@ function Shipments({ canEdit, onChanged }: { canEdit: boolean; onChanged: () => 
       <ErrorText err={err || rows.err} />
       <div className="table-wrap">
         <table>
-          <thead><tr><th>Tarih</th><th>Stok</th><th>Sipariş</th><th>Müşteri</th><th className="num">Miktar</th><th>Not</th><th>Oluşturan</th><th></th></tr></thead>
+          <thead><tr><th>Tarih</th><th>Stok</th><th>Sipariş</th><th>Poz</th><th>Müşteri</th><th className="num">Miktar</th><th>Not</th><th>Oluşturan</th><th></th></tr></thead>
           <tbody>
             {rows.data?.map((s) => (
               <tr key={s.id}>
-                <td>{s.ship_date}</td><td><b>{s.item_code}</b></td><td><b>{s.order_no}</b></td><td>{s.customer}</td><td className="num">{fmt(s.quantity, 0)}</td>
+                <td>{s.ship_date}</td><td><b>{s.item_code}</b></td><td><b>{s.order_no}</b></td><td>{s.position_no || <span className="muted">—</span>}</td><td>{s.customer}</td><td className="num">{fmt(s.quantity, 0)}</td>
                 <td className="muted">{s.note}</td><td className="muted">{s.created_by}</td>
                 <td>{canEdit && <button className="secondary small" onClick={() => undo(s)}>Geri al</button>}</td>
               </tr>
             ))}
-            {rows.data && rows.data.length === 0 && <tr><td colSpan={8} className="muted">Sevk kaydı yok.</td></tr>}
+            {rows.data && rows.data.length === 0 && <tr><td colSpan={9} className="muted">Sevk kaydı yok.</td></tr>}
           </tbody>
         </table>
       </div>

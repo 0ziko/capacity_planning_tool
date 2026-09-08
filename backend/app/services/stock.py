@@ -106,7 +106,7 @@ def stock_summary(db: Session, only_with_stock: bool = False) -> list[StockRow]:
     return rows
 
 
-def order_rows(db: Session, item_id: int | None = None, include_closed: bool = False) -> list[OrderStockRow]:
+def order_rows(db: Session, item_id: int | None = None, include_closed: bool = False, position: str | None = None) -> list[OrderStockRow]:
     q = db.query(Order).options(joinedload(Order.item))
     if not include_closed:
         q = q.filter(Order.status == "open")
@@ -114,7 +114,9 @@ def order_rows(db: Session, item_id: int | None = None, include_closed: bool = F
         q = q.filter(Order.status.in_(["open", "closed"]))
     if item_id:
         q = q.filter(Order.item_id == item_id)
-    orders = q.order_by(Order.due_date, Order.order_no).all()
+    if position and position.strip():
+        q = q.filter(Order.position_no.ilike(f"%{position.strip()}%"))
+    orders = q.order_by(Order.due_date, Order.order_no, Order.position_no).all()
     ids = [o.id for o in orders]
     res = _sum_by_order(db, Reservation, ids)
     shp = _sum_by_order(db, Shipment, ids)
@@ -125,6 +127,7 @@ def order_rows(db: Session, item_id: int | None = None, include_closed: bool = F
             OrderStockRow(
                 order_id=o.id,
                 order_no=o.order_no,
+                position_no=o.position_no or "",
                 customer=o.customer,
                 due_date=o.due_date,
                 item_id=o.item_id,
@@ -307,18 +310,21 @@ def _res_out(r: Reservation) -> ReservationOut:
     o = r.order
     return ReservationOut(
         id=r.id, item_id=r.item_id, item_code=r.item.code if r.item else "", item_name=r.item.name if r.item else "",
-        order_id=r.order_id, order_no=o.order_no if o else "", customer=o.customer if o else "", due_date=o.due_date if o else date.today(),
+        order_id=r.order_id, order_no=o.order_no if o else "", position_no=(o.position_no or "") if o else "", customer=o.customer if o else "", due_date=o.due_date if o else date.today(),
         order_qty=o.quantity if o else 0.0, quantity=r.quantity, source=r.source, note=r.note, created_by=r.created_by, created_at=r.created_at,
     )
 
 
-def list_reservations(db: Session, item_id: int | None = None, order_id: int | None = None) -> list[ReservationOut]:
+def list_reservations(db: Session, item_id: int | None = None, order_id: int | None = None, position: str | None = None) -> list[ReservationOut]:
     q = db.query(Reservation).options(joinedload(Reservation.item), joinedload(Reservation.order))
     if item_id:
         q = q.filter(Reservation.item_id == item_id)
     if order_id:
         q = q.filter(Reservation.order_id == order_id)
     rows = q.all()
+    if position and position.strip():
+        p = position.strip().lower()
+        rows = [r for r in rows if r.order and p in (r.order.position_no or "").lower()]
     rows.sort(key=lambda r: (r.order.due_date if r.order else date.max, r.item.code if r.item else "", r.id))
     return [_res_out(r) for r in rows]
 
@@ -442,18 +448,22 @@ def auto_reserve(db: Session, item_ids: list[int] | None, username: str) -> Auto
 def _ship_out(s: Shipment) -> ShipmentOut:
     o = s.order
     return ShipmentOut(
-        id=s.id, item_id=s.item_id, item_code=s.item.code if s.item else "", order_id=s.order_id, order_no=o.order_no if o else "",
+        id=s.id, item_id=s.item_id, item_code=s.item.code if s.item else "", order_id=s.order_id, order_no=o.order_no if o else "", position_no=(o.position_no or "") if o else "",
         customer=o.customer if o else "", ship_date=s.ship_date, quantity=s.quantity, note=s.note, created_by=s.created_by,
     )
 
 
-def list_shipments(db: Session, item_id: int | None = None, order_id: int | None = None, limit: int = 500) -> list[ShipmentOut]:
+def list_shipments(db: Session, item_id: int | None = None, order_id: int | None = None, position: str | None = None, limit: int = 500) -> list[ShipmentOut]:
     q = db.query(Shipment).options(joinedload(Shipment.item), joinedload(Shipment.order))
     if item_id:
         q = q.filter(Shipment.item_id == item_id)
     if order_id:
         q = q.filter(Shipment.order_id == order_id)
-    return [_ship_out(s) for s in q.order_by(Shipment.ship_date.desc(), Shipment.id.desc()).limit(limit).all()]
+    rows = q.order_by(Shipment.ship_date.desc(), Shipment.id.desc()).limit(limit).all()
+    if position and position.strip():
+        p = position.strip().lower()
+        rows = [s for s in rows if s.order and p in (s.order.position_no or "").lower()]
+    return [_ship_out(s) for s in rows]
 
 
 def ship_reservation(db: Session, reservation_id: int, quantity: float | None, ship_date: date | None, note: str, username: str) -> Shipment:

@@ -223,12 +223,12 @@ def order_progress_xlsx(as_of: date | None = None, work_center_ids: list[int] | 
     content = excel.build_report(
         {
             "Sipariş İlerleme": (
-                ["Sipariş No", "Müşteri", "Stok Kodu", "Miktar", "Termin", "İhtiyaç (saat)", "Kazanılan (saat)", "Çıkan Miktar", "İlerleme %", "Durum", "İlk Üretim", "Son Üretim"],
-                [[r.order_no, r.customer, r.item_code, r.quantity, r.due_date, r.required_hours, r.earned_hours, r.produced_qty, r.pct, r.status, r.first_prod_date, r.last_prod_date] for r in rows],
+                ["Sipariş No", "Poz No", "Müşteri", "Stok Kodu", "Miktar", "Termin", "İhtiyaç (saat)", "Kazanılan (saat)", "Çıkan Miktar", "İlerleme %", "Durum", "İlk Üretim", "Son Üretim"],
+                [[r.order_no, r.position_no, r.customer, r.item_code, r.quantity, r.due_date, r.required_hours, r.earned_hours, r.produced_qty, r.pct, r.status, r.first_prod_date, r.last_prod_date] for r in rows],
             ),
             "Operasyon Detayı": (
-                ["Sipariş No", "Stok Kodu", "Op. Sıra", "Operasyon", "İş Merkezi", "İhtiyaç (saat)", "Planlanan (saat)", "Üretilen Miktar", "Kazanılan (saat)", "İlerleme %"],
-                [[r.order_no, r.item_code, o.operation_seq, o.operation_name, o.work_center_code, o.required_hours, o.planned_hours, o.produced_qty, o.earned_hours, o.pct] for r in rows for o in r.ops],
+                ["Sipariş No", "Poz No", "Stok Kodu", "Op. Sıra", "Operasyon", "İş Merkezi", "İhtiyaç (saat)", "Planlanan (saat)", "Üretilen Miktar", "Kazanılan (saat)", "İlerleme %"],
+                [[r.order_no, r.position_no, r.item_code, o.operation_seq, o.operation_name, o.work_center_code, o.required_hours, o.planned_hours, o.produced_qty, o.earned_hours, o.pct] for r in rows for o in r.ops],
             ),
         }
     )

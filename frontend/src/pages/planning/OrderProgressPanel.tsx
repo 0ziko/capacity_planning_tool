@@ -58,7 +58,7 @@ export default function OrderProgressPanel({ wcIds }: { wcIds: number[] }) {
             <table>
               <thead>
                 <tr>
-                  <th></th><th>Sipariş</th><th>Müşteri</th><th>Stok</th><th className="num">Miktar</th><th>Termin</th>
+                  <th></th><th>Sipariş</th><th>Poz</th><th>Müşteri</th><th>Stok</th><th className="num">Miktar</th><th>Termin</th>
                   <th className="num">İhtiyaç (saat)</th><th className="num">Kazanılan (saat)</th><th className="num">Çıkan miktar</th>
                   <th style={{ minWidth: 160 }}>İlerleme</th><th>İlk / son üretim</th><th>Durum</th>
                 </tr>
@@ -68,7 +68,7 @@ export default function OrderProgressPanel({ wcIds }: { wcIds: number[] }) {
                   <>
                     <tr key={r.order_id} onClick={() => setOpen(open === r.order_id ? null : r.order_id)} style={{ cursor: "pointer", background: open === r.order_id ? "#e3f2fd" : undefined }}>
                       <td className="muted">{open === r.order_id ? "▾" : "▸"}</td>
-                      <td><b>{r.order_no}</b></td><td>{r.customer}</td><td>{r.item_code}</td>
+                      <td><b>{r.order_no}</b></td><td>{r.position_no || <span className="muted">—</span>}</td><td>{r.customer}</td><td>{r.item_code}</td>
                       <td className="num">{fmt(r.quantity, 0)}</td><td>{r.due_date}</td>
                       <td className="num">{fmt(r.required_hours)}</td><td className="num">{fmt(r.earned_hours)}</td>
                       <td className="num">{fmt(r.produced_qty, 0)}</td>
@@ -79,7 +79,7 @@ export default function OrderProgressPanel({ wcIds }: { wcIds: number[] }) {
                     {open === r.order_id && (
                       <tr key={`${r.order_id}-ops`}>
                         <td></td>
-                        <td colSpan={11} style={{ background: "#f8fafc" }}>
+                        <td colSpan={12} style={{ background: "#f8fafc" }}>
                           <table style={{ width: "auto", margin: "4px 0" }}>
                             <thead><tr><th>Op.</th><th>İş Merkezi</th><th className="num">İhtiyaç (saat)</th><th className="num">Planlanan (saat)</th><th className="num">Üretilen</th><th className="num">Kazanılan (saat)</th><th style={{ minWidth: 160 }}>İlerleme</th></tr></thead>
                             <tbody>

@@ -11,7 +11,7 @@ from typing import Any, Callable
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.models import (
     BomLine,
@@ -33,7 +33,7 @@ from app.models import (
     WorkCenterShift,
     WorkCenterWeek,
 )
-from app.schemas import ImportResult
+from app.schemas import ImportResult, OrderImportChangePreview, OrderImportPreview, OrderImportRowPreview
 
 TR_MAP = str.maketrans("çğıöşüÇĞİÖŞÜ", "cgiosuCGIOSU")
 
@@ -143,13 +143,14 @@ TEMPLATES: dict[str, dict] = {
         "title": "Siparişler",
         "columns": [
             ("order_no", "Sipariş No", ["siparis", "siparisno", "belgeno"]),
+            ("position_no", "Poz No", ["poz", "pozno", "pozisyon", "pozisyonno"]),
             ("customer", "Müşteri", ["musteriadi", "cari"]),
             ("due_date", "Termin", ["termintarihi", "teslimtarihi", "tarih"]),
             ("item_code", "Stok Kodu", ["stokkodu", "malzeme"]),
             ("quantity", "Miktar", ["adet"]),
             ("unit_price", "Birim Fiyat", ["fiyat", "birimfiyat", "satisfiyati", "birimsatisfiyati"]),
         ],
-        "example": ["SIP-2026-001", "ABC Otel", "2026-10-15", "MAM-0001", 40, 1250],
+        "example": ["SIP-2026-001", "10", "ABC Otel", "2026-10-15", "MAM-0001", 40, 1250],
         "required": ["order_no", "due_date", "item_code", "quantity"],
     },
     "production": {
@@ -610,39 +611,177 @@ def import_routing(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
     return ins, upd, errs
 
 
-def import_orders(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
-    """Ayni siparis no + stok kodu varsa gunceller."""
-    ins = upd = 0
-    errs = []
+def _order_preview_from_row(r: dict, item_code: str, order_id: int | None = None) -> OrderImportRowPreview:
+    due = None
+    try:
+        due = _date(r.get("due_date"))
+    except Exception:  # noqa: BLE001
+        pass
+    return OrderImportRowPreview(
+        order_id=order_id,
+        order_no=_str(r.get("order_no")),
+        position_no=_str(r.get("position_no")),
+        item_code=item_code,
+        customer=_str(r.get("customer")),
+        due_date=due,
+        quantity=_float(r.get("quantity")),
+        unit_price=_float(r.get("unit_price"), None),
+        excel_row=r.get("_row"),
+    )
+
+
+def _order_preview_from_model(o: Order) -> OrderImportRowPreview:
+    return OrderImportRowPreview(
+        order_id=o.id,
+        order_no=o.order_no,
+        position_no=o.position_no or "",
+        item_code=o.item.code if o.item else "",
+        customer=o.customer,
+        due_date=o.due_date,
+        quantity=o.quantity,
+        unit_price=o.unit_price,
+    )
+
+
+def preview_orders_import(db: Session, rows: list[dict]) -> OrderImportPreview:
+    """Dosyadaki acik siparis listesi ile sistemdeki acik siparisleri karsilastirir."""
+    from app.services.orders import _index_orders, _order_lookup_key
+
     items = _item_lookup(db)
-    existing: dict[tuple[str, int], Order] = {(o.order_no.upper(), o.item_id): o for o in db.query(Order).filter(Order.status != "merged").all()}
+    parse_errors: list[str] = []
+    file_keys: dict[tuple, OrderImportRowPreview] = {}
+
     for r in rows:
         try:
             order_no = _str(r.get("order_no"))
             if not order_no:
                 raise ValueError("Siparis no bos")
+            pos = _str(r.get("position_no"))
+            code = _str(r.get("item_code"))
+            item = items.get(code.upper())
+            if not item:
+                raise ValueError(f"Stok kodu bulunamadi: {code}")
+            if _float(r.get("quantity")) is None:
+                raise ValueError("Miktar bos")
+            _date(r.get("due_date"))
+            key = _order_lookup_key(order_no, pos, item.id)
+            file_keys[key] = _order_preview_from_row(r, item.code)
+        except Exception as e:  # noqa: BLE001
+            parse_errors.append(f"Satir {r.get('_row', '?')}: {e}")
+
+    open_orders = (
+        db.query(Order)
+        .options(joinedload(Order.item))
+        .filter(Order.status == "open")
+        .all()
+    )
+    system_idx = _index_orders(open_orders)
+    file_key_set = set(file_keys.keys())
+    system_key_set = set(system_idx.keys())
+
+    only_in_system = [_order_preview_from_model(system_idx[k]) for k in sorted(system_key_set - file_key_set, key=str)]
+    only_in_file = [file_keys[k] for k in sorted(file_key_set - system_key_set, key=str)]
+
+    updated: list[OrderImportChangePreview] = []
+    unchanged = 0
+    for key in file_key_set & system_key_set:
+        o = system_idx[key]
+        fp = file_keys[key]
+        changes: list[str] = []
+        file_due = fp.due_date
+        if file_due and file_due != o.due_date:
+            changes.append(f"termin: {o.due_date} → {file_due}")
+        if fp.quantity is not None and abs(fp.quantity - o.quantity) > 1e-9:
+            changes.append(f"miktar: {o.quantity:g} → {fp.quantity:g}")
+        if fp.customer and fp.customer != o.customer:
+            changes.append(f"musteri: {o.customer or '—'} → {fp.customer}")
+        if fp.unit_price is not None and abs(fp.unit_price - (o.unit_price or 0)) > 1e-9:
+            changes.append(f"birim fiyat: {o.unit_price or 0:g} → {fp.unit_price:g}")
+        if changes:
+            updated.append(
+                OrderImportChangePreview(
+                    order_id=o.id,
+                    order_no=fp.order_no,
+                    position_no=fp.position_no,
+                    item_code=fp.item_code,
+                    customer=fp.customer,
+                    due_date=fp.due_date,
+                    quantity=fp.quantity,
+                    unit_price=fp.unit_price,
+                    excel_row=fp.excel_row,
+                    changes=changes,
+                )
+            )
+        else:
+            unchanged += 1
+
+    return OrderImportPreview(
+        parse_errors=parse_errors,
+        only_in_system=only_in_system,
+        only_in_file=only_in_file,
+        updated=updated,
+        unchanged_count=unchanged,
+        file_row_count=len(rows),
+        system_open_count=len(open_orders),
+    )
+
+
+def import_orders(db: Session, rows: list[dict], remove_missing: bool = False) -> tuple[int, int, int, list[str]]:
+    """Ayni siparis+poz (veya poz bos ise siparis+stok) varsa gunceller; istege bagli listede olmayan acik siparisleri siler."""
+    from app.services.orders import _index_orders, _order_lookup_key, bulk_delete_orders
+
+    ins = upd = removed = 0
+    errs = []
+    items = _item_lookup(db)
+    existing = _index_orders(db.query(Order).filter(Order.status != "merged").all())
+    file_keys: set[tuple] = set()
+    for r in rows:
+        try:
+            order_no = _str(r.get("order_no"))
+            if not order_no:
+                raise ValueError("Siparis no bos")
+            pos = _str(r.get("position_no"))
             item = _get_or_create_item(db, items, _str(r.get("item_code")))
             qty = _float(r.get("quantity"))
             if qty is None:
                 raise ValueError("Miktar bos")
-            o = existing.get((order_no.upper(), item.id))
+            key = _order_lookup_key(order_no, pos, item.id)
+            file_keys.add(key)
+            o = existing.get(key)
             if not o:
-                o = Order(order_no=order_no, item_id=item.id, quantity=qty, due_date=_date(r.get("due_date")))
+                o = Order(order_no=order_no, position_no=pos, item_id=item.id, quantity=qty, due_date=_date(r.get("due_date")))
                 db.add(o)
-                existing[(order_no.upper(), item.id)] = o
+                existing[key] = o
                 ins += 1
             else:
                 upd += 1
             o.customer = _str(r.get("customer")) or o.customer
             o.due_date = _date(r.get("due_date"))
             o.quantity = qty
+            o.position_no = pos
             price = _float(r.get("unit_price"), None)
             if price is not None:
                 o.unit_price = price
             o.status = "open"
         except Exception as e:  # noqa: BLE001
             errs.append(f"Satir {r['_row']}: {e}")
-    return ins, upd, errs
+
+    if remove_missing and not errs:
+        to_remove: list[int] = []
+        open_orders = db.query(Order).filter(Order.status == "open").all()
+        for o in open_orders:
+            if o.position_no:
+                key = ("pos", o.order_no.upper(), o.position_no.upper())
+            else:
+                key = ("item", o.order_no.upper(), o.item_id)
+            if key not in file_keys:
+                to_remove.append(o.id)
+        if to_remove:
+            try:
+                removed = bulk_delete_orders(db, to_remove)
+            except ValueError as e:
+                errs.append(str(e))
+    return ins, upd, removed, errs
 
 
 def import_production(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
@@ -867,20 +1006,24 @@ IMPORTERS: dict[str, Callable[[Session, list[dict]], tuple[int, int, list[str]]]
 }
 
 
-def run_import(db: Session, kind: str, content: bytes, filename: str, username: str) -> ImportResult:
+def run_import(db: Session, kind: str, content: bytes, filename: str, username: str, remove_missing: bool = False) -> ImportResult:
     if kind not in IMPORTERS:
         raise ValueError(f"Bilinmeyen import turu: {kind}")
     rows, errs = read_rows(content, kind)
-    ins = upd = 0
+    ins = upd = removed = 0
     if not errs:
-        ins, upd, errs = IMPORTERS[kind](db, rows)
+        if kind == "orders":
+            ins, upd, removed, errs = import_orders(db, rows, remove_missing=remove_missing)
+        else:
+            ins, upd, imp_errs = IMPORTERS[kind](db, rows)
+            errs = imp_errs
     if kind == "production" and not errs:
         from app.services.stock import sync_progress_receipts
 
         sync_progress_receipts(db, username=username)
     db.add(ImportLog(kind=kind, filename=filename, username=username, inserted=ins, updated=upd, errors="\n".join(errs)[:10000]))
     db.commit()
-    return ImportResult(kind=kind, inserted=ins, updated=upd, errors=errs)
+    return ImportResult(kind=kind, inserted=ins, updated=upd, removed=removed, errors=errs)
 
 
 # ---- Export ----
@@ -924,7 +1067,7 @@ def build_backup(db: Session) -> bytes:
     _ws_from_rows(wb, "Rota", [c[1] for c in TEMPLATES["routing"]["columns"]],
                   [[item_code.get(o.item_id), o.seq, o.operation_name, wc_code.get(o.work_center_id), o.cycle_time_sec, o.setup_time_min, o.semi_finished_code] for o in db.query(RoutingOperation).order_by(RoutingOperation.item_id, RoutingOperation.seq)])
     _ws_from_rows(wb, "Siparişler", [c[1] for c in TEMPLATES["orders"]["columns"]] + ["Durum"],
-                  [[o.order_no, o.customer, o.due_date, item_code.get(o.item_id), o.quantity, o.unit_price, o.status] for o in db.query(Order).order_by(Order.due_date, Order.order_no)])
+                  [[o.order_no, o.position_no or "", o.customer, o.due_date, item_code.get(o.item_id), o.quantity, o.unit_price, o.status] for o in db.query(Order).order_by(Order.due_date, Order.order_no, Order.position_no)])
     _ws_from_rows(wb, "Plan", ["Hafta", "İş Merkezi Kodu", "Sipariş No", "Stok Kodu", "Operasyon Id", "Planlanan Saat", "Planlanan Miktar", "Mod", "Oluşturan"],
                   [[p.week_start, wc_code.get(p.work_center_id), p.order.order_no, item_code.get(p.order.item_id), p.operation_id, p.planned_hours, p.planned_qty, p.mode, p.created_by] for p in db.query(PlanLine).order_by(PlanLine.week_start, PlanLine.work_center_id)])
     _ws_from_rows(wb, "Günlük Üretim", [c[1] for c in TEMPLATES["production"]["columns"]] + ["Kazanılan Saat"],
@@ -938,10 +1081,11 @@ def build_backup(db: Session) -> bytes:
     _ws_from_rows(wb, "Depo Girişi", [c[1] for c in TEMPLATES["stock_receipts"]["columns"]],
                   [[s.receipt_date, item_code.get(s.item_id), s.quantity, s.lot, s.note] for s in db.query(StockReceipt).order_by(StockReceipt.receipt_date, StockReceipt.id)])
     order_no = {o.id: o.order_no for o in db.query(Order).all()}
-    _ws_from_rows(wb, "Rezervasyonlar", ["Stok Kodu", "Sipariş No", "Miktar", "Kaynak", "Not", "Oluşturan", "Tarih"],
-                  [[item_code.get(r.item_id), order_no.get(r.order_id), r.quantity, "manuel" if r.source == "manual" else "otomatik", r.note, r.created_by, r.created_at] for r in db.query(Reservation).order_by(Reservation.id)])
-    _ws_from_rows(wb, "Sevkler", ["Tarih", "Stok Kodu", "Sipariş No", "Miktar", "Not", "Oluşturan"],
-                  [[s.ship_date, item_code.get(s.item_id), order_no.get(s.order_id), s.quantity, s.note, s.created_by] for s in db.query(Shipment).order_by(Shipment.ship_date, Shipment.id)])
+    order_pos = {o.id: o.position_no or "" for o in db.query(Order).all()}
+    _ws_from_rows(wb, "Rezervasyonlar", ["Stok Kodu", "Sipariş No", "Poz No", "Miktar", "Kaynak", "Not", "Oluşturan", "Tarih"],
+                  [[item_code.get(r.item_id), order_no.get(r.order_id), order_pos.get(r.order_id), r.quantity, "manuel" if r.source == "manual" else "otomatik", r.note, r.created_by, r.created_at] for r in db.query(Reservation).order_by(Reservation.id)])
+    _ws_from_rows(wb, "Sevkler", ["Tarih", "Stok Kodu", "Sipariş No", "Poz No", "Miktar", "Not", "Oluşturan"],
+                  [[s.ship_date, item_code.get(s.item_id), order_no.get(s.order_id), order_pos.get(s.order_id), s.quantity, s.note, s.created_by] for s in db.query(Shipment).order_by(Shipment.ship_date, Shipment.id)])
     _ws_from_rows(wb, "Kullanıcılar", ["Kullanıcı", "Ad Soyad", "Rol", "Aktif"],
                   [[u.username, u.full_name, u.role, "E" if u.is_active else "H"] for u in db.query(User).order_by(User.username)])
     _ws_from_rows(wb, "Import Logu", ["Tarih", "Tür", "Dosya", "Kullanıcı", "Eklenen", "Güncellenen", "Hatalar"],

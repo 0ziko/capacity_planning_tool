@@ -179,7 +179,7 @@ export default function Planning() {
       {can("poweruser") && <ManualAdd wcs={wcs} weekList={weekList} onAdded={refresh} />}
       <div className="table-wrap">
         <table>
-          <thead><tr><th>Hafta</th><th>İş Merkezi</th><th>Sipariş</th><th>Müşteri</th><th>Termin</th><th>Stok</th><th>Op.</th><th className="num">Saat</th><th className="num">Miktar</th><th>Mod</th><th></th></tr></thead>
+          <thead><tr><th>Hafta</th><th>İş Merkezi</th><th>Sipariş</th><th>Poz</th><th>Müşteri</th><th>Termin</th><th>Stok</th><th>Op.</th><th className="num">Saat</th><th className="num">Miktar</th><th>Mod</th><th></th></tr></thead>
           <tbody>
             {shownLines.map((l) => (
               <tr key={l.id}>
@@ -190,7 +190,7 @@ export default function Planning() {
                     </select>
                   ) : <span title={l.week_start}>{weekLong(l.week_start)}</span>}
                 </td>
-                <td><b>{l.work_center_code}</b></td><td>{l.order_no}</td><td>{l.customer}</td>
+                <td><b>{l.work_center_code}</b></td><td>{l.order_no}</td><td>{l.position_no || <span className="muted">—</span>}</td><td>{l.customer}</td>
                 <td style={{ color: l.due_date < l.week_start ? "var(--bad)" : undefined }} title={l.due_date < l.week_start ? "Termin, plan haftasından önce!" : ""}>{l.due_date}</td>
                 <td>{l.item_code}</td><td>{l.operation_seq}</td>
                 <td className="num">{fmt(l.planned_hours, 2)}</td><td className="num">{fmt(l.planned_qty, 0)}</td>
@@ -198,7 +198,7 @@ export default function Planning() {
                 <td>{can("poweruser") && (<><button className="secondary small" onClick={() => setHours(l)}>Saat</button> <button className="danger small" onClick={async () => { await api.del(`/api/plan/lines/${l.id}`); refresh(); }}>Sil</button></>)}</td>
               </tr>
             ))}
-            {shownLines.length === 0 && <tr><td colSpan={11} className="muted">Plan satırı yok.</td></tr>}
+            {shownLines.length === 0 && <tr><td colSpan={12} className="muted">Plan satırı yok.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -293,7 +293,7 @@ function ManualAdd({ wcs, weekList, onAdded }: { wcs: { id: number; code: string
       <label>Sipariş
         <select value={orderId} onChange={(e) => { setOrderId(Number(e.target.value)); setOpId(""); }}>
           <option value="">Seçin</option>
-          {orders.data?.map((o) => <option key={o.id} value={o.id}>{o.order_no} · {o.item_code} · {fmt(o.quantity, 0)} · {o.due_date}</option>)}
+          {orders.data?.map((o) => <option key={o.id} value={o.id}>{o.order_no}{o.position_no ? ` / poz ${o.position_no}` : ""} · {o.item_code} · {fmt(o.quantity, 0)} · {o.due_date}</option>)}
         </select>
       </label>
       <label>Operasyon

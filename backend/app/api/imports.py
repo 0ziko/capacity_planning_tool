@@ -2,14 +2,14 @@
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.core.deps import require_poweruser, require_user
 from app.db.session import get_db
 from app.models import ImportLog, User
-from app.schemas import ImportResult
+from app.schemas import ImportResult, OrderImportPreview
 from app.services import excel
 
 router = APIRouter(prefix="/api", tags=["imports"])
@@ -31,15 +31,40 @@ def template(kind: str, _=Depends(require_user)):
     return Response(excel.build_template(kind), media_type=XLSX, headers={"Content-Disposition": f'attachment; filename="sablon_{kind}.xlsx"'})
 
 
+@router.post("/imports/orders/preview", response_model=OrderImportPreview)
+async def preview_orders(file: UploadFile = File(...), db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    if not (file.filename or "").lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(400, "Yalnizca .xlsx dosyalari kabul edilir")
+    content = await file.read()
+    rows, errs = excel.read_rows(content, "orders")
+    if errs:
+        return OrderImportPreview(
+            parse_errors=errs,
+            only_in_system=[],
+            only_in_file=[],
+            updated=[],
+            unchanged_count=0,
+            file_row_count=0,
+            system_open_count=0,
+        )
+    return excel.preview_orders_import(db, rows)
+
+
 @router.post("/imports/{kind}", response_model=ImportResult)
-async def upload(kind: str, file: UploadFile = File(...), db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
+async def upload(
+    kind: str,
+    file: UploadFile = File(...),
+    remove_missing: bool = Query(False, description="Yalnizca siparis importu: listede olmayan acik siparisleri sil"),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_poweruser),
+):
     if kind not in excel.TEMPLATES:
         raise HTTPException(404, "Bilinmeyen import turu")
     if not (file.filename or "").lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(400, "Yalnizca .xlsx dosyalari kabul edilir")
     content = await file.read()
     try:
-        return excel.run_import(db, kind, content, file.filename or "", user.username)
+        return excel.run_import(db, kind, content, file.filename or "", user.username, remove_missing=remove_missing if kind == "orders" else False)
     except Exception as e:  # noqa: BLE001
         db.rollback()
         raise HTTPException(400, f"Import basarisiz: {e}")

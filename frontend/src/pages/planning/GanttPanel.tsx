@@ -78,7 +78,7 @@ export default function GanttPanel({
               return (
                 <div key={b.plan_line_id} className="gantt-row">
                   <div className="gantt-label-col" title={`${b.operation_name} · termin ${b.due_date}`}>
-                    <b>{b.order_no}</b>
+                    <b>{b.order_no}</b>{b.position_no && <span className="muted" style={{ marginLeft: 4 }}>/ poz {b.position_no}</span>}
                     <div className="muted" style={{ fontSize: 11 }}>{b.semi_finished_code || b.operation_name}</div>
                     <div style={{ fontSize: 11 }}>{fmt(b.produced_qty, 0)}/{fmt(b.planned_qty, 0)} ad · kalan {fmt(b.remaining_qty, 0)}</div>
                   </div>
@@ -100,7 +100,7 @@ export default function GanttPanel({
             <table>
               <thead>
                 <tr>
-                  <th>Sipariş</th><th>Yarımamül</th><th>Operasyon</th><th>Başlangıç</th><th>Bitiş</th>
+                  <th>Sipariş</th><th>Poz</th><th>Yarımamül</th><th>Operasyon</th><th>Başlangıç</th><th>Bitiş</th>
                   <th className="num">Plan adet</th><th className="num">Üretilen</th><th className="num">Kalan</th><th>Durum</th>
                 </tr>
               </thead>
@@ -108,6 +108,7 @@ export default function GanttPanel({
                 {g.bars.map((b) => (
                   <tr key={b.plan_line_id}>
                     <td><b>{b.order_no}</b><div className="muted">{b.item_code}</div></td>
+                    <td>{b.position_no || <span className="muted">—</span>}</td>
                     <td><code>{b.semi_finished_code || "—"}</code></td>
                     <td>{b.operation_name}</td>
                     <td>{b.planned_start}</td><td>{b.planned_end}</td>

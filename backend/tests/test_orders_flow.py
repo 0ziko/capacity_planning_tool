@@ -2,7 +2,7 @@
 
 from datetime import date, timedelta
 
-from tests.test_capacity_flow import _upload
+from tests.test_capacity_flow import _upload, _xlsx
 
 WEEK = date(2026, 9, 7)  # Pazartesi
 
@@ -115,3 +115,78 @@ def test_user_role_cannot_write_orders(client, auth):
     assert client.post("/api/orders", headers=h, json={"order_no": "X", "due_date": "2026-09-30", "item_code": "MAM-1", "quantity": 1}).status_code == 403
     assert client.post("/api/plan/merge", headers=h, json={"order_ids": [1, 2]}).status_code == 403
     assert client.get("/api/plan/merge-suggestions", headers=h).status_code == 200
+
+
+def test_order_position_no_import(client, auth):
+    """Ayni siparis no + farkli poz ve farkli stok; poz bos ise geriye uyum (siparis+stok)."""
+    _setup(client, auth)
+    _upload(client, auth, "items", ["Stok Kodu", "Stok Adı", "Ürün Grubu"], [["MAM-2", "Davlumbaz", "DAV"]])
+    _upload(client, auth, "routing", ["Stok Kodu", "Sıra", "Operasyon", "İş Merkezi Kodu", "Çevrim Süresi (sn)"], [["MAM-2", 10, "Kesim", "TZG-A", 36]])
+
+    r = _upload(
+        client,
+        auth,
+        "orders",
+        ["Sipariş No", "Poz No", "Müşteri", "Termin", "Stok Kodu", "Miktar", "Birim Fiyat"],
+        [
+            ["SP-MULTI", "10", "Musteri A", "2026-09-20", "MAM-1", 100, 10],
+            ["SP-MULTI", "20", "Musteri A", "2026-09-20", "MAM-2", 50, 20],
+            ["SP-LEG", "", "Musteri B", "2026-09-25", "MAM-1", 30, 5],
+        ],
+    )
+    assert r["inserted"] == 3 and r["updated"] == 0 and r["errors"] == []
+
+    rows = client.get("/api/orders", headers=auth).json()
+    assert len(rows) == 3
+    p10 = next(o for o in rows if o["order_no"] == "SP-MULTI" and o["position_no"] == "10")
+    p20 = next(o for o in rows if o["order_no"] == "SP-MULTI" and o["position_no"] == "20")
+    assert p10["item_code"] == "MAM-1" and p10["quantity"] == 100
+    assert p20["item_code"] == "MAM-2" and p20["quantity"] == 50
+
+    assert client.post("/api/orders", headers=auth, json={"order_no": "SP-MULTI", "position_no": "10", "due_date": "2026-09-20", "item_code": "MAM-2", "quantity": 1}).status_code == 400
+
+    r2 = _upload(
+        client,
+        auth,
+        "orders",
+        ["Sipariş No", "Poz No", "Müşteri", "Termin", "Stok Kodu", "Miktar"],
+        [["SP-MULTI", "10", "Musteri A", "2026-09-20", "MAM-1", 120]],
+    )
+    assert r2["updated"] == 1
+    p10 = next(o for o in client.get("/api/orders", headers=auth).json() if o["position_no"] == "10")
+    assert p10["quantity"] == 120
+
+    stock = client.get("/api/stock/orders", headers=auth, params={"position": "20"}).json()
+    assert len(stock) == 1 and stock[0]["position_no"] == "20" and stock[0]["item_code"] == "MAM-2"
+
+
+def test_orders_import_preview_and_remove_missing(client, auth):
+    """Onizleme farklari; listede olmayan acik siparisler istege bagli silinir."""
+    _setup(client, auth)
+    client.post("/api/orders", headers=auth, json={"order_no": "KEEP", "customer": "A", "due_date": "2026-09-30", "item_code": "MAM-1", "quantity": 10})
+    client.post("/api/orders", headers=auth, json={"order_no": "DROP", "due_date": "2026-09-30", "item_code": "MAM-1", "quantity": 5})
+    client.post("/api/orders", headers=auth, json={"order_no": "CLOSED", "due_date": "2026-09-30", "item_code": "MAM-1", "quantity": 3})
+    closed = next(o for o in client.get("/api/orders", headers=auth).json() if o["order_no"] == "CLOSED")
+    client.patch(f"/api/orders/{closed['id']}/status", headers=auth, params={"status": "closed"})
+
+    content = _xlsx(
+        ["Sipariş No", "Poz No", "Müşteri", "Termin", "Stok Kodu", "Miktar"],
+        [["KEEP", "", "A", "2026-09-30", "MAM-1", 10], ["NEW-1", "1", "B", "2026-10-01", "MAM-1", 7]],
+    )
+    prev = client.post("/api/imports/orders/preview", headers=auth, files={"file": ("orders.xlsx", content, "application/octet-stream")}).json()
+    assert prev["parse_errors"] == []
+    assert {r["order_no"] for r in prev["only_in_system"]} == {"DROP"}
+    assert {r["order_no"] for r in prev["only_in_file"]} == {"NEW-1"}
+    assert prev["unchanged_count"] == 1
+
+    r = client.post(
+        "/api/imports/orders",
+        headers=auth,
+        params={"remove_missing": True},
+        files={"file": ("orders.xlsx", content, "application/octet-stream")},
+    ).json()
+    assert r["inserted"] == 1 and r["removed"] == 1 and r["errors"] == []
+
+    open_nos = sorted(o["order_no"] for o in client.get("/api/orders", headers=auth, params={"status": "open"}).json())
+    assert open_nos == ["KEEP", "NEW-1"]
+    assert client.get("/api/orders", headers=auth, params={"status": "closed"}).json()[0]["order_no"] == "CLOSED"

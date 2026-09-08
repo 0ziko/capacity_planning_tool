@@ -274,6 +274,7 @@ def plan_lines(db: Session, wc_ids: list[int] | None, start: date | None, end: d
                 id=pl.id,
                 order_id=pl.order_id,
                 order_no=pl.order.order_no,
+                position_no=pl.order.position_no or "",
                 customer=pl.order.customer,
                 due_date=pl.order.due_date,
                 item_code=pl.order.item.code,

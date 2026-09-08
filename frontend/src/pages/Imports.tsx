@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, type ImportKind, type ImportResult } from "../api";
+import { api, fmt, type ImportKind, type ImportResult, type OrderImportPreview } from "../api";
 import { useAuth } from "../auth";
 import { ErrorText, useAsync } from "../components";
 
@@ -16,7 +16,7 @@ const HINT: Record<string, string> = {
   bom: "Hammadde satırları.",
   routing: "Aşamalı tezgah sırası + çevrim süresi (sn/adet). Kapasite ihtiyacının kaynağı.",
   op_rules: "Senaryo matrisi: Kural = Bitiş (önceki bitince) ya da Çevrim (önceki N çevrim tamamlayınca). Stok Kodu boşsa ürün grubu geneli.",
-  orders: "Aynı Sipariş No + Stok Kodu tekrar yüklenirse güncellenir.",
+  orders: "Günlük açık sipariş listesi: önce fark özeti gösterilir. Eşleşen satırlar güncellenir; listede olmayan açık siparişleri silmek isteğe bağlıdır (kapalı siparişlere dokunulmaz).",
   production: "Bir önceki günün üretimi. Aynı gün/iş merkezi/stok/op/sipariş satırı üzerine yazılır.",
   downtime: "Bir günün duruşları yeniden yüklenirse o gün/iş merkezi için eskiler silinir.",
   stock_receipts: "Depoya giren bitmiş ürün (siparişten bağımsız). Rezervasyon Stok & Rezervasyon sayfasından yapılır.",
@@ -28,12 +28,15 @@ export default function Imports() {
   const log = useAsync(() => api.get<LogRow[]>("/api/imports/log?limit=30"), []);
   const [results, setResults] = useState<Record<string, ImportResult | string>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  const [orderDraft, setOrderDraft] = useState<{ file: File; preview: OrderImportPreview } | null>(null);
+  const [orderPreviewErr, setOrderPreviewErr] = useState("");
 
-  const upload = async (kind: string, file: File | undefined) => {
+  const upload = async (kind: string, file: File | undefined, removeMissing = false) => {
     if (!file) return;
     setBusy(kind);
     try {
-      const r = await api.upload<ImportResult>(`/api/imports/${kind}`, file);
+      const params = kind === "orders" && removeMissing ? { remove_missing: true } : undefined;
+      const r = await api.upload<ImportResult>(`/api/imports/${kind}`, file, params);
       setResults((s) => ({ ...s, [kind]: r }));
       log.reload();
     } catch (e) {
@@ -42,6 +45,28 @@ export default function Imports() {
       setBusy(null);
     }
   };
+
+  const pickOrdersFile = async (file: File | undefined) => {
+    if (!file) return;
+    setOrderPreviewErr("");
+    setBusy("orders-preview");
+    try {
+      const preview = await api.upload<OrderImportPreview>("/api/imports/orders/preview", file);
+      setOrderDraft({ file, preview });
+    } catch (e) {
+      setOrderPreviewErr((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const confirmOrdersImport = async (removeMissing: boolean) => {
+    if (!orderDraft) return;
+    const { file } = orderDraft;
+    setOrderDraft(null);
+    await upload("orders", file, removeMissing);
+  };
+
   const sorted = [...(kinds.data ?? [])].sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind));
 
   return (
@@ -51,7 +76,7 @@ export default function Imports() {
         <button onClick={() => api.download("/api/backup.xlsx", "kapasite_yedek.xlsx")}>⬇ Tek tıkla Excel yedeği (tüm tablolar)</button>
         <span className="muted">Yedek sayfaları import şablonlarıyla aynı formattadır; gerekirse geri yüklenebilir.</span>
       </div>
-      <ErrorText err={kinds.err} />
+      <ErrorText err={kinds.err || orderPreviewErr} />
       <div className="grid">
         {sorted.map((k, i) => {
           const r = results[k.kind];
@@ -64,14 +89,28 @@ export default function Imports() {
                 <button className="secondary small" onClick={() => api.download(`/api/imports/template/${k.kind}`, `sablon_${k.kind}.xlsx`)}>Şablon indir</button>
                 {can("poweruser") && (
                   <label style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                    <input type="file" accept=".xlsx" disabled={busy === k.kind} onChange={(e) => { upload(k.kind, e.target.files?.[0]); e.target.value = ""; }} />
+                    <input
+                      type="file"
+                      accept=".xlsx"
+                      disabled={busy === k.kind || busy === "orders-preview"}
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        e.target.value = "";
+                        if (k.kind === "orders") pickOrdersFile(f);
+                        else upload(k.kind, f);
+                      }}
+                    />
                   </label>
                 )}
               </div>
               {typeof r === "string" && <div className="error">{r}</div>}
               {r && typeof r !== "string" && (
                 <>
-                  <div className="success">Eklendi: {r.inserted} · Güncellendi: {r.updated} · Hata: {r.errors.length}</div>
+                  <div className="success">
+                    Eklendi: {r.inserted} · Güncellendi: {r.updated}
+                    {(r.removed ?? 0) > 0 && <> · Silindi: {r.removed}</>}
+                    {" "}· Hata: {r.errors.length}
+                  </div>
                   {r.errors.length > 0 && <ul className="errors">{r.errors.slice(0, 50).map((e, j) => <li key={j}>{e}</li>)}</ul>}
                 </>
               )}
@@ -79,6 +118,16 @@ export default function Imports() {
           );
         })}
       </div>
+
+      {orderDraft && (
+        <OrderImportDialog
+          file={orderDraft.file}
+          preview={orderDraft.preview}
+          busy={busy === "orders"}
+          onCancel={() => setOrderDraft(null)}
+          onConfirm={confirmOrdersImport}
+        />
+      )}
 
       <h2>Son importlar</h2>
       <div className="table-wrap" style={{ maxHeight: 300 }}>
@@ -88,5 +137,124 @@ export default function Imports() {
         </table>
       </div>
     </>
+  );
+}
+
+function OrderImportDialog({
+  file,
+  preview,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  file: File;
+  preview: OrderImportPreview;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: (removeMissing: boolean) => void;
+}) {
+  const [removeMissing, setRemoveMissing] = useState(preview.only_in_system.length > 0);
+  const blocked = preview.parse_errors.length > 0;
+
+  return (
+    <div className="panel" style={{ marginTop: 16, borderLeft: "4px solid var(--primary)" }}>
+      <h2 style={{ marginTop: 0 }}>Sipariş importu — önizleme</h2>
+      <p className="muted" style={{ marginTop: 0 }}>
+        Dosya: <b>{file.name}</b> · {preview.file_row_count} satır · sistemde {preview.system_open_count} açık sipariş ·
+        {" "}{preview.only_in_file.length} yeni · {preview.updated.length} güncellenecek · {preview.unchanged_count} değişmeden kalacak
+        {preview.only_in_system.length > 0 && <> · <span style={{ color: "var(--warn)" }}>{preview.only_in_system.length} sistemde var, listede yok</span></>}
+      </p>
+
+      {preview.parse_errors.length > 0 && (
+        <div className="error" style={{ marginBottom: 10 }}>
+          <b>Dosya okunamadı veya satır hataları var — import yapılamaz:</b>
+          <ul className="errors">{preview.parse_errors.map((e, i) => <li key={i}>{e}</li>)}</ul>
+        </div>
+      )}
+
+      {preview.only_in_system.length > 0 && (
+        <>
+          <h3 style={{ color: "var(--warn)", marginBottom: 6 }}>Sistemde var, yeni listede yok ({preview.only_in_system.length})</h3>
+          <p className="muted" style={{ marginTop: 0 }}>Bu açık siparişler günlük listenizde yer almıyor. Silmek isterseniz aşağıdaki kutuyu işaretleyin; plan satırları ve rezervasyonları da kaldırılır.</p>
+          <PreviewTable rows={preview.only_in_system} />
+        </>
+      )}
+
+      {preview.only_in_file.length > 0 && (
+        <>
+          <h3 style={{ color: "var(--ok)", marginBottom: 6 }}>Listede var, sistemde yok — eklenecek ({preview.only_in_file.length})</h3>
+          <PreviewTable rows={preview.only_in_file} showRow />
+        </>
+      )}
+
+      {preview.updated.length > 0 && (
+        <>
+          <h3 style={{ marginBottom: 6 }}>Her iki tarafta var — güncellenecek ({preview.updated.length})</h3>
+          <div className="table-wrap" style={{ maxHeight: 220 }}>
+            <table>
+              <thead><tr><th>Sipariş</th><th>Poz</th><th>Stok</th><th>Müşteri</th><th>Termin</th><th className="num">Miktar</th><th>Değişiklikler</th></tr></thead>
+              <tbody>
+                {preview.updated.map((r, i) => (
+                  <tr key={i}>
+                    <td><b>{r.order_no}</b></td>
+                    <td>{r.position_no || "—"}</td>
+                    <td>{r.item_code}</td>
+                    <td>{r.customer || "—"}</td>
+                    <td>{r.due_date ?? "—"}</td>
+                    <td className="num">{r.quantity != null ? fmt(r.quantity, 0) : "—"}</td>
+                    <td className="muted">{r.changes.join(" · ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {preview.only_in_system.length === 0 && preview.only_in_file.length === 0 && preview.updated.length === 0 && preview.unchanged_count > 0 && !blocked && (
+        <p className="muted">Tüm satırlar sistemle aynı; yine de dosyayı içe aktarabilirsiniz (değişiklik olmaz).</p>
+      )}
+
+      <div className="row" style={{ alignItems: "center", marginTop: 12 }}>
+        {preview.only_in_system.length > 0 && (
+          <label style={{ flexDirection: "row", alignItems: "center", gap: 8, fontWeight: 600 }}>
+            <input type="checkbox" checked={removeMissing} onChange={(e) => setRemoveMissing(e.target.checked)} disabled={blocked} />
+            Listede olmayan {preview.only_in_system.length} açık siparişi sistemden sil
+          </label>
+        )}
+        <button onClick={() => onConfirm(removeMissing && preview.only_in_system.length > 0)} disabled={busy || blocked}>
+          {busy ? "Yükleniyor…" : "Importu onayla"}
+        </button>
+        <button className="secondary" onClick={onCancel} disabled={busy}>Vazgeç</button>
+      </div>
+    </div>
+  );
+}
+
+function PreviewTable({ rows, showRow }: { rows: OrderImportPreview["only_in_system"]; showRow?: boolean }) {
+  return (
+    <div className="table-wrap" style={{ maxHeight: 220, marginBottom: 12 }}>
+      <table>
+        <thead>
+          <tr>
+            {showRow && <th>Satır</th>}
+            <th>Sipariş</th><th>Poz</th><th>Stok</th><th>Müşteri</th><th>Termin</th><th className="num">Miktar</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={r.order_id ?? `${r.order_no}-${r.position_no}-${i}`}>
+              {showRow && <td className="muted">{r.excel_row ?? "—"}</td>}
+              <td><b>{r.order_no}</b></td>
+              <td>{r.position_no || "—"}</td>
+              <td>{r.item_code}</td>
+              <td>{r.customer || "—"}</td>
+              <td>{r.due_date ?? "—"}</td>
+              <td className="num">{r.quantity != null ? fmt(r.quantity, 0) : "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

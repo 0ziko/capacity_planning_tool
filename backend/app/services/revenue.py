@@ -178,6 +178,7 @@ def compare(db: Session, req: PlanCompareRequest) -> PlanCompareOut:
             CompareOrderRow(
                 order_id=d.order_id,
                 order_no=d.order_no,
+                position_no=d.position_no,
                 customer=d.customer,
                 item_code=d.item_code,
                 quantity=d.quantity,

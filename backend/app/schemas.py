@@ -138,6 +138,7 @@ class ItemDetail(ItemOut):
 # ---- Orders ----
 class OrderIn(BaseModel):
     order_no: str = Field(min_length=1, max_length=64)
+    position_no: str = ""
     customer: str = ""
     due_date: date
     item_code: str = Field(min_length=1)
@@ -149,6 +150,7 @@ class OrderIn(BaseModel):
 class OrderOut(ORM):
     id: int
     order_no: str
+    position_no: str = ""
     customer: str
     due_date: date
     item_id: int
@@ -167,6 +169,7 @@ class OrderScheduleOut(BaseModel):
 
     order_id: int
     order_no: str
+    position_no: str = ""
     customer: str
     item_code: str
     item_name: str = ""
@@ -200,6 +203,7 @@ class OrderProgressOp(BaseModel):
 class OrderProgressOut(BaseModel):
     order_id: int
     order_no: str
+    position_no: str = ""
     customer: str
     item_code: str
     quantity: float
@@ -327,6 +331,7 @@ class PlanScenario(BaseModel):
 class CompareOrderRow(BaseModel):
     order_id: int
     order_no: str
+    position_no: str = ""
     customer: str
     item_code: str
     quantity: float
@@ -362,6 +367,7 @@ class PlanLineOut(ORM):
     id: int
     order_id: int
     order_no: str = ""
+    position_no: str = ""
     customer: str = ""
     due_date: date | None = None
     item_code: str = ""
@@ -401,6 +407,7 @@ class GanttBar(BaseModel):
     plan_line_id: int
     order_id: int
     order_no: str
+    position_no: str = ""
     item_code: str
     semi_finished_code: str = ""
     operation_seq: int
@@ -475,7 +482,34 @@ class ImportResult(BaseModel):
     kind: str
     inserted: int
     updated: int
+    removed: int = 0
     errors: list[str]
+
+
+class OrderImportRowPreview(BaseModel):
+    order_id: int | None = None
+    order_no: str
+    position_no: str = ""
+    item_code: str
+    customer: str = ""
+    due_date: date | None = None
+    quantity: float | None = None
+    unit_price: float | None = None
+    excel_row: int | None = None
+
+
+class OrderImportChangePreview(OrderImportRowPreview):
+    changes: list[str] = []
+
+
+class OrderImportPreview(BaseModel):
+    parse_errors: list[str]
+    only_in_system: list[OrderImportRowPreview]
+    only_in_file: list[OrderImportRowPreview]
+    updated: list[OrderImportChangePreview]
+    unchanged_count: int
+    file_row_count: int
+    system_open_count: int
 
 
 # ---- Haftalik is gucu (WorkCenterWeek) ----
@@ -631,6 +665,7 @@ class ReservationOut(BaseModel):
     item_name: str
     order_id: int
     order_no: str
+    position_no: str = ""
     customer: str
     due_date: date
     order_qty: float
@@ -646,6 +681,7 @@ class OrderStockRow(BaseModel):
 
     order_id: int
     order_no: str
+    position_no: str = ""
     customer: str
     due_date: date
     item_id: int
@@ -671,6 +707,7 @@ class ShipmentOut(BaseModel):
     item_code: str
     order_id: int
     order_no: str
+    position_no: str = ""
     customer: str
     ship_date: date
     quantity: float

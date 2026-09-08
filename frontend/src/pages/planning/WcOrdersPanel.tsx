@@ -3,7 +3,7 @@ import { fmt, weekLabel, weekLong, type OrderSchedule, type PlanLine, type WorkC
 import { PlanStatusBadge } from "./OrderSchedulePanel";
 
 interface Row {
-  order_id: number; order_no: string; customer: string; item_code: string; due_date: string;
+  order_id: number; order_no: string; position_no: string; customer: string; item_code: string; due_date: string;
   ops: number[]; weeks: string[]; hours: number; qty: number; sched?: OrderSchedule;
 }
 
@@ -17,7 +17,7 @@ export default function WcOrdersPanel({ lines, schedule, wcs, horizon }: { lines
       const m = byWc.get(l.work_center_id)!;
       let r = m.get(l.order_id);
       if (!r) {
-        r = { order_id: l.order_id, order_no: l.order_no, customer: l.customer, item_code: l.item_code, due_date: l.due_date, ops: [], weeks: [], hours: 0, qty: 0 };
+        r = { order_id: l.order_id, order_no: l.order_no, position_no: l.position_no, customer: l.customer, item_code: l.item_code, due_date: l.due_date, ops: [], weeks: [], hours: 0, qty: 0 };
         m.set(l.order_id, r);
       }
       if (!r.ops.includes(l.operation_seq)) r.ops.push(l.operation_seq);
@@ -72,7 +72,7 @@ export default function WcOrdersPanel({ lines, schedule, wcs, horizon }: { lines
             <table>
               <thead>
                 <tr>
-                  <th>Sipariş</th><th>Müşteri</th><th>Stok</th><th className="num">Sipariş miktarı</th><th>Op.</th>
+                  <th>Sipariş</th><th>Poz</th><th>Müşteri</th><th>Stok</th><th className="num">Sipariş miktarı</th><th>Op.</th>
                   <th>Plan haftaları</th><th className="num">Bu İM'de saat</th><th className="num">Bu İM'de miktar</th>
                   <th>Nihai ürün termini</th><th>Tahmini bitiş (tümü)</th><th>Durum</th>
                 </tr>
@@ -80,7 +80,7 @@ export default function WcOrdersPanel({ lines, schedule, wcs, horizon }: { lines
               <tbody>
                 {rows.map((r) => (
                   <tr key={r.order_id}>
-                    <td><b>{r.order_no}</b></td><td>{r.customer}</td>
+                    <td><b>{r.order_no}</b></td><td>{r.position_no || <span className="muted">—</span>}</td><td>{r.customer}</td>
                     <td>{r.item_code} <span className="muted">{r.sched?.item_name}</span></td>
                     <td className="num">{fmt(r.sched?.quantity, 0)}</td>
                     <td>{r.ops.join(", ")}</td>
@@ -91,7 +91,7 @@ export default function WcOrdersPanel({ lines, schedule, wcs, horizon }: { lines
                     <td>{r.sched ? <PlanStatusBadge s={r.sched.plan_status} /> : "-"}</td>
                   </tr>
                 ))}
-                {rows.length === 0 && <tr><td colSpan={11} className="muted">Bu iş merkezine plan ufku içinde yerleştirilmiş sipariş yok.</td></tr>}
+                {rows.length === 0 && <tr><td colSpan={12} className="muted">Bu iş merkezine plan ufku içinde yerleştirilmiş sipariş yok.</td></tr>}
               </tbody>
             </table>
           </div>

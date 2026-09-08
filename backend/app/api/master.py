@@ -336,6 +336,7 @@ def list_orders(
     status: str | None = "open",
     due_from: date | None = None,
     due_to: date | None = None,
+    position: str | None = None,
     db: Session = Depends(get_db),
     _=Depends(require_user),
 ):
@@ -346,7 +347,9 @@ def list_orders(
         q = q.filter(Order.due_date >= due_from)
     if due_to:
         q = q.filter(Order.due_date <= due_to)
-    return [orders_svc.order_out(o) for o in q.order_by(Order.due_date, Order.order_no).all()]
+    if position and position.strip():
+        q = q.filter(Order.position_no.ilike(f"%{position.strip()}%"))
+    return [orders_svc.order_out(o) for o in q.order_by(Order.due_date, Order.order_no, Order.position_no).all()]
 
 
 @router.post("/orders", response_model=OrderOut, status_code=201)

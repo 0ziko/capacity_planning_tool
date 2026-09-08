@@ -13,6 +13,7 @@ class Order(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     order_no: Mapped[str] = mapped_column(String(64), index=True)
+    position_no: Mapped[str] = mapped_column(String(32), default="", index=True)  # siparis pozisyonu (aynı no'da coklu satir)
     customer: Mapped[str] = mapped_column(String(128), default="")
     due_date: Mapped[date] = mapped_column(Date, index=True)
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), index=True)

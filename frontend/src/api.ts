@@ -60,10 +60,11 @@ export const api = {
   patch: <T>(url: string, body?: unknown) =>
     fetch(url, { method: "PATCH", headers: headers({ "Content-Type": "application/json" }), body: body === undefined ? undefined : JSON.stringify(body) }).then((r) => handle<T>(r)),
   del: <T>(url: string) => fetch(url, { method: "DELETE", headers: headers() }).then((r) => handle<T>(r)),
-  upload: <T>(url: string, file: File) => {
+  upload: <T>(url: string, file: File, params?: Record<string, string | number | boolean | null | undefined>) => {
     const fd = new FormData();
     fd.append("file", file);
-    return fetch(url, { method: "POST", headers: headers(), body: fd }).then((r) => handle<T>(r));
+    const q = params ? qs(params) : "";
+    return fetch(`${url}${q}`, { method: "POST", headers: headers(), body: fd }).then((r) => handle<T>(r));
   },
   async login(username: string, password: string): Promise<string> {
     const fd = new URLSearchParams({ username, password });
@@ -101,23 +102,23 @@ export interface WorkCenter {
 export interface Employee { id: number; code: string; name: string; work_center_id: number | null; machine_id: number | null; is_active: boolean; machine_code?: string }
 export interface Item { id: number; code: string; name: string; product_group: string; unit: string }
 export interface ItemDetail extends Item { bom_lines: { id: number; component_code: string; component_name: string; quantity: number; unit: string }[]; operations: { id: number; seq: number; operation_name: string; work_center_id: number; cycle_time_sec: number; setup_time_min: number; semi_finished_code: string }[] }
-export interface Order { id: number; order_no: string; customer: string; due_date: string; item_id: number; item_code: string; item_name: string; quantity: number; unit_price: number; revenue: number; status: string; merged_into_id: number | null; note: string }
-export interface OrderIn { order_no: string; customer: string; due_date: string; item_code: string; quantity: number; unit_price: number; note: string }
+export interface Order { id: number; order_no: string; position_no: string; customer: string; due_date: string; item_id: number; item_code: string; item_name: string; quantity: number; unit_price: number; revenue: number; status: string; merged_into_id: number | null; note: string }
+export interface OrderIn { order_no: string; position_no: string; customer: string; due_date: string; item_code: string; quantity: number; unit_price: number; note: string }
 export type PlanMode = "due_date" | "revenue";
 export interface PeriodRevenue { period: string; completed_revenue: number; completed_orders: number; earned_revenue: number; cumulative_completed: number; cumulative_earned: number }
 export interface RevenueReport { start: string; end: string; total_open_revenue: number; planned_revenue: number; partial_revenue: number; unplanned_revenue: number; no_price_orders: number; weeks: PeriodRevenue[]; months: PeriodRevenue[] }
 export interface PlanScenario { mode: PlanMode; label: string; created_lines: number; planned_revenue: number; on_time: number; late: number; partial: number; unplanned: number; total_lateness_days: number; utilization_pct: number; orders: OrderSchedule[]; revenue: RevenueReport }
 export type CompareDiff = "same" | "rev_misses_due" | "rev_drops" | "due_drops" | "rev_earlier" | "rev_later" | "other";
-export interface CompareRow { order_id: number; order_no: string; customer: string; item_code: string; quantity: number; revenue: number; due_date: string; due_status: OrderSchedule["plan_status"]; due_end: string | null; due_lateness: number | null; rev_status: OrderSchedule["plan_status"]; rev_end: string | null; rev_lateness: number | null; diff: CompareDiff }
+export interface CompareRow { order_id: number; order_no: string; position_no: string; customer: string; item_code: string; quantity: number; revenue: number; due_date: string; due_status: OrderSchedule["plan_status"]; due_end: string | null; due_lateness: number | null; rev_status: OrderSchedule["plan_status"]; rev_end: string | null; rev_lateness: number | null; diff: CompareDiff }
 export interface PlanCompare { due: PlanScenario; revenue: PlanScenario; rows: CompareRow[]; rev_misses_due: string[]; rev_drops: string[]; due_drops: string[] }
 export interface OrderSchedule {
-  order_id: number; order_no: string; customer: string; item_code: string; item_name: string; quantity: number; unit_price: number; revenue: number; due_date: string;
+  order_id: number; order_no: string; position_no: string; customer: string; item_code: string; item_name: string; quantity: number; unit_price: number; revenue: number; due_date: string;
   required_hours: number; planned_hours: number; coverage_pct: number; planned_start: string | null; planned_end_week: string | null; planned_end: string | null;
   last_work_center_code: string; lateness_days: number | null; plan_status: "unplanned" | "partial" | "late" | "on_time" | "no_ops";
 }
 export interface OrderProgressOp { operation_seq: number; operation_name: string; work_center_code: string; required_hours: number; planned_hours: number; produced_qty: number; earned_hours: number; pct: number }
 export interface OrderProgress {
-  order_id: number; order_no: string; customer: string; item_code: string; quantity: number; due_date: string; required_hours: number; earned_hours: number; produced_qty: number; pct: number;
+  order_id: number; order_no: string; position_no: string; customer: string; item_code: string; quantity: number; due_date: string; required_hours: number; earned_hours: number; produced_qty: number; pct: number;
   status: "not_started" | "in_progress" | "completed"; first_prod_date: string | null; last_prod_date: string | null; ops: OrderProgressOp[];
 }
 export interface MergeGroup { item_id: number; item_code: string; item_name: string; order_count: number; total_qty: number; earliest_due: string; latest_due: string; customers: string[]; has_progress: boolean; orders: Order[] }
@@ -125,7 +126,7 @@ export interface Capacity { work_center_id: number; work_center_code: string; st
 export interface WeekLoad { week_start: string; capacity_hours: number; planned_hours: number; utilization: number; actual_hours: number; actual_utilization: number; remaining_hours: number; remaining_days: number; idle_hours: number; capacity_units: number; planned_units: number; actual_units: number }
 export interface WorkCenterLoad { work_center_id: number; work_center_code: string; weeks: WeekLoad[] }
 export interface GanttBar {
-  plan_line_id: number; order_id: number; order_no: string; item_code: string; semi_finished_code: string;
+  plan_line_id: number; order_id: number; order_no: string; position_no: string; item_code: string; semi_finished_code: string;
   operation_seq: number; operation_name: string; planned_start: string; planned_end: string; week_start: string;
   planned_qty: number; produced_qty: number; remaining_qty: number; planned_hours: number; earned_hours: number;
   due_date: string; status: string; last_prod_date: string | null;
@@ -134,7 +135,7 @@ export interface GanttData {
   work_center_id: number; work_center_code: string; range_start: string; range_end: string; as_of: string;
   timeline_days: string[]; bars: GanttBar[];
 }
-export interface PlanLine { id: number; order_id: number; order_no: string; customer: string; due_date: string; item_code: string; operation_id: number; operation_seq: number; work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; planned_qty: number; mode: string; strategy: string }
+export interface PlanLine { id: number; order_id: number; order_no: string; position_no: string; customer: string; due_date: string; item_code: string; operation_id: number; operation_seq: number; work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; planned_qty: number; mode: string; strategy: string }
 export interface Progress { work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; expected_hours_to_date: number; actual_hours_to_date: number; remaining_hours: number; remaining_days: number; working_days: number; elapsed_days: number; status: string }
 export interface ImportKind { kind: string; title: string; columns: string[]; required: string[] }
 
@@ -158,12 +159,15 @@ export interface RuleRow { id: number; scope: "group" | "item"; product_group: s
 
 // ---- Stok & rezervasyon ----
 export interface StockRow { item_id: number; item_code: string; item_name: string; product_group: string; on_hand: number; reserved: number; free: number; shipped: number; open_demand: number; open_orders: number }
-export interface OrderStockRow { order_id: number; order_no: string; customer: string; due_date: string; item_id: number; item_code: string; item_name: string; quantity: number; reserved: number; shipped: number; remaining: number; status: string; planned_end: string | null }
+export interface OrderStockRow { order_id: number; order_no: string; position_no: string; customer: string; due_date: string; item_id: number; item_code: string; item_name: string; quantity: number; reserved: number; shipped: number; remaining: number; status: string; planned_end: string | null }
 export interface Receipt { id: number; item_id: number; item_code: string; item_name: string; receipt_date: string; quantity: number; lot: string; note: string; source: string; created_by: string }
-export interface Reservation { id: number; item_id: number; item_code: string; item_name: string; order_id: number; order_no: string; customer: string; due_date: string; order_qty: number; quantity: number; source: "auto" | "manual"; note: string; created_by: string; created_at: string | null }
-export interface Shipment { id: number; item_id: number; item_code: string; order_id: number; order_no: string; customer: string; ship_date: string; quantity: number; note: string; created_by: string }
+export interface Reservation { id: number; item_id: number; item_code: string; item_name: string; order_id: number; order_no: string; position_no: string; customer: string; due_date: string; order_qty: number; quantity: number; source: "auto" | "manual"; note: string; created_by: string; created_at: string | null }
+export interface Shipment { id: number; item_id: number; item_code: string; order_id: number; order_no: string; position_no: string; customer: string; ship_date: string; quantity: number; note: string; created_by: string }
 export interface AutoReserveResult { created: number; reserved_qty: number; items: number; message: string }
-export interface ImportResult { kind: string; inserted: number; updated: number; errors: string[] }
+export interface ImportResult { kind: string; inserted: number; updated: number; removed?: number; errors: string[] }
+export interface OrderImportRowPreview { order_id: number | null; order_no: string; position_no: string; item_code: string; customer: string; due_date: string | null; quantity: number | null; unit_price: number | null; excel_row: number | null }
+export interface OrderImportChangePreview extends OrderImportRowPreview { changes: string[] }
+export interface OrderImportPreview { parse_errors: string[]; only_in_system: OrderImportRowPreview[]; only_in_file: OrderImportRowPreview[]; updated: OrderImportChangePreview[]; unchanged_count: number; file_row_count: number; system_open_count: number }
 
 export function mondayOf(d: Date): string {
   const x = new Date(d);

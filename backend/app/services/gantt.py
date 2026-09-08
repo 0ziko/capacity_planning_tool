@@ -206,6 +206,7 @@ def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: 
                     plan_line_id=pl.id,
                     order_id=pl.order_id,
                     order_no=pl.order.order_no,
+                    position_no=pl.order.position_no or "",
                     item_code=pl.order.item.code,
                     semi_finished_code=(op.semi_finished_code if op else "") or "",
                     operation_seq=op.seq if op else 0,

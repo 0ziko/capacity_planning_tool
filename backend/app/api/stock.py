@@ -42,8 +42,8 @@ def summary(only_with_stock: bool = Query(False), db: Session = Depends(get_db),
 
 
 @router.get("/orders", response_model=list[OrderStockRow])
-def orders(item_id: int | None = None, include_closed: bool = False, db: Session = Depends(get_db), _=Depends(require_user)):
-    rows = stock.order_rows(db, item_id, include_closed)
+def orders(item_id: int | None = None, include_closed: bool = False, position: str | None = None, db: Session = Depends(get_db), _=Depends(require_user)):
+    rows = stock.order_rows(db, item_id, include_closed, position)
     # plan sonucu tahmini bitis (varsa)
     try:
         sched = {s.order_id: s.planned_end for s in orders_svc.order_schedule(db, None)}
@@ -74,8 +74,8 @@ def delete_receipt(receipt_id: int, db: Session = Depends(get_db), _=Depends(req
 
 # ---- rezervasyon ----
 @router.get("/reservations", response_model=list[ReservationOut])
-def reservations(item_id: int | None = None, order_id: int | None = None, db: Session = Depends(get_db), _=Depends(require_user)):
-    return stock.list_reservations(db, item_id, order_id)
+def reservations(item_id: int | None = None, order_id: int | None = None, position: str | None = None, db: Session = Depends(get_db), _=Depends(require_user)):
+    return stock.list_reservations(db, item_id, order_id, position)
 
 
 @router.post("/reservations", response_model=ReservationOut, status_code=201)
@@ -111,8 +111,8 @@ def ship(res_id: int, data: ShipIn, db: Session = Depends(get_db), user: User = 
 
 # ---- sevk ----
 @router.get("/shipments", response_model=list[ShipmentOut])
-def shipments(item_id: int | None = None, order_id: int | None = None, db: Session = Depends(get_db), _=Depends(require_user)):
-    return stock.list_shipments(db, item_id, order_id)
+def shipments(item_id: int | None = None, order_id: int | None = None, position: str | None = None, db: Session = Depends(get_db), _=Depends(require_user)):
+    return stock.list_shipments(db, item_id, order_id, position)
 
 
 @router.delete("/shipments/{shipment_id}", status_code=204)

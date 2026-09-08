@@ -50,7 +50,7 @@ export default function OrderSchedulePanel({ rows, err, onReload }: { rows: Orde
         <table>
           <thead>
             <tr>
-              <th>Sipariş</th><th>Müşteri</th><th>Stok</th><th className="num">Miktar</th><th className="num">Ciro</th><th>Termin</th>
+              <th>Sipariş</th><th>Poz</th><th>Müşteri</th><th>Stok</th><th className="num">Miktar</th><th className="num">Ciro</th><th>Termin</th>
               <th className="num">İhtiyaç (saat)</th><th className="num">Planlanan (saat)</th><th className="num">Kapsam</th>
               <th>Plan başlangıcı</th><th>Tahmini bitiş</th><th>Son İM</th><th className="num">Sapma (gün)</th><th>Durum</th>
             </tr>
@@ -58,7 +58,7 @@ export default function OrderSchedulePanel({ rows, err, onReload }: { rows: Orde
           <tbody>
             {list.map((r) => (
               <tr key={r.order_id}>
-                <td><b>{r.order_no}</b></td><td>{r.customer}</td>
+                <td><b>{r.order_no}</b></td><td>{r.position_no || <span className="muted">—</span>}</td><td>{r.customer}</td>
                 <td>{r.item_code} <span className="muted">{r.item_name}</span></td>
                 <td className="num">{fmt(r.quantity, 0)}</td>
                 <td className="num" title={r.unit_price ? `${fmt(r.unit_price, 2)} × ${fmt(r.quantity, 0)}` : "Birim fiyat yok"}>{r.revenue ? fmt(r.revenue, 0) : "—"}</td>
@@ -72,7 +72,7 @@ export default function OrderSchedulePanel({ rows, err, onReload }: { rows: Orde
                 <td><PlanStatusBadge s={r.plan_status} /></td>
               </tr>
             ))}
-            {list.length === 0 && <tr><td colSpan={14} className="muted">{rows === null ? "Yükleniyor…" : "Gösterilecek sipariş yok."}</td></tr>}
+            {list.length === 0 && <tr><td colSpan={15} className="muted">{rows === null ? "Yükleniyor…" : "Gösterilecek sipariş yok."}</td></tr>}
           </tbody>
         </table>
       </div>

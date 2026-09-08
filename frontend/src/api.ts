@@ -66,6 +66,24 @@ export const api = {
     const q = params ? qs(params) : "";
     return fetch(`${url}${q}`, { method: "POST", headers: headers(), body: fd }).then((r) => handle<T>(r));
   },
+  async uploadDownload(url: string, file: File, fallbackName = "rapor.xlsx") {
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch(url, { method: "POST", headers: headers(), body: fd });
+    if (res.status === 401) {
+      setToken(null);
+      window.location.href = "/login";
+    }
+    if (!res.ok) throw new ApiError(res.status, await res.text());
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="?([^";]+)"?/.exec(cd);
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = m ? decodeURIComponent(m[1]) : fallbackName;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  },
   async login(username: string, password: string): Promise<string> {
     const fd = new URLSearchParams({ username, password });
     const res = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: fd });
@@ -171,7 +189,8 @@ export interface AutoReserveResult { created: number; reserved_qty: number; item
 export interface ImportResult { kind: string; inserted: number; updated: number; removed?: number; errors: string[] }
 export interface OrderImportRowPreview { order_id: number | null; order_no: string; position_no: string; item_code: string; customer: string; due_date: string | null; quantity: number | null; unit_price: number | null; excel_row: number | null }
 export interface OrderImportChangePreview extends OrderImportRowPreview { changes: string[] }
-export interface OrderImportPreview { parse_errors: string[]; only_in_system: OrderImportRowPreview[]; only_in_file: OrderImportRowPreview[]; updated: OrderImportChangePreview[]; unchanged_count: number; file_row_count: number; system_open_count: number }
+export interface OrderImportPreview { parse_errors: string[]; error_rows: OrderImportErrorRow[]; missing_item_codes: string[]; only_in_system: OrderImportRowPreview[]; only_in_file: OrderImportRowPreview[]; updated: OrderImportChangePreview[]; unchanged_count: number; file_row_count: number; system_open_count: number }
+export interface OrderImportErrorRow extends OrderImportRowPreview { error: string }
 
 export function mondayOf(d: Date): string {
   const x = new Date(d);

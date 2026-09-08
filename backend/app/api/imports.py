@@ -40,14 +40,43 @@ async def preview_orders(file: UploadFile = File(...), db: Session = Depends(get
     if errs:
         return OrderImportPreview(
             parse_errors=errs,
+            error_rows=[],
             only_in_system=[],
             only_in_file=[],
             updated=[],
             unchanged_count=0,
             file_row_count=0,
             system_open_count=0,
+            missing_item_codes=[],
         )
     return excel.preview_orders_import(db, rows)
+
+
+@router.post("/imports/orders/preview.xlsx")
+async def preview_orders_xlsx(file: UploadFile = File(...), db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    if not (file.filename or "").lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(400, "Yalnizca .xlsx dosyalari kabul edilir")
+    content = await file.read()
+    rows, errs = excel.read_rows(content, "orders")
+    if errs:
+        preview = OrderImportPreview(
+            parse_errors=errs,
+            error_rows=[],
+            only_in_system=[],
+            only_in_file=[],
+            updated=[],
+            unchanged_count=0,
+            file_row_count=0,
+            system_open_count=0,
+            missing_item_codes=[],
+        )
+        data = excel.build_orders_import_preview_xlsx(db, [], preview)
+    else:
+        preview = excel.preview_orders_import(db, rows)
+        data = excel.build_orders_import_preview_xlsx(db, rows, preview)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    base = (file.filename or "siparis").rsplit(".", 1)[0]
+    return Response(data, media_type=XLSX, headers={"Content-Disposition": f'attachment; filename="{base}_onizleme_{stamp}.xlsx"'})
 
 
 @router.post("/imports/{kind}", response_model=ImportResult)

@@ -545,14 +545,20 @@ class OrderImportChangePreview(OrderImportRowPreview):
     changes: list[str] = []
 
 
+class OrderImportErrorRow(OrderImportRowPreview):
+    error: str = ""
+
+
 class OrderImportPreview(BaseModel):
     parse_errors: list[str]
+    error_rows: list[OrderImportErrorRow] = []
     only_in_system: list[OrderImportRowPreview]
     only_in_file: list[OrderImportRowPreview]
     updated: list[OrderImportChangePreview]
     unchanged_count: int
     file_row_count: int
     system_open_count: int
+    missing_item_codes: list[str] = []
 
 
 # ---- Haftalik is gucu (WorkCenterWeek) ----

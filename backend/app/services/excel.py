@@ -33,7 +33,7 @@ from app.models import (
     WorkCenterShift,
     WorkCenterWeek,
 )
-from app.schemas import ImportResult, OrderImportChangePreview, OrderImportPreview, OrderImportRowPreview
+from app.schemas import ImportResult, OrderImportChangePreview, OrderImportErrorRow, OrderImportPreview, OrderImportRowPreview
 
 TR_MAP = str.maketrans("çğıöşüÇĞİÖŞÜ", "cgiosuCGIOSU")
 
@@ -649,6 +649,7 @@ def preview_orders_import(db: Session, rows: list[dict]) -> OrderImportPreview:
 
     items = _item_lookup(db)
     parse_errors: list[str] = []
+    error_rows: list[OrderImportErrorRow] = []
     file_keys: dict[tuple, OrderImportRowPreview] = {}
 
     for r in rows:
@@ -667,7 +668,26 @@ def preview_orders_import(db: Session, rows: list[dict]) -> OrderImportPreview:
             key = _order_lookup_key(order_no, pos, item.id)
             file_keys[key] = _order_preview_from_row(r, item.code)
         except Exception as e:  # noqa: BLE001
-            parse_errors.append(f"Satir {r.get('_row', '?')}: {e}")
+            msg = str(e)
+            parse_errors.append(f"Satir {r.get('_row', '?')}: {msg}")
+            due = None
+            try:
+                due = _date(r.get("due_date"))
+            except Exception:  # noqa: BLE001
+                pass
+            error_rows.append(
+                OrderImportErrorRow(
+                    excel_row=r.get("_row"),
+                    order_no=_str(r.get("order_no")),
+                    position_no=_str(r.get("position_no")),
+                    item_code=_str(r.get("item_code")),
+                    customer=_str(r.get("customer")),
+                    due_date=due,
+                    quantity=_float(r.get("quantity")),
+                    unit_price=_float(r.get("unit_price"), None),
+                    error=msg,
+                )
+            )
 
     open_orders = (
         db.query(Order)
@@ -715,14 +735,18 @@ def preview_orders_import(db: Session, rows: list[dict]) -> OrderImportPreview:
         else:
             unchanged += 1
 
+    missing_codes = sorted({e.item_code for e in error_rows if e.item_code and e.error.startswith("Stok kodu bulunamadi")})
+
     return OrderImportPreview(
         parse_errors=parse_errors,
+        error_rows=error_rows,
         only_in_system=only_in_system,
         only_in_file=only_in_file,
         updated=updated,
         unchanged_count=unchanged,
         file_row_count=len(rows),
         system_open_count=len(open_orders),
+        missing_item_codes=missing_codes,
     )
 
 
@@ -1091,6 +1115,116 @@ def build_backup(db: Session) -> bytes:
     _ws_from_rows(wb, "Import Logu", ["Tarih", "Tür", "Dosya", "Kullanıcı", "Eklenen", "Güncellenen", "Hatalar"],
                   [[l.created_at, l.kind, l.filename, l.username, l.inserted, l.updated, l.errors] for l in db.query(ImportLog).order_by(ImportLog.created_at.desc()).limit(500)])
     return workbook_bytes(wb)
+
+
+def _order_row_values(r: dict) -> list[Any]:
+    due = r.get("due_date")
+    if isinstance(due, date):
+        due_val = due.isoformat()
+    else:
+        try:
+            due_val = _date(due).isoformat() if due not in (None, "") else ""
+        except Exception:  # noqa: BLE001
+            due_val = due
+    qty = _float(r.get("quantity"))
+    price = _float(r.get("unit_price"), None)
+    return [
+        _str(r.get("order_no")),
+        _str(r.get("position_no")),
+        _str(r.get("customer")),
+        due_val,
+        _str(r.get("item_code")),
+        qty if qty is not None else r.get("quantity"),
+        price if price is not None else r.get("unit_price"),
+    ]
+
+
+def _preview_row_values(r: OrderImportRowPreview) -> list[Any]:
+    return [
+        r.order_no,
+        r.position_no or "",
+        r.customer or "",
+        r.due_date.isoformat() if r.due_date else "",
+        r.item_code,
+        r.quantity,
+        r.unit_price if r.unit_price is not None else "",
+    ]
+
+
+def build_orders_import_preview_xlsx(db: Session, rows: list[dict], preview: OrderImportPreview) -> bytes:
+    """Siparis import onizleme raporu: hatalar, farklar ve duzenlenebilir tam liste."""
+    items = _item_lookup(db)
+    order_hdr = [c[1] for c in TEMPLATES["orders"]["columns"]]
+    err_hdr = ["Satır", *order_hdr, "Hata"]
+    diff_hdr = ["Satır", *order_hdr, "Durum", "Açıklama"]
+    can_import = len(preview.parse_errors) == 0
+
+    new_keys = {(r.order_no, r.position_no, r.item_code) for r in preview.only_in_file}
+    upd_map = {(r.order_no, r.position_no, r.item_code): r for r in preview.updated}
+    err_map = {e.excel_row: e for e in preview.error_rows}
+
+    full_rows: list[list[Any]] = []
+    for r in rows:
+        rn = r.get("_row")
+        vals = _order_row_values(r)
+        if rn in err_map:
+            full_rows.append([rn, *vals, "HATA", err_map[rn].error])
+            continue
+        order_no = _str(r.get("order_no"))
+        pos = _str(r.get("position_no"))
+        code = _str(r.get("item_code"))
+        item = items.get(code.upper())
+        if not item:
+            full_rows.append([rn, *vals, "HATA", f"Stok kodu bulunamadi: {code}"])
+            continue
+        key_display = (order_no, pos, item.code)
+        if key_display in new_keys:
+            full_rows.append([rn, *vals, "Yeni", "Sisteme eklenecek"])
+        elif key_display in upd_map:
+            full_rows.append([rn, *vals, "Güncelle", " · ".join(upd_map[key_display].changes)])
+        else:
+            full_rows.append([rn, *vals, "Aynı", "Değişiklik yok"])
+
+    summary = [
+        ["Import durumu", "ONAYLANABİLİR" if can_import else "BLOKE — hatalı satırları düzeltin"],
+        ["Dosyadaki satır", preview.file_row_count],
+        ["Hatalı satır", len(preview.error_rows)],
+        ["Eksik stok kodu (benzersiz)", len(preview.missing_item_codes)],
+        ["Sistemde açık sipariş", preview.system_open_count],
+        ["Eklenecek", len(preview.only_in_file)],
+        ["Güncellenecek", len(preview.updated)],
+        ["Değişmeden kalacak", preview.unchanged_count],
+        ["Sistemde var, listede yok", len(preview.only_in_system)],
+        [],
+        ["Not", "Hatalar sayfasını düzeltin veya eksik stok kodlarını Stok Kodları importu ile ekleyin."],
+        ["Not", "Tam liste sayfasındaki Durum/Açıklama sütunlarını silerek dosyayı tekrar yükleyebilirsiniz."],
+    ]
+
+    sheets: dict[str, tuple[list[str], list[list[Any]]]] = {
+        "Özet": (["Alan", "Değer"], summary),
+        "Hatalar": (
+            err_hdr,
+            [[e.excel_row, *_preview_row_values(e), e.error] for e in sorted(preview.error_rows, key=lambda x: (x.excel_row or 0, x.order_no))],
+        ),
+        "Eksik stok kodları": (
+            ["Stok Kodu", "Öneri"],
+            [[c, "Stok Kodları importu ile ekleyin veya dosyada kodu düzeltin"] for c in preview.missing_item_codes],
+        ),
+        "Tam liste": (diff_hdr, full_rows),
+        "Sistemde var listede yok": (
+            ["Satır", *order_hdr],
+            [[r.excel_row or "", *_preview_row_values(r)] for r in preview.only_in_system],
+        ),
+        "Eklenecek": (
+            ["Satır", *order_hdr],
+            [[r.excel_row or "", *_preview_row_values(r)] for r in preview.only_in_file],
+        ),
+        "Güncellenecek": (
+            ["Satır", *order_hdr, "Değişiklikler"],
+            [[r.excel_row or "", *_preview_row_values(r), " · ".join(r.changes)] for r in preview.updated],
+        ),
+    }
+    return build_report(sheets)
 
 
 def build_report(sheets: dict[str, tuple[list[str], list[list[Any]]]]) -> bytes:

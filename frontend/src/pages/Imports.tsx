@@ -16,7 +16,7 @@ const HINT: Record<string, string> = {
   bom: "Hammadde satırları.",
   routing: "Aşamalı tezgah sırası + çevrim süresi (sn/adet). Kapasite ihtiyacının kaynağı.",
   op_rules: "Senaryo matrisi: Kural = Bitiş (önceki bitince) ya da Çevrim (önceki N çevrim tamamlayınca). Stok Kodu boşsa ürün grubu geneli.",
-  orders: "Günlük açık sipariş listesi: önce fark özeti gösterilir. Eşleşen satırlar güncellenir; listede olmayan açık siparişleri silmek isteğe bağlıdır (kapalı siparişlere dokunulmaz).",
+  orders: "Günlük açık sipariş listesi: önce fark özeti gösterilir; hata varsa Excel raporu indirilip düzeltilir. Eşleşen satırlar güncellenir; listede olmayan açık siparişleri silmek isteğe bağlıdır.",
   production: "Bir önceki günün üretimi. Aynı gün/iş merkezi/stok/op/sipariş satırı üzerine yazılır.",
   downtime: "Bir günün duruşları yeniden yüklenirse o gün/iş merkezi için eskiler silinir.",
   stock_receipts: "Depoya giren bitmiş ürün (siparişten bağımsız). Rezervasyon Stok & Rezervasyon sayfasından yapılır.",
@@ -154,7 +154,19 @@ function OrderImportDialog({
   onConfirm: (removeMissing: boolean) => void;
 }) {
   const [removeMissing, setRemoveMissing] = useState(preview.only_in_system.length > 0);
+  const [dlBusy, setDlBusy] = useState(false);
   const blocked = preview.parse_errors.length > 0;
+  const errShow = preview.parse_errors.slice(0, 25);
+  const errMore = preview.parse_errors.length - errShow.length;
+
+  const downloadReport = async () => {
+    setDlBusy(true);
+    try {
+      await api.uploadDownload("/api/imports/orders/preview.xlsx", file);
+    } finally {
+      setDlBusy(false);
+    }
+  };
 
   return (
     <div className="panel" style={{ marginTop: 16, borderLeft: "4px solid var(--primary)" }}>
@@ -165,10 +177,27 @@ function OrderImportDialog({
         {preview.only_in_system.length > 0 && <> · <span style={{ color: "var(--warn)" }}>{preview.only_in_system.length} sistemde var, listede yok</span></>}
       </p>
 
-      {preview.parse_errors.length > 0 && (
+      <div className="row" style={{ marginBottom: 10 }}>
+        <button className="secondary" onClick={downloadReport} disabled={dlBusy || busy}>
+          {dlBusy ? "Hazırlanıyor…" : "Karşılaştırma raporunu Excel indir"}
+        </button>
+        <span className="muted">Hataları düzeltmek, eksik stok kodlarını görmek ve dosyayı tekrar yüklemek için kullanın.</span>
+      </div>
+
+      {blocked && (
         <div className="error" style={{ marginBottom: 10 }}>
-          <b>Dosya okunamadı veya satır hataları var — import yapılamaz:</b>
-          <ul className="errors">{preview.parse_errors.map((e, i) => <li key={i}>{e}</li>)}</ul>
+          <b>Import onaylanamaz — {preview.error_rows.length || preview.parse_errors.length} satırda hata var.</b>
+          <p style={{ margin: "6px 0" }}>
+            En sık neden: Excel&apos;deki <b>stok kodu</b> sistemde tanımlı değil
+            {preview.missing_item_codes.length > 0 && (
+              <> ({preview.missing_item_codes.length} farklı kod: {preview.missing_item_codes.slice(0, 8).join(", ")}{preview.missing_item_codes.length > 8 ? "…" : ""})</>
+            )}.
+            Önce <b>Stok Kodları</b> importu ile eksik kodları ekleyin veya Excel raporundaki <b>Hatalar</b> sayfasında kodları düzeltin.
+          </p>
+          <ul className="errors">
+            {errShow.map((e, i) => <li key={i}>{e}</li>)}
+            {errMore > 0 && <li className="muted">… ve {errMore} hata daha (tam listeyi Excel raporunda görün)</li>}
+          </ul>
         </div>
       )}
 

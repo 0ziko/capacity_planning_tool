@@ -177,6 +177,7 @@ def test_orders_import_preview_and_remove_missing(client, auth):
     )
     prev = client.post("/api/imports/orders/preview", headers=auth, files={"file": ("orders.xlsx", content, "application/octet-stream")}).json()
     assert prev["parse_errors"] == []
+    assert prev["error_rows"] == []
     assert {r["order_no"] for r in prev["only_in_system"]} == {"DROP"}
     assert {r["order_no"] for r in prev["only_in_file"]} == {"NEW-1"}
     assert prev["unchanged_count"] == 1
@@ -192,3 +193,23 @@ def test_orders_import_preview_and_remove_missing(client, auth):
     open_nos = sorted(o["order_no"] for o in client.get("/api/orders", headers=auth, params={"status": "open"}).json())
     assert open_nos == ["KEEP", "NEW-1"]
     assert client.get("/api/orders", headers=auth, params={"status": "closed"}).json()[0]["order_no"] == "CLOSED"
+
+
+def test_orders_import_preview_xlsx(client, auth):
+    """Onizleme raporu Excel: hatali stok kodu ve fark sayfalari."""
+    _setup(client, auth)
+    content = _xlsx(
+        ["Sipariş No", "Poz No", "Müşteri", "Termin", "Stok Kodu", "Miktar"],
+        [
+            ["KEEP", "", "A", "2026-09-30", "MAM-1", 10],
+            ["BAD", "", "B", "2026-09-30", "YOK-STOK", 5],
+        ],
+    )
+    prev = client.post("/api/imports/orders/preview", headers=auth, files={"file": ("orders.xlsx", content, "application/octet-stream")}).json()
+    assert len(prev["error_rows"]) == 1
+    assert prev["error_rows"][0]["item_code"] == "YOK-STOK"
+    assert "YOK-STOK" in prev["missing_item_codes"]
+
+    r = client.post("/api/imports/orders/preview.xlsx", headers=auth, files={"file": ("orders.xlsx", content, "application/octet-stream")})
+    assert r.status_code == 200 and r.content[:2] == b"PK"
+    assert "onizleme" in (r.headers.get("content-disposition") or "").lower() or "orders" in (r.headers.get("content-disposition") or "").lower()

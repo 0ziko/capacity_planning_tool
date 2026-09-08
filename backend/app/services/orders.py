@@ -23,12 +23,150 @@ from app.services import capacity as cap
 
 # ---------------- Yardimcilar ----------------
 
+def effective_due(o: Order) -> date:
+    """Planlama ve gecikme hesabi icin: revize termin varsa o, yoksa ilk termin."""
+    return o.revised_due_date or o.due_date
+
+
+def normalize_market(v: str | None) -> str:
+    s = (v or "").strip().lower().translate(str.maketrans("çğıöşü", "cgiosu"))
+    if s in ("export", "yurtdisi", "yurtdis", "yd", "ihracat", "dis"):
+        return "export"
+    return "domestic"
+
+
 def order_out(o: Order) -> OrderOut:
     row = OrderOut.model_validate(o)
     row.item_code = o.item.code
     row.item_name = o.item.name
     row.revenue = round(o.quantity * (o.unit_price or 0.0), 2)
+    row.effective_due_date = effective_due(o)
+    row.market = o.market or "domestic"
     return row
+
+
+def enrich_orders(db: Session, orders: list[Order]) -> list[OrderOut]:
+    """Plan ve rezervasyon durumunu siparis listesine ekler."""
+    if not orders:
+        return []
+    ids = [o.id for o in orders]
+    open_ids = {o.id for o in orders if o.status == "open"}
+    sched_map: dict[int, OrderScheduleOut] = {}
+    if open_ids:
+        for s in order_schedule(db, None):
+            if s.order_id in open_ids:
+                sched_map[s.order_id] = s
+    from sqlalchemy import func
+
+    res_map = {
+        oid: float(qty or 0)
+        for oid, qty in db.query(Reservation.order_id, func.sum(Reservation.quantity)).filter(Reservation.order_id.in_(ids)).group_by(Reservation.order_id).all()
+    }
+    out: list[OrderOut] = []
+    for o in orders:
+        row = order_out(o)
+        rq = res_map.get(o.id, 0.0)
+        row.reserved_qty = round(rq, 3)
+        if rq <= 1e-6:
+            row.reservation_status = "none"
+        elif rq >= o.quantity - 1e-6:
+            row.reservation_status = "full"
+        else:
+            row.reservation_status = "partial"
+        if o.status != "open":
+            row.plan_status = "closed"
+        elif o.id in sched_map:
+            row.plan_status = sched_map[o.id].plan_status
+        else:
+            row.plan_status = "unplanned"
+        out.append(row)
+    return out
+
+
+def filter_enriched_orders(
+    rows: list[OrderOut],
+    plan_status: str | None = None,
+    reservation_status: str | None = None,
+) -> list[OrderOut]:
+    if plan_status:
+        rows = [r for r in rows if r.plan_status == plan_status]
+    if reservation_status:
+        rows = [r for r in rows if r.reservation_status == reservation_status]
+    return rows
+
+
+def orders_analysis(db: Session, status: str | None = "open", market: str | None = None, due_from: date | None = None, due_to: date | None = None) -> dict:
+    from app.schemas import OrderAnalysisOut, OrderAnalysisRow
+
+    q = db.query(Order).options(joinedload(Order.item))
+    if status:
+        q = q.filter(Order.status == status)
+    if market:
+        q = q.filter(Order.market == market)
+    orders = q.all()
+    if due_from or due_to:
+        orders = [o for o in orders if (not due_from or effective_due(o) >= due_from) and (not due_to or effective_due(o) <= due_to)]
+    enriched = enrich_orders(db, orders)
+    agg: dict[tuple[str, str, date], OrderAnalysisRow] = {}
+    for r in enriched:
+        ed = r.effective_due_date or r.due_date
+        key = (r.customer or "—", r.market, ed)
+        if key not in agg:
+            agg[key] = OrderAnalysisRow(customer=key[0], market=key[1], due_date=key[2], order_count=0, revenue=0.0)
+        agg[key].order_count += 1
+        agg[key].revenue = round(agg[key].revenue + r.revenue, 2)
+    rows = sorted(agg.values(), key=lambda x: (x.due_date, x.customer, x.market))
+    total = round(sum(r.revenue for r in rows), 2)
+    dom = round(sum(r.revenue for r in rows if r.market == "domestic"), 2)
+    exp = round(sum(r.revenue for r in rows if r.market == "export"), 2)
+    by_cust: dict[str, dict] = {}
+    for r in rows:
+        c = r.customer
+        if c not in by_cust:
+            by_cust[c] = {"customer": c, "domestic": 0.0, "export": 0.0, "total": 0.0}
+        by_cust[c][r.market] = round(by_cust[c][r.market] + r.revenue, 2)
+        by_cust[c]["total"] = round(by_cust[c]["total"] + r.revenue, 2)
+    return OrderAnalysisOut(
+        rows=rows,
+        total_revenue=total,
+        domestic_revenue=dom,
+        export_revenue=exp,
+        by_customer=sorted(by_cust.values(), key=lambda x: -x["total"]),
+    )
+
+
+def list_orders(
+    db: Session,
+    status: str | None = "open",
+    due_from: date | None = None,
+    due_to: date | None = None,
+    position: str | None = None,
+    customer: str | None = None,
+    order_no: str | None = None,
+    market: str | None = None,
+    plan_status: str | None = None,
+    reservation_status: str | None = None,
+) -> list[OrderOut]:
+    from sqlalchemy import func
+
+    q = db.query(Order).options(joinedload(Order.item))
+    if status:
+        q = q.filter(Order.status == status)
+    if due_from:
+        q = q.filter(func.coalesce(Order.revised_due_date, Order.due_date) >= due_from)
+    if due_to:
+        q = q.filter(func.coalesce(Order.revised_due_date, Order.due_date) <= due_to)
+    if position and position.strip():
+        q = q.filter(Order.position_no.ilike(f"%{position.strip()}%"))
+    if customer and customer.strip():
+        q = q.filter(Order.customer.ilike(f"%{customer.strip()}%"))
+    if order_no and order_no.strip():
+        q = q.filter(Order.order_no.ilike(f"%{order_no.strip()}%"))
+    if market:
+        q = q.filter(Order.market == market)
+    orders = q.order_by(func.coalesce(Order.revised_due_date, Order.due_date), Order.order_no, Order.position_no).all()
+    rows = enrich_orders(db, orders)
+    return filter_enriched_orders(rows, plan_status, reservation_status)
 
 
 def _planned_wcs(db: Session, wc_ids: list[int] | None) -> list[WorkCenter]:
@@ -41,11 +179,13 @@ def _planned_wcs(db: Session, wc_ids: list[int] | None) -> list[WorkCenter]:
 
 
 def _open_orders(db: Session) -> list[Order]:
+    from sqlalchemy import func
+
     return (
         db.query(Order)
         .options(joinedload(Order.item).joinedload(Item.operations).joinedload(RoutingOperation.work_center))
         .filter(Order.status == "open")
-        .order_by(Order.due_date, Order.order_no, Order.position_no, Order.id)
+        .order_by(func.coalesce(Order.revised_due_date, Order.due_date), Order.order_no, Order.position_no, Order.id)
         .all()
     )
 
@@ -89,6 +229,8 @@ def create_order(db: Session, data: OrderIn) -> Order:
         position_no=pos,
         customer=data.customer.strip(),
         due_date=data.due_date,
+        revised_due_date=data.revised_due_date,
+        market=normalize_market(data.market),
         item_id=item.id,
         quantity=data.quantity,
         unit_price=data.unit_price,
@@ -110,6 +252,8 @@ def update_order(db: Session, o: Order, data: OrderIn) -> Order:
     o.position_no = (data.position_no or "").strip()
     o.customer = data.customer.strip()
     o.due_date = data.due_date
+    o.revised_due_date = data.revised_due_date
+    o.market = normalize_market(data.market)
     o.item_id = item.id
     o.quantity = data.quantity
     o.unit_price = data.unit_price
@@ -144,7 +288,7 @@ def _end_day_in_week(db: Session, wc: WorkCenter, wk: date, order_id: int, lines
     if not wdays:
         return wk + timedelta(days=4)
     capacity = cap.week_capacity_hours(db, wc, wk)
-    ordered = sorted(lines_in_week, key=lambda p: (p.order.due_date, p.order.order_no, p.order_id, getattr(p, "id", 0) or 0))
+    ordered = sorted(lines_in_week, key=lambda p: (effective_due(p.order), p.order.order_no, p.order_id, getattr(p, "id", 0) or 0))
     cum = 0.0
     reached = False
     for p in ordered:
@@ -241,7 +385,7 @@ def order_schedule(db: Session, wc_ids: list[int] | None, lines=None, orders: li
             status = "unplanned"
         elif coverage < 99.5:
             status = "partial"
-        elif planned_end and planned_end > o.due_date:
+        elif planned_end and planned_end > effective_due(o):
             status = "late"
         else:
             status = "on_time"
@@ -264,7 +408,7 @@ def order_schedule(db: Session, wc_ids: list[int] | None, lines=None, orders: li
                 planned_end_week=end_week,
                 planned_end=planned_end,
                 last_work_center_code=last_wc_code,
-                lateness_days=(planned_end - o.due_date).days if planned_end else None,
+                lateness_days=(planned_end - effective_due(o)).days if planned_end else None,
                 plan_status=status,
             )
         )

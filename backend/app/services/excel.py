@@ -107,10 +107,12 @@ TEMPLATES: dict[str, dict] = {
         "columns": [
             ("code", "Stok Kodu", ["stokkodu", "kod", "malzeme"]),
             ("name", "Stok Adı", ["stokadi", "ad", "aciklama"]),
+            ("main_group", "Ana Grup", ["anagrup", "anagrup"]),
+            ("sub_group", "Alt Grup", ["altgrup"]),
             ("product_group", "Ürün Grubu", ["grup", "urungrubu"]),
             ("unit", "Birim", []),
         ],
-        "example": ["MAM-0001", "Endüstriyel Ocak 4 Gözlü", "OCAK", "AD"],
+        "example": ["MAM-0001", "Endüstriyel Ocak 4 Gözlü", "MUTFAK", "OCAK", "OCAK", "AD"],
         "required": ["code"],
     },
     "bom": {
@@ -146,11 +148,13 @@ TEMPLATES: dict[str, dict] = {
             ("position_no", "Poz No", ["poz", "pozno", "pozisyon", "pozisyonno"]),
             ("customer", "Müşteri", ["musteriadi", "cari"]),
             ("due_date", "Termin", ["termintarihi", "teslimtarihi", "tarih"]),
+            ("revised_due_date", "Revize Termin", ["revizetermin", "revizetermintarihi"]),
+            ("market", "Pazar", ["pazar", "yerliyurtdisi"]),
             ("item_code", "Stok Kodu", ["stokkodu", "malzeme"]),
             ("quantity", "Miktar", ["adet"]),
             ("unit_price", "Birim Fiyat", ["fiyat", "birimfiyat", "satisfiyati", "birimsatisfiyati"]),
         ],
-        "example": ["SIP-2026-001", "10", "ABC Otel", "2026-10-15", "MAM-0001", 40, 1250],
+        "example": ["SIP-2026-001", "10", "ABC Otel", "2026-10-15", "", "Yerli", "MAM-0001", 40, 1250],
         "required": ["order_no", "due_date", "item_code", "quantity"],
     },
     "production": {
@@ -599,6 +603,8 @@ def import_items(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
             else:
                 upd += 1
             it.name = _str(r.get("name")) or it.name
+            it.main_group = _str(r.get("main_group")) or it.main_group
+            it.sub_group = _str(r.get("sub_group")) or it.sub_group
             it.product_group = _str(r.get("product_group")) or it.product_group
             it.unit = _str(r.get("unit")) or it.unit or "AD"
         except Exception as e:  # noqa: BLE001
@@ -665,11 +671,20 @@ def import_routing(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
 
 
 def _order_preview_from_row(r: dict, item_code: str, order_id: int | None = None) -> OrderImportRowPreview:
+    from app.services.orders import normalize_market
+
     due = None
     try:
         due = _date(r.get("due_date"))
     except Exception:  # noqa: BLE001
         pass
+    rev = None
+    try:
+        rev_raw = r.get("revised_due_date")
+        rev = _date(rev_raw) if rev_raw not in (None, "") else None
+    except Exception:  # noqa: BLE001
+        pass
+    m = _str(r.get("market"))
     return OrderImportRowPreview(
         order_id=order_id,
         order_no=_str(r.get("order_no")),
@@ -677,6 +692,8 @@ def _order_preview_from_row(r: dict, item_code: str, order_id: int | None = None
         item_code=item_code,
         customer=_str(r.get("customer")),
         due_date=due,
+        revised_due_date=rev,
+        market=normalize_market(m) if m else "domestic",
         quantity=_float(r.get("quantity")),
         unit_price=_float(r.get("unit_price"), None),
         excel_row=r.get("_row"),
@@ -691,6 +708,8 @@ def _order_preview_from_model(o: Order) -> OrderImportRowPreview:
         item_code=o.item.code if o.item else "",
         customer=o.customer,
         due_date=o.due_date,
+        revised_due_date=o.revised_due_date,
+        market=o.market or "domestic",
         quantity=o.quantity,
         unit_price=o.unit_price,
     )
@@ -770,6 +789,11 @@ def preview_orders_import(db: Session, rows: list[dict]) -> OrderImportPreview:
             changes.append(f"musteri: {o.customer or '—'} → {fp.customer}")
         if fp.unit_price is not None and abs(fp.unit_price - (o.unit_price or 0)) > 1e-9:
             changes.append(f"birim fiyat: {o.unit_price or 0:g} → {fp.unit_price:g}")
+        sys_rev = o.revised_due_date
+        if fp.revised_due_date != sys_rev:
+            changes.append(f"revize termin: {sys_rev or '—'} → {fp.revised_due_date or '—'}")
+        if fp.market and fp.market != (o.market or "domestic"):
+            changes.append(f"pazar: {o.market or 'domestic'} → {fp.market}")
         if changes:
             updated.append(
                 OrderImportChangePreview(
@@ -779,6 +803,8 @@ def preview_orders_import(db: Session, rows: list[dict]) -> OrderImportPreview:
                     item_code=fp.item_code,
                     customer=fp.customer,
                     due_date=fp.due_date,
+                    revised_due_date=fp.revised_due_date,
+                    market=fp.market,
                     quantity=fp.quantity,
                     unit_price=fp.unit_price,
                     excel_row=fp.excel_row,
@@ -826,7 +852,16 @@ def import_orders(db: Session, rows: list[dict], remove_missing: bool = False) -
             file_keys.add(key)
             o = existing.get(key)
             if not o:
-                o = Order(order_no=order_no, position_no=pos, item_id=item.id, quantity=qty, due_date=_date(r.get("due_date")))
+                from app.services.orders import normalize_market
+
+                o = Order(
+                    order_no=order_no,
+                    position_no=pos,
+                    item_id=item.id,
+                    quantity=qty,
+                    due_date=_date(r.get("due_date")),
+                    market=normalize_market(_str(r.get("market")) or "domestic"),
+                )
                 db.add(o)
                 existing[key] = o
                 ins += 1
@@ -834,6 +869,13 @@ def import_orders(db: Session, rows: list[dict], remove_missing: bool = False) -
                 upd += 1
             o.customer = _str(r.get("customer")) or o.customer
             o.due_date = _date(r.get("due_date"))
+            rev = r.get("revised_due_date")
+            o.revised_due_date = _date(rev) if rev not in (None, "") else None
+            from app.services.orders import normalize_market
+
+            m = _str(r.get("market"))
+            if m:
+                o.market = normalize_market(m)
             o.quantity = qty
             o.position_no = pos
             price = _float(r.get("unit_price"), None)
@@ -1170,14 +1212,25 @@ def build_backup(db: Session) -> bytes:
     return workbook_bytes(wb)
 
 
+def _market_cell(v: str | None) -> str:
+    from app.services.orders import normalize_market
+
+    if not v:
+        return ""
+    return "Yurtdışı" if normalize_market(v) == "export" else "Yerli"
+
+
 def _order_row_values(r: dict) -> list[Any]:
     qty = _float(r.get("quantity"))
     price = _float(r.get("unit_price"), None)
+    rev = r.get("revised_due_date")
     return [
         _str(r.get("order_no")),
         _str(r.get("position_no")),
         _str(r.get("customer")),
         _date_cell(r.get("due_date")),
+        _date_cell(rev) if rev not in (None, "") else "",
+        _market_cell(_str(r.get("market"))),
         _str(r.get("item_code")),
         qty if qty is not None else r.get("quantity"),
         price if price is not None else r.get("unit_price"),
@@ -1190,6 +1243,8 @@ def _preview_row_values(r: OrderImportRowPreview) -> list[Any]:
         r.position_no or "",
         r.customer or "",
         _date_cell(r.due_date),
+        _date_cell(r.revised_due_date) if r.revised_due_date else "",
+        _market_cell(r.market),
         r.item_code,
         r.quantity,
         r.unit_price if r.unit_price is not None else "",

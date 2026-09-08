@@ -118,10 +118,12 @@ export interface WorkCenter {
   employee_count: number; machine_employee_count: number; capacity_headcount: number;
 }
 export interface Employee { id: number; code: string; name: string; work_center_id: number | null; machine_id: number | null; is_active: boolean; machine_code?: string }
-export interface Item { id: number; code: string; name: string; product_group: string; unit: string }
+export interface Item { id: number; code: string; name: string; main_group: string; sub_group: string; product_group: string; unit: string }
 export interface ItemDetail extends Item { bom_lines: { id: number; component_code: string; component_name: string; quantity: number; unit: string }[]; operations: { id: number; seq: number; operation_name: string; work_center_id: number; cycle_time_sec: number; setup_time_min: number; semi_finished_code: string }[] }
-export interface Order { id: number; order_no: string; position_no: string; customer: string; due_date: string; item_id: number; item_code: string; item_name: string; quantity: number; unit_price: number; revenue: number; status: string; merged_into_id: number | null; note: string }
-export interface OrderIn { order_no: string; position_no: string; customer: string; due_date: string; item_code: string; quantity: number; unit_price: number; note: string }
+export interface Order { id: number; order_no: string; position_no: string; customer: string; due_date: string; revised_due_date: string | null; effective_due_date: string; market: string; item_id: number; item_code: string; item_name: string; quantity: number; unit_price: number; revenue: number; status: string; merged_into_id: number | null; note: string; plan_status: string; reservation_status: string; reserved_qty: number }
+export interface OrderIn { order_no: string; position_no: string; customer: string; due_date: string; revised_due_date?: string | null; market?: string; item_code: string; quantity: number; unit_price: number; note: string }
+export interface OrderAnalysisRow { customer: string; market: string; due_date: string; order_count: number; revenue: number }
+export interface OrderAnalysis { rows: OrderAnalysisRow[]; total_revenue: number; domestic_revenue: number; export_revenue: number; by_customer: { customer: string; domestic: number; export: number; total: number }[] }
 export type PlanMode = "due_date" | "revenue";
 export interface PeriodRevenue { period: string; completed_revenue: number; completed_orders: number; earned_revenue: number; cumulative_completed: number; cumulative_earned: number }
 export interface RevenueReport { start: string; end: string; total_open_revenue: number; planned_revenue: number; partial_revenue: number; unplanned_revenue: number; no_price_orders: number; weeks: PeriodRevenue[]; months: PeriodRevenue[] }
@@ -187,7 +189,7 @@ export interface Reservation { id: number; item_id: number; item_code: string; i
 export interface Shipment { id: number; item_id: number; item_code: string; order_id: number; order_no: string; position_no: string; customer: string; ship_date: string; quantity: number; note: string; created_by: string }
 export interface AutoReserveResult { created: number; reserved_qty: number; items: number; message: string }
 export interface ImportResult { kind: string; inserted: number; updated: number; removed?: number; errors: string[] }
-export interface OrderImportRowPreview { order_id: number | null; order_no: string; position_no: string; item_code: string; customer: string; due_date: string | null; quantity: number | null; unit_price: number | null; excel_row: number | null }
+export interface OrderImportRowPreview { order_id: number | null; order_no: string; position_no: string; item_code: string; customer: string; due_date: string | null; revised_due_date?: string | null; market?: string; quantity: number | null; unit_price: number | null; excel_row: number | null }
 export interface OrderImportChangePreview extends OrderImportRowPreview { changes: string[] }
 export interface OrderImportPreview { parse_errors: string[]; error_rows: OrderImportErrorRow[]; missing_item_codes: string[]; only_in_system: OrderImportRowPreview[]; only_in_file: OrderImportRowPreview[]; updated: OrderImportChangePreview[]; unchanged_count: number; file_row_count: number; system_open_count: number }
 export interface OrderImportErrorRow extends OrderImportRowPreview { error: string }

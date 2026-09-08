@@ -1,132 +1,189 @@
 import { useEffect, useState } from "react";
-import { api, fmt, qs, type Item, type Order, type OrderIn } from "../api";
+import { api, fmt, qs, type Item, type Order, type OrderAnalysis, type OrderIn } from "../api";
 import { useAuth } from "../auth";
-import { ErrorText, WcMultiSelect, useAsync, useWorkCenters } from "../components";
+import { ErrorText, useAsync } from "../components";
 
-interface ReqLine { work_center_id: number; work_center_code: string; item_code: string; operation_seq: number; operation_name: string; quantity: number; hours: number }
-interface ReqOut { lines: ReqLine[]; by_work_center: { work_center_id: number; work_center_code: string; hours: number }[]; total_hours: number }
-
-const STATUS_LABEL: Record<string, string> = { open: "Açık", closed: "Kapalı", merged: "Birleştirildi" };
+const STATUS_LABEL: Record<string, string> = { open: "Açık", closed: "Kapalı" };
+const PLAN_LABEL: Record<string, string> = { unplanned: "Planlanmadı", partial: "Kısmi", late: "Gecikmeli", on_time: "Zamanında", no_ops: "Rota yok", closed: "Kapalı" };
+const RES_LABEL: Record<string, string> = { none: "Rezerv yok", partial: "Kısmi rezerv", full: "Tam rezerv" };
+const MARKET_LABEL: Record<string, string> = { domestic: "Yerli", export: "Yurtdışı" };
 
 export default function Orders() {
   const { can } = useAuth();
-  const { wcs } = useWorkCenters();
   const [status, setStatus] = useState("open");
   const [position, setPosition] = useState("");
+  const [customer, setCustomer] = useState("");
+  const [orderNo, setOrderNo] = useState("");
+  const [market, setMarket] = useState("");
+  const [planStatus, setPlanStatus] = useState("");
+  const [resStatus, setResStatus] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
-  const [wcIds, setWcIds] = useState<number[]>([]);
-  const [selCodes, setSelCodes] = useState<string[]>([]);
   const [editing, setEditing] = useState<Order | "new" | null>(null);
   const [msg, setMsg] = useState("");
-  const orders = useAsync(() => api.get<Order[]>(`/api/orders${qs({ status, due_from: from, due_to: to, position: position || undefined })}`), [status, from, to, position]);
-  const req = useAsync(
-    () => api.post<ReqOut>("/api/requirements", { work_center_ids: wcIds.length ? wcIds : null, item_codes: selCodes.length ? selCodes : null, due_from: from || null, due_to: to || null }),
-    [wcIds.join(","), selCodes.join(","), from, to, orders.data?.length]
+
+  const filterParams = {
+    status,
+    due_from: from || undefined,
+    due_to: to || undefined,
+    position: position || undefined,
+    customer: customer || undefined,
+    order_no: orderNo || undefined,
+    market: market || undefined,
+    plan_status: planStatus || undefined,
+    reservation_status: resStatus || undefined,
+  };
+
+  const orders = useAsync(() => api.get<Order[]>(`/api/orders${qs(filterParams)}`), [JSON.stringify(filterParams)]);
+  const analysis = useAsync(
+    () => api.get<OrderAnalysis>(`/api/orders/analysis${qs({ status, market: market || undefined, due_from: from || undefined, due_to: to || undefined })}`),
+    [status, market, from, to]
   );
-  const toggleCode = (c: string) => setSelCodes((s) => (s.includes(c) ? s.filter((x) => x !== c) : [...s, c]));
-  const unitOf = (wcId: number) => wcs.find((w) => w.id === wcId)?.capacity_unit_hours ?? 10;
+
   const afterSave = (o: Order, created: boolean) => {
     setEditing(null);
     setMsg(`${o.order_no}${o.position_no ? ` / poz ${o.position_no}` : ""} / ${o.item_code} ${created ? "eklendi" : "güncellendi"}.`);
     orders.reload();
+    analysis.reload();
   };
+
   const remove = async (o: Order) => {
     if (!confirm(`${o.order_no} / ${o.item_code} siparişi ve plan satırları silinsin mi?`)) return;
     try {
       await api.del(`/api/orders/${o.id}`);
       setMsg(`${o.order_no} silindi.`);
       orders.reload();
+      analysis.reload();
     } catch (e) { setMsg((e as Error).message); }
   };
 
   return (
     <>
-      <h1>Siparişler & İş Gücü İhtiyacı</h1>
+      <h1>Siparişler</h1>
       <div className="panel row">
-        <label>Durum<select value={status} onChange={(e) => setStatus(e.target.value)}><option value="open">Açık</option><option value="closed">Kapalı</option><option value="merged">Birleştirilmiş</option><option value="">Tümü</option></select></label>
+        <label>Durum<select value={status} onChange={(e) => setStatus(e.target.value)}><option value="open">Açık</option><option value="closed">Kapalı</option><option value="">Tümü</option></select></label>
+        <label>Sipariş no<input value={orderNo} onChange={(e) => setOrderNo(e.target.value)} placeholder="filtre" /></label>
         <label>Poz no<input value={position} onChange={(e) => setPosition(e.target.value)} placeholder="filtre" /></label>
+        <label>Müşteri<input value={customer} onChange={(e) => setCustomer(e.target.value)} placeholder="filtre" /></label>
+        <label>Pazar<select value={market} onChange={(e) => setMarket(e.target.value)}><option value="">Tümü</option><option value="domestic">Yerli</option><option value="export">Yurtdışı</option></select></label>
+        <label>Plan durumu<select value={planStatus} onChange={(e) => setPlanStatus(e.target.value)}><option value="">Tümü</option><option value="unplanned">Planlanmadı</option><option value="partial">Kısmi</option><option value="late">Gecikmeli</option><option value="on_time">Zamanında</option><option value="no_ops">Rota yok</option></select></label>
+        <label>Rezervasyon<select value={resStatus} onChange={(e) => setResStatus(e.target.value)}><option value="">Tümü</option><option value="none">Rezerv yok</option><option value="partial">Kısmi</option><option value="full">Tam</option></select></label>
         <label>Termin (başlangıç)<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
         <label>Termin (bitiş)<input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
-        <WcMultiSelect wcs={wcs} value={wcIds} onChange={setWcIds} />
-        {selCodes.length > 0 && <button className="secondary" onClick={() => setSelCodes([])}>Stok seçimini temizle ({selCodes.length})</button>}
         {can("poweruser") && <button onClick={() => { setEditing("new"); setMsg(""); }} disabled={editing === "new"}>+ Yeni sipariş</button>}
       </div>
-      <ErrorText err={orders.err || req.err} />
+      <ErrorText err={orders.err || analysis.err} />
       {msg && <div className="success" style={{ marginBottom: 8 }}>{msg}</div>}
       {editing && <OrderForm initial={editing === "new" ? null : editing} onSaved={afterSave} onCancel={() => setEditing(null)} />}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: 14 }}>
-        <div>
-          <h2>{STATUS_LABEL[status] ?? "Tüm"} siparişler <span className="muted">(satıra tıklayarak ihtiyaç hesabını seçili stoklara daraltın)</span></h2>
-          <div className="table-wrap">
+      <div className="panel" style={{ marginBottom: 14 }}>
+        <h2 style={{ marginTop: 0 }}>Ciro analizi <span className="muted">(müşteri × termin, yerli / yurtdışı)</span></h2>
+        <div className="row" style={{ marginBottom: 10 }}>
+          <div className="kpi"><span className="v">{fmt(analysis.data?.total_revenue, 0)}</span><span className="l">Toplam ciro</span></div>
+          <div className="kpi"><span className="v">{fmt(analysis.data?.domestic_revenue, 0)}</span><span className="l">Yerli</span></div>
+          <div className="kpi"><span className="v">{fmt(analysis.data?.export_revenue, 0)}</span><span className="l">Yurtdışı</span></div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+          <div className="table-wrap" style={{ maxHeight: 240 }}>
             <table>
-              <thead><tr><th>Sipariş</th><th>Poz</th><th>Müşteri</th><th>Termin</th><th>Stok</th><th className="num">Miktar</th><th className="num">Birim fiyat</th><th className="num">Ciro</th><th>Not</th><th></th></tr></thead>
+              <thead><tr><th>Müşteri</th><th>Termin</th><th>Pazar</th><th className="num">Sipariş</th><th className="num">Ciro</th></tr></thead>
               <tbody>
-                {orders.data?.map((o) => (
-                  <tr key={o.id} onClick={() => toggleCode(o.item_code)} style={{ cursor: "pointer", background: selCodes.includes(o.item_code) ? "#e3f2fd" : undefined }}>
-                    <td>
-                      {o.order_no}
-                      {o.status === "merged" && <span className="badge muted" style={{ marginLeft: 6 }} title={`Birleşik sipariş id ${o.merged_into_id}`}>birleştirildi</span>}
-                      {o.status === "closed" && <span className="badge muted" style={{ marginLeft: 6 }}>kapalı</span>}
-                    </td>
-                    <td>{o.position_no || <span className="muted">—</span>}</td>
-                    <td>{o.customer}</td><td>{o.due_date}</td>
-                    <td><b>{o.item_code}</b> <span className="muted">{o.item_name}</span></td>
-                    <td className="num">{fmt(o.quantity, 0)}</td>
-                    <td className="num" style={{ color: o.unit_price ? undefined : "var(--muted)" }} title={o.unit_price ? "" : "Birim fiyat girilmedi; ciro hesabına 0 olarak girer"}>{o.unit_price ? fmt(o.unit_price, 2) : "—"}</td>
-                    <td className="num">{o.revenue ? fmt(o.revenue, 0) : "—"}</td>
-                    <td className="muted" title={o.note}>{o.note.length > 40 ? o.note.slice(0, 40) + "…" : o.note}</td>
-                    <td onClick={(e) => e.stopPropagation()} style={{ whiteSpace: "nowrap" }}>
-                      {can("poweruser") && o.status !== "merged" && (
-                        <>
-                          <button className="secondary small" onClick={() => { setEditing(o); setMsg(""); }}>Düzenle</button>{" "}
-                          {o.status === "open"
-                            ? <button className="secondary small" onClick={async () => { await api.patch(`/api/orders/${o.id}/status?status=closed`); orders.reload(); }}>Kapat</button>
-                            : <button className="secondary small" onClick={async () => { await api.patch(`/api/orders/${o.id}/status?status=open`); orders.reload(); }}>Aç</button>}{" "}
-                          <button className="danger small" onClick={() => remove(o)}>Sil</button>
-                        </>
-                      )}
-                    </td>
+                {analysis.data?.rows.map((r, i) => (
+                  <tr key={i}>
+                    <td>{r.customer}</td>
+                    <td>{r.due_date}</td>
+                    <td>{MARKET_LABEL[r.market] ?? r.market}</td>
+                    <td className="num">{r.order_count}</td>
+                    <td className="num">{fmt(r.revenue, 0)}</td>
                   </tr>
                 ))}
-                {orders.data?.length === 0 && <tr><td colSpan={10} className="muted">Sipariş yok.</td></tr>}
+                {!analysis.data?.rows.length && <tr><td colSpan={5} className="muted">Veri yok.</td></tr>}
               </tbody>
             </table>
           </div>
-          <p className="muted">{orders.data?.length ?? 0} sipariş · toplam ciro <b>{fmt(orders.data?.reduce((s, o) => s + (o.revenue || 0), 0), 0)}</b>
-            {!!orders.data?.some((o) => !o.unit_price) && <> · <span style={{ color: "var(--warn)" }}>{orders.data.filter((o) => !o.unit_price).length} siparişte birim fiyat yok</span></>}
-          </p>
-        </div>
-        <div>
-          <h2>İş merkezi bazlı ihtiyaç</h2>
-          <div className="panel kpi"><span className="v">{fmt(req.data?.total_hours)} saat</span><span className="l">Toplam iş gücü ihtiyacı (seçime göre)</span></div>
-          <div className="table-wrap" style={{ maxHeight: 260 }}>
+          <div className="table-wrap" style={{ maxHeight: 240 }}>
             <table>
-              <thead><tr><th>İş Merkezi</th><th className="num">Saat</th><th className="num">Birim</th></tr></thead>
-              <tbody>{req.data?.by_work_center.map((r) => <tr key={r.work_center_id}><td><b>{r.work_center_code}</b></td><td className="num">{fmt(r.hours)}</td><td className="num">{fmt(r.hours / unitOf(r.work_center_id))}</td></tr>)}</tbody>
-            </table>
-          </div>
-          <h2>Operasyon detayı</h2>
-          <div className="table-wrap" style={{ maxHeight: 320 }}>
-            <table>
-              <thead><tr><th>İş Merkezi</th><th>Stok</th><th>Op.</th><th className="num">Miktar</th><th className="num">Saat</th></tr></thead>
-              <tbody>{req.data?.lines.map((l, i) => <tr key={i}><td>{l.work_center_code}</td><td>{l.item_code}</td><td>{l.operation_seq} {l.operation_name}</td><td className="num">{fmt(l.quantity, 0)}</td><td className="num">{fmt(l.hours, 2)}</td></tr>)}</tbody>
+              <thead><tr><th>Müşteri</th><th className="num">Yerli</th><th className="num">Yurtdışı</th><th className="num">Toplam</th></tr></thead>
+              <tbody>
+                {analysis.data?.by_customer.map((c) => (
+                  <tr key={c.customer}>
+                    <td>{c.customer}</td>
+                    <td className="num">{fmt(c.domestic, 0)}</td>
+                    <td className="num">{fmt(c.export, 0)}</td>
+                    <td className="num"><b>{fmt(c.total, 0)}</b></td>
+                  </tr>
+                ))}
+                {!analysis.data?.by_customer.length && <tr><td colSpan={4} className="muted">Veri yok.</td></tr>}
+              </tbody>
             </table>
           </div>
         </div>
       </div>
+
+      <h2>{STATUS_LABEL[status] ?? "Tüm"} siparişler</h2>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Sipariş</th><th>Poz</th><th>Müşteri</th><th>Pazar</th>
+              <th>Termin</th><th>Revize termin</th><th>Plan termin</th>
+              <th>Stok</th><th className="num">Miktar</th><th className="num">Birim fiyat</th><th className="num">Ciro</th>
+              <th>Plan</th><th>Rezerv</th><th>Not</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {orders.data?.map((o) => (
+              <tr key={o.id}>
+                <td>
+                  {o.order_no}
+                  {o.status === "closed" && <span className="badge muted" style={{ marginLeft: 6 }}>kapalı</span>}
+                </td>
+                <td>{o.position_no || <span className="muted">—</span>}</td>
+                <td>{o.customer}</td>
+                <td>{MARKET_LABEL[o.market] ?? o.market}</td>
+                <td>{o.due_date}</td>
+                <td>{o.revised_due_date || <span className="muted">—</span>}</td>
+                <td><b>{o.effective_due_date}</b></td>
+                <td><b>{o.item_code}</b> <span className="muted">{o.item_name}</span></td>
+                <td className="num">{fmt(o.quantity, 0)}</td>
+                <td className="num" style={{ color: o.unit_price ? undefined : "var(--muted)" }}>{o.unit_price ? fmt(o.unit_price, 2) : "—"}</td>
+                <td className="num">{o.revenue ? fmt(o.revenue, 0) : "—"}</td>
+                <td><span className={`badge ${o.plan_status === "on_time" ? "ok" : o.plan_status === "late" ? "bad" : o.plan_status === "unplanned" ? "warn" : "muted"}`}>{PLAN_LABEL[o.plan_status] ?? o.plan_status}</span></td>
+                <td><span className={`badge ${o.reservation_status === "full" ? "ok" : o.reservation_status === "none" ? "warn" : "muted"}`}>{RES_LABEL[o.reservation_status] ?? o.reservation_status}</span></td>
+                <td className="muted" title={o.note}>{o.note.length > 30 ? o.note.slice(0, 30) + "…" : o.note}</td>
+                <td style={{ whiteSpace: "nowrap" }}>
+                  {can("poweruser") && o.status !== "merged" && (
+                    <>
+                      <button className="secondary small" onClick={() => { setEditing(o); setMsg(""); }}>Düzenle</button>{" "}
+                      {o.status === "open"
+                        ? <button className="secondary small" onClick={async () => { await api.patch(`/api/orders/${o.id}/status?status=closed`); orders.reload(); }}>Kapat</button>
+                        : <button className="secondary small" onClick={async () => { await api.patch(`/api/orders/${o.id}/status?status=open`); orders.reload(); }}>Aç</button>}{" "}
+                      <button className="danger small" onClick={() => remove(o)}>Sil</button>
+                    </>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {orders.data?.length === 0 && <tr><td colSpan={15} className="muted">Sipariş yok.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <p className="muted">
+        {orders.data?.length ?? 0} sipariş · toplam ciro <b>{fmt(orders.data?.reduce((s, o) => s + (o.revenue || 0), 0), 0)}</b>
+        {!!orders.data?.some((o) => !o.unit_price) && <> · <span style={{ color: "var(--warn)" }}>{orders.data.filter((o) => !o.unit_price).length} siparişte birim fiyat yok</span></>}
+      </p>
     </>
   );
 }
 
-/** Tekil sipariş ekleme / düzenleme formu. */
 function OrderForm({ initial, onSaved, onCancel }: { initial: Order | null; onSaved: (o: Order, created: boolean) => void; onCancel: () => void }) {
   const [form, setForm] = useState<OrderIn>({
     order_no: initial?.order_no ?? "",
     position_no: initial?.position_no ?? "",
     customer: initial?.customer ?? "",
     due_date: initial?.due_date ?? "",
+    revised_due_date: initial?.revised_due_date ?? "",
+    market: initial?.market ?? "domestic",
     item_code: initial?.item_code ?? "",
     quantity: initial?.quantity ?? 0,
     unit_price: initial?.unit_price ?? 0,
@@ -141,12 +198,19 @@ function OrderForm({ initial, onSaved, onCancel }: { initial: Order | null; onSa
     return () => clearTimeout(t);
   }, [q]);
   const picked = items.find((i) => i.code.toLocaleUpperCase("tr") === form.item_code.trim().toLocaleUpperCase("tr"));
-  const set = (k: keyof OrderIn, v: string | number) => setForm((f) => ({ ...f, [k]: v }));
+  const set = (k: keyof OrderIn, v: string | number | null) => setForm((f) => ({ ...f, [k]: v }));
   const valid = form.order_no.trim() && form.item_code.trim() && form.due_date && form.quantity > 0;
   const submit = async () => {
     setErr(""); setBusy(true);
     try {
-      const body = { ...form, order_no: form.order_no.trim(), position_no: form.position_no.trim(), item_code: form.item_code.trim() };
+      const body: OrderIn = {
+        ...form,
+        order_no: form.order_no.trim(),
+        position_no: form.position_no.trim(),
+        item_code: form.item_code.trim(),
+        revised_due_date: form.revised_due_date || null,
+        market: form.market || "domestic",
+      };
       const o = initial ? await api.put<Order>(`/api/orders/${initial.id}`, body) : await api.post<Order>("/api/orders", body);
       onSaved(o, !initial);
     } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
@@ -158,6 +222,7 @@ function OrderForm({ initial, onSaved, onCancel }: { initial: Order | null; onSa
         <label>Sipariş no *<input value={form.order_no} onChange={(e) => set("order_no", e.target.value)} placeholder="örn. SP-2026-001" autoFocus /></label>
         <label title="Aynı sipariş numarasında birden fazla satır için pozisyon no">Poz no<input value={form.position_no} onChange={(e) => set("position_no", e.target.value)} placeholder="örn. 10" /></label>
         <label>Müşteri<input value={form.customer} onChange={(e) => set("customer", e.target.value)} /></label>
+        <label>Pazar<select value={form.market ?? "domestic"} onChange={(e) => set("market", e.target.value)}><option value="domestic">Yerli</option><option value="export">Yurtdışı</option></select></label>
         <label>
           Stok kodu *
           <input list="order-item-codes" value={form.item_code} onChange={(e) => { set("item_code", e.target.value); setQ(e.target.value); }} placeholder="Kod yazın / listeden seçin" />
@@ -167,13 +232,15 @@ function OrderForm({ initial, onSaved, onCancel }: { initial: Order | null; onSa
         <label title="Birim satış fiyatı; ciro = miktar × birim fiyat">Birim fiyat<input type="number" min={0} step="0.01" value={form.unit_price || ""} onChange={(e) => set("unit_price", Number(e.target.value))} placeholder="0" /></label>
         <label>Ciro<input value={form.quantity && form.unit_price ? fmt(form.quantity * form.unit_price, 2) : "—"} readOnly style={{ background: "#f5f5f5", width: 110 }} /></label>
         <label>Termin *<input type="date" value={form.due_date} onChange={(e) => set("due_date", e.target.value)} /></label>
+        <label title="Dolu ise planlama bu tarihi kullanır">Revize termin<input type="date" value={form.revised_due_date || ""} onChange={(e) => set("revised_due_date", e.target.value || null)} /></label>
         <label style={{ minWidth: 220 }}>Not<input value={form.note} onChange={(e) => set("note", e.target.value)} /></label>
         <button onClick={submit} disabled={!valid || busy}>{initial ? "Kaydet" : "Ekle"}</button>
         <button className="secondary" onClick={onCancel}>Vazgeç</button>
       </div>
       <div className="muted" style={{ marginTop: 6 }}>
-        {picked ? <>Seçilen stok: <b>{picked.code}</b> — {picked.name} {picked.product_group && <>· {picked.product_group}</>}</> : form.item_code.trim() ? "Bu kod stok listesinde bulunamadı; önce Stok / BOM / Rota ekranından tanımlanmalı." : "Stok kodu, rota (operasyon + çevrim süresi) tanımlı bir kayıt olmalı; ihtiyaç ve plan bu rotadan hesaplanır."}
+        {picked ? <>Seçilen stok: <b>{picked.code}</b> — {picked.name} {picked.product_group && <>· {picked.product_group}</>}</> : form.item_code.trim() ? "Bu kod stok listesinde bulunamadı; önce Stok / BOM / Rota ekranından tanımlanmalı." : "Stok kodu, rota tanımlı bir kayıt olmalı."}
         {initial && " · Stok kodu değiştirilirse mevcut plan satırları silinir."}
+        {" · Revize termin boş bırakılırsa planlama ilk termin tarihini kullanır."}
       </div>
       <ErrorText err={err} />
     </div>

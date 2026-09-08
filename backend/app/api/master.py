@@ -18,6 +18,7 @@ from app.schemas import (
     MachineOut,
     OrderIn,
     OrderOut,
+    OrderAnalysisOut,
     ShiftIn,
     ShiftOut,
     WcWeekIn,
@@ -313,12 +314,30 @@ def delete_employee(emp_id: int, db: Session = Depends(get_db), _=Depends(requir
 
 
 # ---- Items ----
+@router.get("/items/groups")
+def item_groups(db: Session = Depends(get_db), _=Depends(require_user)):
+    mains = sorted({r[0] for r in db.query(Item.main_group).filter(Item.main_group != "").distinct().all()})
+    subs = sorted({r[0] for r in db.query(Item.sub_group).filter(Item.sub_group != "").distinct().all()})
+    return {"main_groups": mains, "sub_groups": subs}
+
+
 @router.get("/items", response_model=list[ItemOut])
-def list_items(q: str | None = None, limit: int = Query(200, le=2000), db: Session = Depends(get_db), _=Depends(require_user)):
+def list_items(
+    q: str | None = None,
+    main_group: list[str] | None = Query(None),
+    sub_group: list[str] | None = Query(None),
+    limit: int = Query(200, le=2000),
+    db: Session = Depends(get_db),
+    _=Depends(require_user),
+):
     query = db.query(Item)
     if q:
         like = f"%{q}%"
-        query = query.filter((Item.code.ilike(like)) | (Item.name.ilike(like)) | (Item.product_group.ilike(like)))
+        query = query.filter((Item.code.ilike(like)) | (Item.name.ilike(like)) | (Item.product_group.ilike(like)) | (Item.main_group.ilike(like)) | (Item.sub_group.ilike(like)))
+    if main_group:
+        query = query.filter(Item.main_group.in_(main_group))
+    if sub_group:
+        query = query.filter(Item.sub_group.in_(sub_group))
     return query.order_by(Item.code).limit(limit).all()
 
 
@@ -332,24 +351,32 @@ def get_item(item_id: int, db: Session = Depends(get_db), _=Depends(require_user
 
 # ---- Orders ----
 @router.get("/orders", response_model=list[OrderOut])
-def list_orders(
+def get_orders_list(
     status: str | None = "open",
     due_from: date | None = None,
     due_to: date | None = None,
     position: str | None = None,
+    customer: str | None = None,
+    order_no: str | None = None,
+    market: str | None = None,
+    plan_status: str | None = None,
+    reservation_status: str | None = None,
     db: Session = Depends(get_db),
     _=Depends(require_user),
 ):
-    q = db.query(Order).options(joinedload(Order.item))
-    if status:
-        q = q.filter(Order.status == status)
-    if due_from:
-        q = q.filter(Order.due_date >= due_from)
-    if due_to:
-        q = q.filter(Order.due_date <= due_to)
-    if position and position.strip():
-        q = q.filter(Order.position_no.ilike(f"%{position.strip()}%"))
-    return [orders_svc.order_out(o) for o in q.order_by(Order.due_date, Order.order_no, Order.position_no).all()]
+    return orders_svc.list_orders(db, status, due_from, due_to, position, customer, order_no, market, plan_status, reservation_status)
+
+
+@router.get("/orders/analysis", response_model=OrderAnalysisOut)
+def orders_analysis(
+    status: str | None = "open",
+    market: str | None = None,
+    due_from: date | None = None,
+    due_to: date | None = None,
+    db: Session = Depends(get_db),
+    _=Depends(require_user),
+):
+    return orders_svc.orders_analysis(db, status, market, due_from, due_to)
 
 
 @router.post("/orders", response_model=OrderOut, status_code=201)
@@ -358,7 +385,7 @@ def create_order(data: OrderIn, db: Session = Depends(get_db), _=Depends(require
         o = orders_svc.create_order(db, data)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return orders_svc.order_out(o)
+    return orders_svc.enrich_orders(db, [db.query(Order).options(joinedload(Order.item)).filter(Order.id == o.id).one()])[0]
 
 
 @router.put("/orders/{order_id}", response_model=OrderOut)
@@ -372,7 +399,7 @@ def update_order(order_id: int, data: OrderIn, db: Session = Depends(get_db), _=
         o = orders_svc.update_order(db, o, data)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return orders_svc.order_out(o)
+    return orders_svc.enrich_orders(db, [db.query(Order).options(joinedload(Order.item)).filter(Order.id == o.id).one()])[0]
 
 
 @router.delete("/orders/{order_id}", status_code=204)

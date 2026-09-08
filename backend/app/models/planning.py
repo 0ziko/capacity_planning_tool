@@ -16,6 +16,8 @@ class Order(Base):
     position_no: Mapped[str] = mapped_column(String(32), default="", index=True)  # siparis pozisyonu (aynı no'da coklu satir)
     customer: Mapped[str] = mapped_column(String(128), default="")
     due_date: Mapped[date] = mapped_column(Date, index=True)
+    revised_due_date: Mapped[date | None] = mapped_column(Date, nullable=True)  # dolu ise planlama bu tarihi kullanir
+    market: Mapped[str] = mapped_column(String(16), default="domestic")  # domestic / export
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), index=True)
     quantity: Mapped[float] = mapped_column(Float)
     # birim satis fiyati (ciro = miktar x birim fiyat); para birimi uygulama genelinde tek kabul edilir

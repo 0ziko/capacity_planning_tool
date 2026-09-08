@@ -126,6 +126,8 @@ class Item(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(256), default="")
+    main_group: Mapped[str] = mapped_column(String(64), default="", index=True)
+    sub_group: Mapped[str] = mapped_column(String(64), default="", index=True)
     product_group: Mapped[str] = mapped_column(String(64), default="")
     unit: Mapped[str] = mapped_column(String(16), default="AD")
 

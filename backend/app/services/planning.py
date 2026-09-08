@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.models import Item, Order, PlanLine, ProductionBatch, ProductionBatchOrder, RoutingOperation, WorkCenter
 from app.services import production_batches as pbatches
+from app.services.orders import effective_due
 from app.schemas import (
     AutoPlanRequest,
     LeadTimeOut,
@@ -83,7 +84,7 @@ def _open_orders_with_ops(db: Session) -> list[Order]:
         db.query(Order)
         .options(joinedload(Order.item).joinedload(Item.operations))
         .filter(Order.status == "open")
-        .order_by(Order.due_date, Order.order_no, Order.id)
+        .order_by(func.coalesce(Order.revised_due_date, Order.due_date), Order.order_no, Order.id)
         .all()
     )
     return [o for o in rows if o.id not in in_batch]
@@ -193,7 +194,7 @@ def simulate(db: Session, req: AutoPlanRequest) -> Simulation:
         db.query(Order)
         .options(joinedload(Order.item).joinedload(Item.operations))
         .filter(Order.status == "open")
-        .order_by(Order.due_date, Order.order_no, Order.id)
+        .order_by(func.coalesce(Order.revised_due_date, Order.due_date), Order.order_no, Order.id)
         .all()
     )
     if not wcs:
@@ -225,13 +226,13 @@ def simulate(db: Session, req: AutoPlanRequest) -> Simulation:
             h = _batch_hours(b, wc_by_id)
             return rev / h if h > 0 else 0.0
 
-        ranked = sorted(orders, key=lambda o: (-density(o), o.due_date, o.order_no))
+        ranked = sorted(orders, key=lambda o: (-density(o), effective_due(o), o.order_no))
         batch_ranked = sorted(batches, key=lambda b: (-batch_density(b), b.due_date, b.batch_no))
         leftover: list[Order] = []
         for batch in batch_ranked:
             if _batch_hours(batch, wc_by_id) <= 1e-6 or not batch.orders:
                 continue
-            anchor = sorted(batch.orders, key=lambda l: (l.order.due_date, l.order_id))[0].order
+            anchor = sorted(batch.orders, key=lambda l: (effective_due(l.order) if l.order else date.max, l.order_id))[0].order
             if not anchor:
                 continue
             trial = dict(remaining)
@@ -251,7 +252,7 @@ def simulate(db: Session, req: AutoPlanRequest) -> Simulation:
             remaining = trial
             lines.extend(ls)
         # kalan kapasiteyi termin sirasiyla kismen doldur
-        for o in sorted(leftover, key=lambda o: (o.due_date, o.order_no)):
+        for o in sorted(leftover, key=lambda o: (effective_due(o), o.order_no)):
             ls, un = _place_order(o, wc_by_id, weeks, remaining, rules)
             lines.extend(ls)
             unplanned.extend(un)
@@ -261,7 +262,7 @@ def simulate(db: Session, req: AutoPlanRequest) -> Simulation:
         for batch in batches:
             if not batch.orders:
                 continue
-            anchor = sorted(batch.orders, key=lambda l: (l.order.due_date, l.order.order_no if l.order else "", l.order_id))[0].order
+            anchor = sorted(batch.orders, key=lambda l: (effective_due(l.order) if l.order else date.max, l.order.order_no if l.order else "", l.order_id))[0].order
             if not anchor:
                 continue
             ls, un = _place_quantity(anchor, batch.quantity, batch.batch_no, batch.id, wc_by_id, weeks, remaining, rules)
@@ -366,7 +367,7 @@ def plan_lines(db: Session, wc_ids: list[int] | None, start: date | None, end: d
                 batch_no=batch_no,
                 batch_order_nos=batch_nos,
                 customer=pl.order.customer,
-                due_date=pl.order.due_date,
+                due_date=effective_due(pl.order) if pl.order else None,
                 item_code=pl.order.item.code,
                 operation_id=pl.operation_id,
                 operation_seq=pl.operation.seq,

@@ -126,6 +126,8 @@ class ItemOut(ORM):
     id: int
     code: str
     name: str
+    main_group: str = ""
+    sub_group: str = ""
     product_group: str
     unit: str
 
@@ -141,6 +143,8 @@ class OrderIn(BaseModel):
     position_no: str = ""
     customer: str = ""
     due_date: date
+    revised_due_date: date | None = None
+    market: str = "domestic"  # domestic / export
     item_code: str = Field(min_length=1)
     quantity: float = Field(gt=0)
     unit_price: float = Field(default=0.0, ge=0)
@@ -153,6 +157,9 @@ class OrderOut(ORM):
     position_no: str = ""
     customer: str
     due_date: date
+    revised_due_date: date | None = None
+    effective_due_date: date | None = None
+    market: str = "domestic"
     item_id: int
     item_code: str = ""
     item_name: str = ""
@@ -162,6 +169,25 @@ class OrderOut(ORM):
     status: str
     merged_into_id: int | None = None
     note: str = ""
+    plan_status: str = ""  # unplanned / partial / late / on_time / no_ops / closed
+    reservation_status: str = ""  # none / partial / full
+    reserved_qty: float = 0.0
+
+
+class OrderAnalysisRow(BaseModel):
+    customer: str
+    market: str
+    due_date: date
+    order_count: int
+    revenue: float
+
+
+class OrderAnalysisOut(BaseModel):
+    rows: list[OrderAnalysisRow]
+    total_revenue: float
+    domestic_revenue: float
+    export_revenue: float
+    by_customer: list[dict]  # {customer, domestic, export, total}
 
 
 class OrderScheduleOut(BaseModel):
@@ -536,6 +562,8 @@ class OrderImportRowPreview(BaseModel):
     item_code: str
     customer: str = ""
     due_date: date | None = None
+    revised_due_date: date | None = None
+    market: str = "domestic"
     quantity: float | None = None
     unit_price: float | None = None
     excel_row: int | None = None

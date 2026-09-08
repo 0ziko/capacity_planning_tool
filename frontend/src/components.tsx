@@ -109,6 +109,83 @@ export function WcMultiSelect({ wcs, value, onChange, onlyPlanned = false, label
   );
 }
 
+/** Metin değerleri için çoklu seçim (Ana Grup, Alt Grup vb.). */
+export function StringMultiSelect({ options, value, onChange, label }: { options: string[]; value: string[]; onChange: (v: string[]) => void; label: string }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+  const nq = q.trim().toLocaleLowerCase("tr");
+  const filtered = nq ? options.filter((o) => o.toLocaleLowerCase("tr").includes(nq)) : options;
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const toggle = (s: string) => onChange(value.includes(s) ? value.filter((x) => x !== s) : [...value, s]);
+  const selectShown = () => onChange(Array.from(new Set([...value, ...filtered])));
+  const clear = () => onChange([]);
+
+  return (
+    <div className="ms" ref={ref}>
+      <span className="ms-label">
+        {label} <span className="muted">(boş = tümü)</span>
+      </span>
+      <div className="ms-box">
+        <button type="button" className="ms-trigger" onClick={() => setOpen((o) => !o)} aria-haspopup="listbox" aria-expanded={open}>
+          {value.length === 0 ? (
+            <span className="ms-all">Tümü ({options.length})</span>
+          ) : (
+            <span className="ms-chips">
+              {value.slice(0, 3).map((s) => (
+                <span key={s} className="chip">
+                  {s}
+                  <span className="chip-x" role="button" aria-label={`${s} kaldır`} onClick={(e) => { e.stopPropagation(); toggle(s); }}>×</span>
+                </span>
+              ))}
+              {value.length > 3 && <span className="chip more">+{value.length - 3}</span>}
+            </span>
+          )}
+          <span className="ms-caret">{open ? "▲" : "▼"}</span>
+        </button>
+        {open && (
+          <div className="ms-pop" role="listbox" aria-multiselectable>
+            <input autoFocus className="ms-search" placeholder="Ara…" value={q} onChange={(e) => setQ(e.target.value)} />
+            <div className="ms-actions">
+              <button type="button" className="secondary small" onClick={selectShown}>{nq ? "Listelenenleri seç" : "Tümünü seç"}</button>
+              <button type="button" className="secondary small" onClick={clear} disabled={value.length === 0}>Temizle</button>
+              <span className="muted">{value.length}/{options.length} seçili</span>
+            </div>
+            <div className="ms-list">
+              {filtered.map((s) => {
+                const on = value.includes(s);
+                return (
+                  <div key={s} className={`ms-item ${on ? "on" : ""}`} role="option" aria-selected={on} onClick={() => toggle(s)}>
+                    <input type="checkbox" checked={on} readOnly tabIndex={-1} />
+                    <span className="ms-code">{s}</span>
+                  </div>
+                );
+              })}
+              {filtered.length === 0 && <div className="muted" style={{ padding: 8 }}>Eşleşen kayıt yok.</div>}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function UtilBadge({ u }: { u: number }) {
   const cls = u > 1.0001 ? "bad" : u > 0.9 ? "warn" : "ok";
   return <span className={`badge ${cls}`}>{Math.round(u * 100)}%</span>;

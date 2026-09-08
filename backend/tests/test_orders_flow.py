@@ -1,5 +1,6 @@
 """Tekil siparis CRUD, plan sonucu bitis tarihleri, siparis ilerlemesi ve birlestirme."""
 
+import io
 from datetime import date, timedelta
 
 from tests.test_capacity_flow import _upload, _xlsx
@@ -196,13 +197,17 @@ def test_orders_import_preview_and_remove_missing(client, auth):
 
 
 def test_orders_import_preview_xlsx(client, auth):
-    """Onizleme raporu Excel: hatali stok kodu ve fark sayfalari."""
+    """Onizleme raporu Excel: hatali stok kodu, termin YYYY-MM-DD, duzenle sayfasi."""
+    from datetime import datetime
+
+    from openpyxl import load_workbook
+
     _setup(client, auth)
     content = _xlsx(
         ["Sipariş No", "Poz No", "Müşteri", "Termin", "Stok Kodu", "Miktar"],
         [
-            ["KEEP", "", "A", "2026-09-30", "MAM-1", 10],
-            ["BAD", "", "B", "2026-09-30", "YOK-STOK", 5],
+            ["KEEP", "", "A", datetime(2026, 5, 21, 16, 27, 8), "MAM-1", 10],
+            ["BAD", "", "B", datetime(2026, 8, 27, 17, 0, 35), "YOK-STOK", 5],
         ],
     )
     prev = client.post("/api/imports/orders/preview", headers=auth, files={"file": ("orders.xlsx", content, "application/octet-stream")}).json()
@@ -212,4 +217,13 @@ def test_orders_import_preview_xlsx(client, auth):
 
     r = client.post("/api/imports/orders/preview.xlsx", headers=auth, files={"file": ("orders.xlsx", content, "application/octet-stream")})
     assert r.status_code == 200 and r.content[:2] == b"PK"
-    assert "onizleme" in (r.headers.get("content-disposition") or "").lower() or "orders" in (r.headers.get("content-disposition") or "").lower()
+    wb = load_workbook(io.BytesIO(r.content), data_only=True)
+    ws = wb["Düzenle ve yükle"]
+    assert ws.cell(2, 4).value == "2026-05-21"
+    assert ws.cell(3, 4).value == "2026-08-27"
+    assert "T" not in str(ws.cell(2, 4).value)
+
+    # onizleme raporunu tekrar yukle: duzenle sayfasi okunur
+    r2 = client.post("/api/imports/orders/preview", headers=auth, files={"file": ("rapor.xlsx", r.content, "application/octet-stream")}).json()
+    assert r2["file_row_count"] == 2
+    assert r2["parse_errors"] == [] or len(r2["error_rows"]) == 1

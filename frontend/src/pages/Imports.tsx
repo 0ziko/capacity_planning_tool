@@ -181,7 +181,7 @@ function OrderImportDialog({
         <button className="secondary" onClick={downloadReport} disabled={dlBusy || busy}>
           {dlBusy ? "Hazırlanıyor…" : "Karşılaştırma raporunu Excel indir"}
         </button>
-        <span className="muted">Hataları düzeltmek, eksik stok kodlarını görmek ve dosyayı tekrar yüklemek için kullanın.</span>
+        <span className="muted">Hataları düzeltmek için <b>Düzenle ve yükle</b> sayfasını kullanın; termin sütunu YYYY-MM-DD formatındadır. Düzeltilmiş dosyayı doğrudan tekrar yükleyebilirsiniz.</span>
       </div>
 
       {blocked && (

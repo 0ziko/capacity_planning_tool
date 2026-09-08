@@ -276,32 +276,52 @@ def read_rows(content: bytes, kind: str) -> tuple[list[dict], list[str]]:
     """Excel -> [ {key: value} ], hatalar. Basliklar Turkce/alias uyumlu eslenir."""
     t = TEMPLATES[kind]
     wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
-    ws = wb.active
-    rows = ws.iter_rows(values_only=True)
-    try:
-        header = next(rows)
-    except StopIteration:
+    sheets = list(wb.worksheets)
+    if not sheets:
         return [], ["Dosya bos"]
-    alias_map: dict[str, str] = {}
-    for key, title, aliases in t["columns"]:
-        alias_map[norm(title)] = key
-        alias_map[norm(key)] = key
-        for a in aliases:
-            alias_map[norm(a)] = key
-    col_keys: list[str | None] = [alias_map.get(norm(h)) for h in header]
-    missing = [title for key, title, _ in t["columns"] if key in t["required"] and key not in col_keys]
-    if missing:
+
+    def parse_sheet(ws) -> tuple[list[dict], list[str]] | None:
+        rows = ws.iter_rows(values_only=True)
+        try:
+            header = next(rows)
+        except StopIteration:
+            return None
+        alias_map: dict[str, str] = {}
+        for key, title, aliases in t["columns"]:
+            alias_map[norm(title)] = key
+            alias_map[norm(key)] = key
+            for a in aliases:
+                alias_map[norm(a)] = key
+        col_keys: list[str | None] = [alias_map.get(norm(h)) for h in header]
+        missing = [title for key, title, _ in t["columns"] if key in t["required"] and key not in col_keys]
+        if missing:
+            return None
+        out = []
+        for r_idx, row in enumerate(rows, start=2):
+            if row is None or all(v is None or str(v).strip() == "" for v in row):
+                continue
+            rec = {"_row": r_idx}
+            for key, val in zip(col_keys, row):
+                if key:
+                    rec[key] = val
+            out.append(rec)
+        return out, []
+
+    # Siparis onizleme raporu: "Duzenle ve yukle" veya sablon sayfasini tercih et
+    if kind == "orders":
+        preferred = [sheet_title("Düzenle ve yükle"), sheet_title("Siparişler")]
+        ordered = sorted(sheets, key=lambda ws: (0 if sheet_title(ws.title) in preferred else 1, preferred.index(sheet_title(ws.title)) if sheet_title(ws.title) in preferred else 99))
+        for ws in ordered:
+            parsed = parse_sheet(ws)
+            if parsed is not None:
+                return parsed
+        return [], [f"Zorunlu sutun(lar) bulunamadi: siparis import sayfasi araniyor ({', '.join(c[1] for c in t['columns'] if c[0] in t['required'])})"]
+
+    parsed = parse_sheet(wb.active)
+    if parsed is None:
+        missing = [title for key, title, _ in t["columns"] if key in t["required"]]
         return [], [f"Zorunlu sutun(lar) bulunamadi: {', '.join(missing)}"]
-    out = []
-    for r_idx, row in enumerate(rows, start=2):
-        if row is None or all(v is None or str(v).strip() == "" for v in row):
-            continue
-        rec = {"_row": r_idx}
-        for key, val in zip(col_keys, row):
-            if key:
-                rec[key] = val
-        out.append(rec)
-    return out, []
+    return parsed
 
 
 def _bool(v: Any, default: bool = True) -> bool:
@@ -342,12 +362,45 @@ def _date(v: Any) -> date:
     if isinstance(v, date):
         return v
     s = str(v).strip()
+    if "T" in s:
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
+        except ValueError:
+            s = s.split("T", 1)[0].strip()
     for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S", "%d.%m.%Y %H:%M:%S"):
         try:
             return datetime.strptime(s, fmt).date()
         except ValueError:
             pass
     raise ValueError(f"Tarih anlasilamadi: {v!r}")
+
+
+def _date_cell(v: Any) -> str:
+    """Excel hucre / alan -> YYYY-MM-DD (saat yok; import sablonu ile uyumlu)."""
+    if v is None or str(v).strip() == "":
+        return ""
+    if isinstance(v, datetime):
+        return v.date().isoformat()
+    if isinstance(v, date):
+        return v.isoformat()
+    try:
+        return _date(v).isoformat()
+    except Exception:  # noqa: BLE001
+        s = str(v).strip()
+        if "T" in s:
+            return s.split("T", 1)[0]
+        return s
+
+
+def _export_cell(v: Any) -> Any:
+    """Excel sayfasina yazilacak hucre degeri."""
+    if isinstance(v, datetime):
+        return v.date().isoformat()
+    if isinstance(v, date):
+        return v.isoformat()
+    if isinstance(v, time):
+        return v.strftime("%H:%M")
+    return v
 
 
 def _time(v: Any, default: time) -> time:
@@ -1056,7 +1109,7 @@ def _ws_from_rows(wb: Workbook, title: str, header: list[str], rows: list[list[A
     ws = wb.create_sheet(sheet_title(title))
     ws.append(header)
     for r in rows:
-        ws.append([v.isoformat() if isinstance(v, (date, datetime)) else (v.strftime("%H:%M") if isinstance(v, time) else v) for v in r])
+        ws.append([_export_cell(v) for v in r])
     _style_header(ws)
     _autosize(ws)
 
@@ -1118,21 +1171,13 @@ def build_backup(db: Session) -> bytes:
 
 
 def _order_row_values(r: dict) -> list[Any]:
-    due = r.get("due_date")
-    if isinstance(due, date):
-        due_val = due.isoformat()
-    else:
-        try:
-            due_val = _date(due).isoformat() if due not in (None, "") else ""
-        except Exception:  # noqa: BLE001
-            due_val = due
     qty = _float(r.get("quantity"))
     price = _float(r.get("unit_price"), None)
     return [
         _str(r.get("order_no")),
         _str(r.get("position_no")),
         _str(r.get("customer")),
-        due_val,
+        _date_cell(r.get("due_date")),
         _str(r.get("item_code")),
         qty if qty is not None else r.get("quantity"),
         price if price is not None else r.get("unit_price"),
@@ -1144,7 +1189,7 @@ def _preview_row_values(r: OrderImportRowPreview) -> list[Any]:
         r.order_no,
         r.position_no or "",
         r.customer or "",
-        r.due_date.isoformat() if r.due_date else "",
+        _date_cell(r.due_date),
         r.item_code,
         r.quantity,
         r.unit_price if r.unit_price is not None else "",
@@ -1197,10 +1242,14 @@ def build_orders_import_preview_xlsx(db: Session, rows: list[dict], preview: Ord
         ["Sistemde var, listede yok", len(preview.only_in_system)],
         [],
         ["Not", "Hatalar sayfasını düzeltin veya eksik stok kodlarını Stok Kodları importu ile ekleyin."],
-        ["Not", "Tam liste sayfasındaki Durum/Açıklama sütunlarını silerek dosyayı tekrar yükleyebilirsiniz."],
+        ["Not", "Düzenle ve yükle sayfasını doğrudan sipariş importu olarak yükleyebilirsiniz (termin YYYY-MM-DD)."],
+        ["Not", "Tam liste sayfasındaki Durum/Açıklama sütunları import için kullanılmaz."],
     ]
 
+    import_rows = [_order_row_values(r) for r in rows]
+
     sheets: dict[str, tuple[list[str], list[list[Any]]]] = {
+        "Düzenle ve yükle": (order_hdr, import_rows),
         "Özet": (["Alan", "Değer"], summary),
         "Hatalar": (
             err_hdr,

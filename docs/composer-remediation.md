@@ -107,7 +107,7 @@ Durum kodları: **doğrulanmış** = analiz betiği/inceleme ile hâlâ repro; *
 | **01** | Ufuk dışı silmeyi durdur | B7 | **tamamlandı** | `f6be5eb` |
 | **02** | Tek kalan iş; mükerrer plan | B1, B5 | **tamamlandı** | 662f490 |
 | **03** | Parti + tekil aynı sıra | B6 | **tamamlandı** | c0d108c |
-| **04** | Öncül + geçiş kuralları | B2, B3 | **tamamlandı** | _(bu commit)_ |
+| **04** | Öncül + geçiş kuralları | B2, B3 | **tamamlandı** | 1d3d549 |
 | **05** | Termin başarısızlığı açık | B4, M3 (gösterim) | bekliyor | — |
 | **06** | Revizyon onay = hesaplanan plan | T1 | bekliyor | — |
 | **07** | Stok netleştirme + malzeme hazır | M2 | bekliyor | — |

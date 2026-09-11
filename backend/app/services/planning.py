@@ -33,6 +33,13 @@ from app.services import scenarios as scen
 from app.services.bom_tree import explode_order, has_wip_structure
 from app.services.gantt import actual_hours_by_week
 from app.services.plan_draft import DraftLine
+from app.services.planning_candidates import (
+    REVENUE_MODE_LABEL,
+    PlanningCandidate,
+    build_planning_candidates,
+    candidate_skipped_record,
+    sort_candidates,
+)
 from app.services.remaining_work import (
     SchedulingContext,
     build_work_map_for_batch,
@@ -469,14 +476,65 @@ def _batch_hours(batch: ProductionBatch, wc_by_id: dict[int, WorkCenter]) -> flo
     return sum(op.hours_for(batch.quantity) for op in item.operations if op.work_center_id in wc_by_id)
 
 
+def _place_candidate(
+    db: Session,
+    candidate: PlanningCandidate,
+    wc_by_id: dict[int, WorkCenter],
+    weeks: list[date],
+    remaining: dict[tuple[int, date], float],
+    rules: scen.RuleLookup | None,
+    sched_ctx: SchedulingContext,
+    produced_map: dict,
+) -> tuple[list[DraftLine], list[dict]]:
+    if candidate.kind == "order" and candidate.order:
+        wm = build_work_map_for_order(db, candidate.order, sched_ctx, produced=produced_map)
+        return _place_order(
+            db,
+            candidate.order,
+            wc_by_id,
+            weeks,
+            remaining,
+            rules,
+            sched_ctx=sched_ctx,
+            work_map=wm,
+        )
+    if candidate.batch and candidate.anchor_order:
+        ls, un, _ = _place_batch(
+            db,
+            candidate.batch,
+            candidate.anchor_order,
+            wc_by_id,
+            weeks,
+            remaining,
+            rules,
+            sched_ctx,
+            produced_map,
+        )
+        return ls, un
+    return [], []
+
+
+def _try_place_candidate(
+    db: Session,
+    candidate: PlanningCandidate,
+    wc_by_id: dict[int, WorkCenter],
+    weeks: list[date],
+    remaining: dict[tuple[int, date], float],
+    rules: scen.RuleLookup | None,
+    sched_ctx: SchedulingContext,
+    produced_map: dict,
+) -> tuple[bool, list[DraftLine], list[dict], dict[tuple[int, date], float]]:
+    trial = dict(remaining)
+    ls, un = _place_candidate(db, candidate, wc_by_id, weeks, trial, rules, sched_ctx, produced_map)
+    return not un, ls, un, trial
+
+
 def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = None) -> Simulation:
     """Otomatik plani hesaplar, veritabanina yazmaz.
 
-    due_date: siparisler termin sirasiyla yerlestirilir; sigmayan kisim 'unplanned'.
-    revenue : ufuk icinde maksimum ciro hedeflenir. Siparisler saat basina ciroya
-              (ciro / gereken saat) gore siralanir; yalnizca ufka TAMAMEN sigan siparisler
-              alinir (ciro teslimde gerceklesir), sigmayanlar atlanir. Kalan kapasite,
-              atlanan siparislerle termin sirasiyla kismen doldurulur (sonraki ufka devreder).
+    due_date: adaylar (tekil + parti) effective_due sirasiyla yerlestirilir; sigmayan 'unplanned'.
+    revenue : ciro oncelikli (sezgisel); kalan satis degeri / kalan saat azalan sira;
+              yalnizca ufka TAMAMEN sigan adaylar once alinir, kalan kapasite termin sirasiyla doldurulur.
     """
     scope = plan_horizon_scope(req.start_week, req.weeks)
     start = scope.start
@@ -540,66 +598,29 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
         co_handled = co_out.handled_order_ids
         orders = [o for o in orders if o.id not in co_handled]
 
+    candidates = build_planning_candidates(db, orders, batches, wc_by_id, sched_ctx, produced_map)
+
     if req.mode == "revenue":
-        def density(o: Order) -> float:
-            h = _order_hours(db, o, wc_by_id)
-            rev = o.quantity * (o.unit_price or 0.0)
-            return rev / h if h > 0 else 0.0
-
-        def batch_density(b: ProductionBatch) -> float:
-            rev = sum(l.quantity * (l.order.unit_price or 0.0) for l in b.orders if l.order)
-            h = _batch_hours(b, wc_by_id)
-            return rev / h if h > 0 else 0.0
-
-        ranked = sorted(orders, key=lambda o: (-density(o), effective_due(o), o.order_no))
-        batch_ranked = sorted(batches, key=lambda b: (-batch_density(b), b.due_date, b.batch_no))
-        leftover: list[Order] = []
-        for batch in batch_ranked:
-            if _batch_hours(batch, wc_by_id) <= 1e-6 or not batch.orders:
-                continue
-            anchor = sorted(batch.orders, key=lambda l: (effective_due(l.order) if l.order else date.max, l.order_id))[0].order
-            if not anchor:
-                continue
-            trial = dict(remaining)
-            ls, un, _ = _place_batch(
-                db, batch, anchor, wc_by_id, weeks, trial, rules, sched_ctx, produced_map
+        ranked = sort_candidates(candidates, "revenue")
+        leftover: list[PlanningCandidate] = []
+        for c in ranked:
+            fits, ls, _, trial = _try_place_candidate(
+                db, c, wc_by_id, weeks, remaining, rules, sched_ctx, produced_map
             )
-            if un:
-                continue
-            remaining = trial
-            lines.extend(ls)
-        for o in ranked:
-            if _order_hours(db, o, wc_by_id) <= 1e-6:
-                continue  # bu is merkezlerinde operasyonu yok
-            trial = dict(remaining)
-            wm = build_work_map_for_order(db, o, sched_ctx, produced=produced_map)
-            ls, un = _place_order(db, o, wc_by_id, weeks, trial, rules, sched_ctx=sched_ctx, work_map=wm)
-            if un:
-                leftover.append(o)
-                continue
-            remaining = trial
-            lines.extend(ls)
-        # kalan kapasiteyi termin sirasiyla kismen doldur
-        for o in sorted(leftover, key=lambda o: (effective_due(o), o.order_no)):
-            wm = build_work_map_for_order(db, o, sched_ctx, produced=produced_map)
-            ls, un = _place_order(db, o, wc_by_id, weeks, remaining, rules, sched_ctx=sched_ctx, work_map=wm)
+            if fits:
+                remaining = trial
+                lines.extend(ls)
+            else:
+                leftover.append(c)
+        for c in sort_candidates(leftover, "due_date"):
+            ls, un = _place_candidate(db, c, wc_by_id, weeks, remaining, rules, sched_ctx, produced_map)
             lines.extend(ls)
             unplanned.extend(un)
             if not ls:
-                skipped.append({"order_no": o.order_no, "item_code": o.item.code, "revenue": round(o.quantity * (o.unit_price or 0.0), 2), "hours": round(_order_hours(db, o, wc_by_id), 2)})
+                skipped.append(candidate_skipped_record(c))
     else:
-        for batch in batches:
-            if not batch.orders:
-                continue
-            anchor = sorted(batch.orders, key=lambda l: (effective_due(l.order) if l.order else date.max, l.order.order_no if l.order else "", l.order_id))[0].order
-            if not anchor:
-                continue
-            ls, un, _ = _place_batch(db, batch, anchor, wc_by_id, weeks, remaining, rules, sched_ctx, produced_map)
-            lines.extend(ls)
-            unplanned.extend(un)
-        for o in orders:
-            wm = build_work_map_for_order(db, o, sched_ctx, produced=produced_map)
-            ls, un = _place_order(db, o, wc_by_id, weeks, remaining, rules, sched_ctx=sched_ctx, work_map=wm)
+        for c in sort_candidates(candidates, "due_date"):
+            ls, un = _place_candidate(db, c, wc_by_id, weeks, remaining, rules, sched_ctx, produced_map)
             lines.extend(ls)
             unplanned.extend(un)
 
@@ -658,7 +679,7 @@ def write_simulation(
         db.commit()
     else:
         db.flush()
-    label = "maksimum ciro" if req.mode == "revenue" else "termine gore"
+    label = REVENUE_MODE_LABEL if req.mode == "revenue" else "termine gore"
     tag = message_tag if message_tag is not None else ("revizyon" if revision_id else "revizyonsuz")
     msg = f"{len(sim.lines)} plan satiri olusturuldu ({label}, {tag})."
     if sim.co_shipment_results:

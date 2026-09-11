@@ -29,13 +29,15 @@ WEEK = date(2026, 9, 7)  # Pazartesi
 
 
 def test_full_flow(client, auth):
+    for st in ("open", "closed", "merged"):
+        client.delete("/api/orders", headers=auth, params={"status": st})
     # is merkezi + vardiya (10 kisi, 4 saat verimli, Pzt-Cum 08-18)
     _upload(client, auth, "workcenters", ["İş Merkezi Kodu", "İş Merkezi Adı", "Planlanıyor (E/H)", "Birim Saat", "Kişi Başı Verimli Saat"], [["TZG-A", "A Tezgahı", "E", 10, 4]])
     _upload(client, auth, "shifts", ["İş Merkezi Kodu", "Vardiya", "Günler (Pzt=0..Paz=6)", "Başlangıç", "Bitiş", "Kişi Sayısı", "Kişi Başı Verimli Saat"], [["TZG-A", "Gündüz", "0,1,2,3,4", "08:00", "18:00", 10, 4]])
 
     wcs = client.get("/api/workcenters", headers=auth).json()
-    assert len(wcs) == 1
-    wc_id = wcs[0]["id"]
+    wc = next(w for w in wcs if w["code"] == "TZG-A")
+    wc_id = wc["id"]
 
     cap = client.get("/api/capacity", headers=auth, params={"start": WEEK.isoformat()}).json()
     assert cap[0]["capacity_hours"] == 200
@@ -51,7 +53,7 @@ def test_full_flow(client, auth):
     assert round(req["total_hours"], 1) == round(20000 * 50 / 3600, 1)
 
     # otomatik plan: 277.8 saat -> 1. hafta 200, 2. hafta 77.8
-    r = client.post("/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 4}).json()
+    r = client.post("/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 4, "work_center_ids": [wc_id]}).json()
     assert r["created"] >= 2 and r["unplanned"] == []
     load = client.get("/api/plan/load", headers=auth, params={"start": WEEK.isoformat(), "weeks": 2, "work_center_ids": [wc_id]}).json()
     weeks = load[0]["weeks"]
@@ -60,7 +62,11 @@ def test_full_flow(client, auth):
 
     # gunluk uretim: pazartesi 2880 adet => 40 saat (200/5 = 40 beklenen)
     _upload(client, auth, "production", ["Tarih", "İş Merkezi Kodu", "Stok Kodu", "Operasyon Sıra", "Sipariş No", "Miktar"], [[WEEK.isoformat(), "TZG-A", "MAM-1", 10, "S-1", 2880]])
-    prog = client.get("/api/progress", headers=auth, params={"week": WEEK.isoformat(), "as_of": (WEEK + timedelta(days=1)).isoformat()}).json()[0]
+    prog = client.get(
+        "/api/progress",
+        headers=auth,
+        params={"week": WEEK.isoformat(), "as_of": (WEEK + timedelta(days=1)).isoformat(), "work_center_ids": [wc_id]},
+    ).json()[0]
     assert prog["planned_hours"] == 200
     assert prog["expected_hours_to_date"] == 40
     assert prog["actual_hours_to_date"] == 40
@@ -69,7 +75,11 @@ def test_full_flow(client, auth):
 
     # durus: beklenen (10-4)*10*60 = 3600 dk/gun; 3700 dk gerceklesen => 100 dk fazla
     _upload(client, auth, "downtime", ["Tarih", "İş Merkezi Kodu", "Sebep Kodu", "Sebep", "Süre (dk)"], [[WEEK.isoformat(), "TZG-A", "MLZ", "Malzeme bekleme", 3000], [WEEK.isoformat(), "TZG-A", "SET", "Setup", 700]])
-    dt = client.get("/api/analysis/downtime", headers=auth, params={"start": WEEK.isoformat(), "end": WEEK.isoformat()}).json()
+    dt = client.get(
+        "/api/analysis/downtime",
+        headers=auth,
+        params={"start": WEEK.isoformat(), "end": WEEK.isoformat(), "work_center_ids": [wc_id]},
+    ).json()
     assert dt["totals"][0]["excess_minutes"] == 100
     assert dt["reasons"][0]["reason_code"] == "MLZ"
 

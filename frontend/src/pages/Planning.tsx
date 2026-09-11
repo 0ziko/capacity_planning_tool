@@ -20,7 +20,7 @@ interface AutoResult {
   message: string;
   mode: PlanMode;
   unplanned: { order_no: string; item_code: string; operation_seq: number; work_center_code: string; hours: number }[];
-  skipped: { order_no: string; item_code: string; revenue: number; hours: number }[];
+  skipped: { order_no?: string; batch_no?: string; kind?: string; item_code: string; revenue: number; hours: number }[];
   co_shipment_results?: CoShipmentResult[];
   co_shipment_exceptions?: CoShipmentException[];
 }
@@ -35,7 +35,7 @@ const TABS: { id: Tab; label: string; hint: string }[] = [
   { id: "orders", label: "Sipariş bitiş tarihleri", hint: "Plan sonucuna göre her siparişin tahmini üretim bitişi" },
   { id: "wc", label: "İş merkezi bazlı siparişler", hint: "Seçilen iş merkezine planlanmış siparişler" },
   { id: "revenue", label: "Ciro", hint: "Mevcut plana göre haftalık / aylık ciro" },
-  { id: "compare", label: "Plan karşılaştır", hint: "Termine göre ve maksimum ciro planlarını yan yana karşılaştır" },
+  { id: "compare", label: "Plan karşılaştır", hint: "Termine göre ve ciro öncelikli planları yan yana karşılaştır" },
   { id: "progress", label: "Sipariş ilerleme", hint: "Günlük üretim verisine göre iş emri ilerlemesi" },
   { id: "merge", label: "Üretim partisi", hint: "Aynı stok kodlu siparişlerin üretimini birleştir (siparişler ayrı kalır)" },
   { id: "leadtime", label: "Yeni iş terminleme", hint: "Yeni bir iş için mevcut doluluğa göre bitiş" },
@@ -121,10 +121,10 @@ export default function Planning() {
             <WcMultiSelect wcs={wcs} value={wcIds} onChange={setWcIds} onlyPlanned />
             {can("poweruser") && (
               <>
-                <label title="Termine göre: siparişler termin sırasıyla yerleştirilir. Maksimum ciro: saat başına cirosu yüksek ve ufka tamamen sığan siparişler önceliklendirilir.">Planlama modu
+                <label title="Termine göre: siparişler termin sırasıyla yerleştirilir. Ciro öncelikli: kalan satış değeri / kalan saat oranına göre sıralanır (sezgisel; optimum garantisi yok).">Planlama modu
                   <select value={mode} onChange={(e) => setMode(e.target.value as PlanMode)}>
                     <option value="due_date">📅 Termine göre</option>
-                    <option value="revenue">💰 Maksimum ciro</option>
+                    <option value="revenue">💰 Ciro öncelikli (sezgisel)</option>
                   </select>
                 </label>
                 <button onClick={() => runAuto()} disabled={busy} title="Onay kaydı olmadan canlı plana yazar">▶ Otomatik planla (revizyonsuz)</button>
@@ -151,8 +151,8 @@ export default function Planning() {
               </div>
               {result.skipped?.length > 0 && (
                 <>
-                  <div className="error">Maksimum ciro planı {result.skipped.length} siparişi tamamen dışarıda bıraktı (ufka sığmadı, kalan kapasite de yetmedi):</div>
-                  <ul className="errors">{result.skipped.map((u, i) => <li key={i}>{u.order_no} / {u.item_code}: {fmt(u.hours)} saat · ciro {fmt(u.revenue, 0)}</li>)}</ul>
+                  <div className="error">Ciro öncelikli plan {result.skipped.length} adayı tamamen dışarıda bıraktı (ufka sığmadı, kalan kapasite de yetmedi):</div>
+                  <ul className="errors">{result.skipped.map((u, i) => <li key={i}>{u.batch_no ? `Parti ${u.batch_no}` : u.order_no} / {u.item_code}: {fmt(u.hours)} saat · ciro {fmt(u.revenue, 0)}</li>)}</ul>
                 </>
               )}
               {result.unplanned.length > 0 && (
@@ -323,7 +323,7 @@ export default function Planning() {
                 <td style={{ color: l.due_date < l.week_start ? "var(--bad)" : undefined }} title={l.due_date < l.week_start ? "Termin, plan haftasından önce!" : ""}>{l.due_date}</td>
                 <td>{l.item_code}</td><td>{l.operation_seq}</td>
                 <td className="num">{fmt(l.planned_hours, 2)}</td><td className="num">{fmt(l.planned_qty, 0)}</td>
-                <td><span className={`badge ${l.mode === "manual" ? "warn" : l.mode === "forecast" ? "ok" : "muted"}`} title={l.strategy === "revenue" ? "Otomatik · maksimum ciro" : l.strategy === "due_date" ? "Otomatik · termine göre" : l.mode === "forecast" ? "Terminleme tahmini" : ""}>{l.mode === "manual" ? "manuel" : l.mode === "forecast" ? "tahmin" : l.strategy === "revenue" ? "oto 💰" : "oto"}</span></td>
+                <td><span className={`badge ${l.mode === "manual" ? "warn" : l.mode === "forecast" ? "ok" : "muted"}`} title={l.strategy === "revenue" ? "Otomatik · ciro öncelikli" : l.strategy === "due_date" ? "Otomatik · termine göre" : l.mode === "forecast" ? "Terminleme tahmini" : ""}>{l.mode === "manual" ? "manuel" : l.mode === "forecast" ? "tahmin" : l.strategy === "revenue" ? "oto 💰" : "oto"}</span></td>
                 <td>{can("poweruser") && (<><button className="secondary small" onClick={() => setHours(l)}>Saat</button> <button className="danger small" onClick={async () => { await api.del(`/api/plan/lines/${l.id}`); refresh(); }}>Sil</button></>)}</td>
               </tr>
             ))}

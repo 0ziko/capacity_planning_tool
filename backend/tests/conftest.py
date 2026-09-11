@@ -38,9 +38,12 @@ def db():
 def _isolate_planning_artifacts(db):
     """Testler arasi uretim/plan kalintisi otomatik planlamayi etkilemesin."""
     from app.models import PlanLine, ProductionActual
+    from app.models.planning import ProductionBatch, ProductionBatchOrder
 
     db.query(PlanLine).delete()
     db.query(ProductionActual).delete()
+    db.query(ProductionBatchOrder).delete()
+    db.query(ProductionBatch).delete()
     db.commit()
     yield
 

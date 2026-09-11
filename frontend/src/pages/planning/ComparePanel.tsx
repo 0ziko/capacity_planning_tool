@@ -6,7 +6,7 @@ import { PlanStatusBadge } from "./OrderSchedulePanel";
 import { RevenueTable, monthLabel } from "./RevenuePanel";
 
 const DIFF: Record<CompareDiff, [string, string, string]> = {
-  rev_misses_due: ["bad", "Ciro planında termin kaçar", "Termine göre planda zamanında biten sipariş, maksimum ciro planında termin sonrasına kalıyor"],
+  rev_misses_due: ["bad", "Ciro planında termin kaçar", "Termine göre planda zamanında biten sipariş, ciro öncelikli planda termin sonrasına kalıyor"],
   rev_drops: ["bad", "Ciro planı dışarıda bırakır", "Termine göre planda ufuk içinde tamamlanan sipariş, ciro planında ufka sığmıyor / tamamlanmıyor"],
   due_drops: ["warn", "Termin planı dışarıda bırakır", "Ciro planında ufuk içinde tamamlanan sipariş, termine göre planda tamamlanamıyor (ciro fırsatı kaçar)"],
   rev_earlier: ["ok", "Ciro planında daha erken", "Her iki planda da tamamlanır; ciro planı daha erken bitirir"],
@@ -45,7 +45,7 @@ function ScenarioCard({ s, other, onApply, busy }: { s: PlanScenario; other: Pla
   );
 }
 
-/** İki plan modunu (termin / maksimum ciro) kaydetmeden simüle eder ve karşılaştırır. */
+/** İki plan modunu (termin / ciro öncelikli) kaydetmeden simüle eder ve karşılaştırır. */
 export default function ComparePanel({ start, weeks, wcIds, onApplied }: { start: string; weeks: number; wcIds: number[]; onApplied: () => void }) {
   const { can } = useAuth();
   const [data, setData] = useState<PlanCompare | null>(null);
@@ -61,7 +61,7 @@ export default function ComparePanel({ start, weeks, wcIds, onApplied }: { start
     catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
   };
   const apply = async (mode: PlanMode) => {
-    const label = mode === "revenue" ? "MAKSİMUM CİRO" : "TERMİNE GÖRE";
+    const label = mode === "revenue" ? "CİRO ÖNCELİKLİ (SEZGİSEL)" : "TERMİNE GÖRE";
     if (!confirm(`${label} planı uygulanacak: seçili iş merkezlerinde mevcut otomatik plan satırları silinip yeniden oluşturulur (manuel satırlar korunur). Devam?`)) return;
     setBusy(true); setErr("");
     try {
@@ -89,7 +89,7 @@ export default function ComparePanel({ start, weeks, wcIds, onApplied }: { start
       {!data && !busy && (
         <div className="panel muted">
           <p style={{ marginTop: 0 }}><b>Termine göre:</b> siparişler termin sırasıyla yerleştirilir; kapasite yetmezse geç kalan / ufka sığmayan siparişler görünür.</p>
-          <p style={{ marginBottom: 0 }}><b>Maksimum ciro:</b> siparişler saat başına ciroya (ciro ÷ gereken saat) göre sıralanır; yalnızca ufuk içinde <i>tamamen</i> bitirilebilenler alınır (ciro teslimde gerçekleşir), kalan kapasite termin sırasıyla kısmen doldurulur. Bu planda bazı terminler kaçabilir.</p>
+          <p style={{ marginBottom: 0 }}><b>Ciro öncelikli (sezgisel):</b> tekil sipariş ve üretim partileri birlikte, kalan satış değeri ÷ kalan saat oranına göre sıralanır; yalnızca ufuk içinde <i>tamamen</i> bitirilebilenler önce alınır, kalan kapasite termin sırasıyla kısmen doldurulur. Kesin optimum garantisi yoktur; bazı terminler kaçabilir.</p>
         </div>
       )}
       {busy && !data && <p className="muted">Hesaplanıyor…</p>}
@@ -128,7 +128,7 @@ export default function ComparePanel({ start, weeks, wcIds, onApplied }: { start
           </div>
           <div className="table-wrap">
             <table style={{ width: "auto", minWidth: 640 }}>
-              <thead><tr><th>{gran === "week" ? "Hafta" : "Ay"}</th><th className="num">📅 Termine göre</th><th className="num">💰 Maksimum ciro</th><th className="num">Fark</th><th className="num">Kümülatif fark</th></tr></thead>
+              <thead><tr><th>{gran === "week" ? "Hafta" : "Ay"}</th><th className="num">📅 Termine göre</th><th className="num">💰 Ciro öncelikli</th><th className="num">Fark</th><th className="num">Kümülatif fark</th></tr></thead>
               <tbody>
                 {periods.map((p) => {
                   const a = at(data.due, p), b = at(data.revenue, p);
@@ -164,7 +164,7 @@ export default function ComparePanel({ start, weeks, wcIds, onApplied }: { start
                 <tr>
                   <th>Sipariş</th><th>Poz</th><th>Müşteri</th><th>Stok</th><th className="num">Miktar</th><th className="num">Ciro</th><th>Termin</th>
                   <th colSpan={2} className="grp due">📅 Termine göre</th>
-                  <th colSpan={2} className="grp rev">💰 Maksimum ciro</th>
+                  <th colSpan={2} className="grp rev">💰 Ciro öncelikli</th>
                   <th>Fark</th>
                 </tr>
                 <tr className="sub">
@@ -195,7 +195,7 @@ export default function ComparePanel({ start, weeks, wcIds, onApplied }: { start
             <summary className="muted">Senaryoların ayrı ciro tabloları</summary>
             <div className="compare-grid">
               <div><h4>📅 Termine göre</h4><RevenueTable rows={gran === "week" ? data.due.revenue.weeks : data.due.revenue.months} granularity={gran} showCumulative={false} /></div>
-              <div><h4>💰 Maksimum ciro</h4><RevenueTable rows={gran === "week" ? data.revenue.revenue.weeks : data.revenue.revenue.months} granularity={gran} showCumulative={false} /></div>
+              <div><h4>💰 Ciro öncelikli</h4><RevenueTable rows={gran === "week" ? data.revenue.revenue.weeks : data.revenue.revenue.months} granularity={gran} showCumulative={false} /></div>
             </div>
           </details>
         </>

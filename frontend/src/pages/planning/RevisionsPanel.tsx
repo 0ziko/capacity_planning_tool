@@ -227,7 +227,7 @@ export default function RevisionsPanel({
             <input type="checkbox" checked={replaceManual} onChange={(e) => setReplaceManual(e.target.checked)} />
             Manuel plan satırlarını da yeniden hesapla
           </label>
-          <p className="muted">Ufuk: {start} · {weeks} hafta · {mode === "revenue" ? "maksimum ciro" : "termine göre"}</p>
+          <p className="muted">Ufuk: {start} · {weeks} hafta · {mode === "revenue" ? "ciro öncelikli (sezgisel)" : "termine göre"}</p>
           <button onClick={() => void create()} disabled={busy || reasons.length === 0}>
             Taslak oluştur
           </button>

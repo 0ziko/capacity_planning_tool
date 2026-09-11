@@ -125,7 +125,7 @@ def _scenario(db: Session, sim: planning.Simulation, wc_ids: list[int] | None, w
     rev = revenue_report(db, wc_ids, sim.start, weeks, lines=sim.lines, orders=sim.orders, sched=sched)
     return PlanScenario(
         mode=sim.mode,  # type: ignore[arg-type]
-        label="Maksimum ciro" if sim.mode == "revenue" else "Termine göre",
+        label="Ciro öncelikli (sezgisel)" if sim.mode == "revenue" else "Termine göre",
         created_lines=len(sim.lines),
         planned_revenue=rev.planned_revenue,
         on_time=sum(1 for s in sched if s.plan_status == "on_time"),

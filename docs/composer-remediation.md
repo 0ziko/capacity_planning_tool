@@ -83,11 +83,11 @@ Durum kodları: **doğrulanmış** = analiz betiği/inceleme ile hâlâ repro; *
 
 | | |
 |---|---|
-| **Durum** | **doğrulanmış** |
-| **Kod** | `backend/app/services/planning.py` — `simulate` due_date dalı (~L350–L361): önce `batches` döngüsü, sonra `orders`; ayrı sıralama |
-| **Analiz kanıtı** | Acil tekil plansız; geç terminli parti (`LATER`) yerleşti |
-| **FAZ** | **03** |
-| **Regresyon testi (henüz eklenmedi)** | Modül: `tests/test_batch_priority.py`. 40 saat kapasite; erken termin tekil + geç termin parti → tekil planlanır, parti plansız veya kısmi. Ciro modu ayrı test. |
+| **Durum** | **düzeltildi** (FAZ 03) |
+| **Eski kod** | `simulate`: once `batches` dongusu, sonra `orders`; ciro modunda partiler her zaman once |
+| **Yeni kod** | `planning_candidates.build_planning_candidates` + tek siralama; `_place_candidate` |
+| **Regresyon** | `tests/test_batch_priority.py` (5 test) |
+| **FAZ** | **03** ✓ |
 
 ### B7 · Yeniden planlama ufuk dışını siliyor (P0)
 
@@ -108,7 +108,7 @@ Durum kodları: **doğrulanmış** = analiz betiği/inceleme ile hâlâ repro; *
 | **00** | Başlangıç snapshot + regresyon planı | — | **tamamlandı** | `a0d879b` |
 | **01** | Ufuk dışı silmeyi durdur | B7 | **tamamlandı** | `f6be5eb` |
 | **02** | Tek kalan iş; mükerrer plan | B1, B5 | **tamamlandı** | 662f490 |
-| **03** | Parti + tekil aynı sıra | B6 | bekliyor | — |
+| **03** | Parti + tekil aynı sıra | B6 | **tamamlandı** | _(bu commit)_ |
 | **04** | Öncül + geçiş kuralları | B2, B3 | bekliyor | — |
 | **05** | Termin başarısızlığı açık | B4, M3 (gösterim) | bekliyor | — |
 | **06** | Revizyon onay = hesaplanan plan | T1 | bekliyor | — |
@@ -194,6 +194,42 @@ setup_required        = completed_good_qty <= 0
 
 ---
 
+## FAZ 03 — ortak aday listesi ve oncelik politikasi
+
+**Oncelik (termin):** `effective_due_date` artan → `display_code` → `(kind, candidate_id)`
+
+**Oncelik (ciro):** `remaining_sales_value / remaining_required_hours` azalan → termin → kimlik. Sifir saat/fiyatsiz en sona (uyari).
+
+**Parti termin:** bagli siparislerin en erken `effective_due` (parti `due_date` degil).
+
+| Dosya | Degisiklik |
+|---|---|
+| `backend/app/services/planning_candidates.py` | **yeni** — `PlanningCandidate`, siralama, skipped kaydi |
+| `backend/app/services/planning.py` | `simulate` tek aday dongusu; `_place_candidate` |
+| `backend/app/services/revenue.py` | etiket: Ciro oncelikli (sezgisel) |
+| `frontend/src/pages/Planning.tsx` | mod etiketi; skipped parti gosterimi |
+| `frontend/src/pages/planning/ComparePanel.tsx` | karsilastirma metinleri |
+| `frontend/src/pages/planning/RevisionsPanel.tsx` | mod etiketi |
+| `backend/tests/test_batch_priority.py` | B6 regresyon (5 test) |
+| `backend/tests/conftest.py` | testler arasi parti temizligi |
+| `backend/tests/test_capacity_flow.py` | WC/siparis izolasyonu (suite kirilmasin) |
+
+### FAZ 03 kabul olcutleri
+
+| # | Olcut | Sonuc |
+|---|---|---|
+| 1 | Erken termin tekil, gec termin parti (40h) | ✓ |
+| 2 | Parti tek basina oncelik yukseltmez | ✓ |
+| 3 | Yuksek ciro/saat tekil once | ✓ |
+| 4 | Sigmayan parti skipped | ✓ |
+| 5 | Deterministik sira (×3) | ✓ |
+| 6 | Backend suite | **87 passed**, 1 flaky (`test_wip_multi_route`) (~41s) |
+| 7 | Frontend build | Basarili |
+
+**Birlikte sevk:** yalnizca `due_date` modunda ayri policy (degismedi).
+
+---
+
 ## FAZ 00 kabul ölçütleri
 
 | # | Ölçüt | Sonuç |
@@ -215,4 +251,4 @@ setup_required        = completed_good_qty <= 0
 
 ## Sonraki adım
 
-**FAZ 03** — `Composer_Promptlari/Faz_03.md` (B6: parti + tekil sıra). Kullanıcı promptu verdiğinde uygulanır.
+**FAZ 04** — `Composer_Promptlari/Faz_04.md` (B2, B3: oncul + gecis kurallari). Kullanici promptu verdiginde uygulanir.

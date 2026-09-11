@@ -1,12 +1,15 @@
 """Siparis / stok kodu bazli is gucu ihtiyaci (saat)."""
 
 from collections import defaultdict
+from datetime import date, timedelta
 
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import Item, Order, RoutingOperation, WorkCenter
 from app.schemas import RequirementLine, RequirementQuery
+from app.services import capacity as cap
 from app.services.bom_tree import flatten_fg_operations
+from app.services.remaining_work import SchedulingContext, build_work_map_for_order, operation_run_hours, produced_qty_map
 
 
 def requirement_lines(db: Session, q: RequirementQuery) -> list[RequirementLine]:
@@ -20,19 +23,38 @@ def requirement_lines(db: Session, q: RequirementQuery) -> list[RequirementLine]
 
     # miktarlar
     qty_by_code: dict[str, float] = defaultdict(float)
+    remaining_by_key: dict[tuple[int, str, int], float] = defaultdict(float)
     if q.quantities:
         for code, qty in q.quantities.items():
             qty_by_code[code] += float(qty)
     else:
-        orders = db.query(Order).options(joinedload(Order.item)).filter(Order.status == "open")
+        orders = db.query(Order).options(joinedload(Order.item).joinedload(Item.operations)).filter(Order.status == "open")
         if q.due_from:
             orders = orders.filter(Order.due_date >= q.due_from)
         if q.due_to:
             orders = orders.filter(Order.due_date <= q.due_to)
-        for o in orders:
+        order_rows = orders.all()
+        today = cap.week_start(date.today())
+        broad_ctx = SchedulingContext(
+            horizon_start=today,
+            horizon_end_exclusive=today + timedelta(days=365 * 5),
+            replace_existing=False,
+        )
+        produced, _ = produced_qty_map(db)
+        for o in order_rows:
             if q.item_codes and o.item.code not in q.item_codes:
                 continue
             qty_by_code[o.item.code] += o.quantity
+            if not o.item:
+                continue
+            wm = build_work_map_for_order(db, o, broad_ctx, produced=produced)
+            for flat in flatten_fg_operations(db, o.item):
+                op = flat.operation
+                w = wm.get(op.id)
+                if not w or w.qty_to_schedule <= 1e-6:
+                    continue
+                key = (op.work_center_id, o.item.code, flat.display_seq)
+                remaining_by_key[key] += operation_run_hours(op, w.qty_to_schedule, setup_required=w.setup_required)
 
     if not qty_by_code:
         return []
@@ -53,6 +75,8 @@ def requirement_lines(db: Session, q: RequirementQuery) -> list[RequirementLine]
             op = flat.operation
             if (wc_filter and op.work_center_id not in wc_filter) or op.work_center is None:
                 continue
+            gross_h = round(op.hours_for(qty), 3)
+            rem_h = round(remaining_by_key.get((op.work_center_id, item.code, flat.display_seq), gross_h if q.quantities else 0.0), 3)
             lines.append(
                 RequirementLine(
                     work_center_id=op.work_center_id,
@@ -61,7 +85,8 @@ def requirement_lines(db: Session, q: RequirementQuery) -> list[RequirementLine]
                     operation_seq=flat.display_seq,
                     operation_name=op.operation_name,
                     quantity=qty,
-                    hours=round(op.hours_for(qty), 3),
+                    hours=gross_h,
+                    remaining_hours=rem_h if not q.quantities else gross_h,
                 )
             )
     lines.sort(key=lambda l: (l.work_center_code, l.item_code, l.operation_seq))

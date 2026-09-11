@@ -35,12 +35,10 @@ Durum kodları: **doğrulanmış** = analiz betiği/inceleme ile hâlâ repro; *
 
 | | |
 |---|---|
-| **Durum** | **doğrulanmış** (genel `simulate` / `auto_plan`); **kısmi** (`job_moves.remaining_chain` üretim ilerlemesini okur) |
-| **Kod** | `backend/app/services/planning.py` — `_place_order` → `_place_quantity(..., o.quantity, ...)` (~L221); `simulate()` üretim ilerlemesini düşmez |
-| **Kısmi düzeltme** | `backend/app/services/job_moves.py` — `remaining_chain()` → `wip._produced_qty_map()` |
-| **Analiz kanıtı** | `verification-results.json`: 6/10 üretilmiş → `observed_planned_hours: 10.0`, beklenen 4 |
-| **FAZ** | **02** — `remaining_work.py` + tüm plan motorları |
-| **Regresyon testi (henüz eklenmedi)** | Modül: `tests/test_remaining_work.py` (FAZ 02'de oluşturulacak). Fixture: in-memory SQLite veya mevcut `_upload` + `ProductionActual` import (`test_capacity_flow._upload`). Senaryo: 10 adet sipariş, op seq 10'da 6 adet `ProductionActual`, `simulate(start_week=…, weeks=1)` → `planned_hours == 4`, `planned_qty` toplamı 4. Aynı senaryo `auto_plan(replace_existing=True)` ve `due_date` / `revenue` modları. **xfail yok.** |
+| **Durum** | **düzeltildi** (FAZ 02) |
+| **Yeni kod** | `remaining_work.py` → `qty_to_schedule = max(remaining_execution − preserved_planned, 0)`; `planning._place_order` / `_place_batch` |
+| **Regresyon** | `tests/test_remaining_work.py::test_completed_production_schedules_remaining_only` |
+| **FAZ** | **02** ✓ |
 
 ### B2 · Ön operasyon plansızken sonraki planlanıyor (P0)
 
@@ -76,12 +74,10 @@ Durum kodları: **doğrulanmış** = analiz betiği/inceleme ile hâlâ repro; *
 
 | | |
 |---|---|
-| **Durum** | **doğrulanmış** |
-| **Kod** | `backend/app/services/planning.py` — `simulate` (~L282–L284): mevcut auto plan kapasiteden düşülür; `remaining_work` yok. `auto_plan` `replace_existing=False` ile iki kez → 20 saat |
-| **Analiz kanıtı** | `observed_total_hours: 20.0`, gereksinim 10 |
-| **Not** | UI varsayılan `replace_existing=True`; API/servis seçeneği hâlâ riskli |
-| **FAZ** | **02** |
-| **Regresyon testi (henüz eklenmedi)** | Modül: `tests/test_remaining_work.py` veya `tests/test_plan_append_mode.py`. `AutoPlanRequest(replace_existing=False)` ×2 → toplam plan saati 10. Manuel 4 saat + auto → max 6 saat ek yük. |
+| **Durum** | **düzeltildi** (FAZ 02) |
+| **Yeni kod** | `replace_existing=False` → mevcut auto ufuk içi `preserved_planned_qty` sayılır; ikinci çağrı `qty_to_schedule=0` |
+| **Regresyon** | `tests/test_remaining_work.py::test_append_mode_no_duplicate_plan` |
+| **FAZ** | **02** ✓ |
 
 ### B6 · Partiler tekil siparişlerden önce (P1)
 
@@ -111,7 +107,7 @@ Durum kodları: **doğrulanmış** = analiz betiği/inceleme ile hâlâ repro; *
 |---|---|---|---|---|
 | **00** | Başlangıç snapshot + regresyon planı | — | **tamamlandı** | `a0d879b` |
 | **01** | Ufuk dışı silmeyi durdur | B7 | **tamamlandı** | `f6be5eb` |
-| **02** | Tek kalan iş; mükerrer plan | B1, B5 | bekliyor | — |
+| **02** | Tek kalan iş; mükerrer plan | B1, B5 | **tamamlandı** | 4713655 |
 | **03** | Parti + tekil aynı sıra | B6 | bekliyor | — |
 | **04** | Öncül + geçiş kuralları | B2, B3 | bekliyor | — |
 | **05** | Termin başarısızlığı açık | B4, M3 (gösterim) | bekliyor | — |
@@ -154,6 +150,50 @@ Prompt dosyaları: `C:\Users\ozan.deniz\Desktop\Kapasite_Planlama_Analizi\Compos
 
 ---
 
+## FAZ 02 — kalan iş formülü ve tüketiciler
+
+**Formül (operasyon / sipariş kimliği):**
+
+```
+required_qty          = BOM katsayili miktar (explode_order)
+completed_good_qty    = produced_qty_map (order_id + operation_id)
+remaining_execution   = max(required − completed_good, 0)
+preserved_planned_qty = ufuk disi + (ufuk ici manuel) + (ufuk ici auto, replace_existing=False)
+                        gecmis hafta satirlari korunmaz (gecikmis is yeniden planlanir)
+qty_to_schedule       = max(remaining_execution − preserved_planned, 0)
+setup_required        = completed_good_qty <= 0
+```
+
+**Tüketiciler:** `planning.simulate` / `_place_order` / `_place_batch`, `job_moves.remaining_chain`, `requirements.requirement_lines` (`remaining_hours`), `wip._produced_qty_map` (delegasyon).
+
+| Dosya | Değişiklik |
+|---|---|
+| `backend/app/services/remaining_work.py` | **yeni** — ortak kalan is servisi |
+| `backend/app/services/planning.py` | `_place_order`, `_place_batch`, `operation_run_hours`, `setup_by_op` |
+| `backend/app/services/job_moves.py` | `required_qty_by_operation` + `produced_qty_map` |
+| `backend/app/services/wip.py` | `produced_qty_map` delegasyonu; position_no belirsizligi uyarisi |
+| `backend/app/services/requirements.py` | `remaining_hours` alani (brut `hours` korundu) |
+| `backend/app/schemas.py` | `RequirementLine.remaining_hours` |
+| `backend/tests/test_remaining_work.py` | B1/B5 regresyon (6 test) |
+| `backend/tests/conftest.py` | Testler arasi plan/uretim izolasyonu |
+
+### FAZ 02 kabul ölçütleri
+
+| # | Ölçüt | Sonuç |
+|---|---|---|
+| 1 | 6/10 uretilmis → 4 saat plan | ✓ |
+| 2 | Append ×2 → toplam 10 saat | ✓ |
+| 3 | Manuel 4 saat → auto 6 saat | ✓ |
+| 4 | Ufuk disi plan tekrar eklenmez | ✓ |
+| 5 | Tamamlanan op 0; gecmis plansiz yeniden planlanir | ✓ |
+| 6 | Parti + BOM katsayisi 2 | ✓ |
+| 7 | Backend suite | **82 passed**, 1 flaky (`test_wip_multi_route` full-suite; tek basina gecer) (~123s) |
+| 8 | Frontend build | Başarılı |
+
+**Kalan (FAZ 07+):** Bitmis urun rezervasyonu/sevkiyat cift dusme; position_no belirsiz uretimde UI uyarisi.
+
+---
+
 ## FAZ 00 kabul ölçütleri
 
 | # | Ölçüt | Sonuç |
@@ -175,4 +215,4 @@ Prompt dosyaları: `C:\Users\ozan.deniz\Desktop\Kapasite_Planlama_Analizi\Compos
 
 ## Sonraki adım
 
-**FAZ 02** — `Composer_Promptlari/Faz_02.md` (B1, B5: kalan iş + mükerrer plan). Kullanıcı promptu verdiğinde uygulanır.
+**FAZ 03** — `Composer_Promptlari/Faz_03.md` (B6: parti + tekil sıra). Kullanıcı promptu verdiğinde uygulanır.

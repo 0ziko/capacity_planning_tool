@@ -117,10 +117,10 @@ def test_replan_upper_bound_week_preserved_inside_replaced(client, auth, db):
     client.post(
         "/api/orders",
         headers=auth,
-        json={"order_no": "H-IN", "due_date": "2026-09-18", "item_code": "UCUZ", "quantity": 5, "unit_price": 1},
+        json={"order_no": "H-IN", "due_date": "2026-09-18", "item_code": "UCUZ", "quantity": 10, "unit_price": 1},
     )
-    inside_id = _insert_plan_line(db, "H-IN", wc_id, START, hours=99.0)
-    upper_id = _insert_plan_line(db, "H-IN", wc_id, UPPER_BOUND, hours=7.0)
+    inside_id = _insert_plan_line(db, "H-IN", wc_id, START, hours=99.0, qty=10.0)
+    upper_id = _insert_plan_line(db, "H-IN", wc_id, UPPER_BOUND, hours=3.0, qty=3.0)
 
     client.post(
         "/api/plan/auto",
@@ -129,9 +129,10 @@ def test_replan_upper_bound_week_preserved_inside_replaced(client, auth, db):
     )
 
     lines = {l["id"]: l for l in client.get("/api/plan/lines", headers=auth, params={"start": START.isoformat()}).json()}
-    assert upper_id in lines and lines[upper_id]["planned_hours"] == 7.0
+    assert upper_id in lines and lines[upper_id]["planned_hours"] == 3.0
     assert inside_id not in lines, "Ufuk icindeki eski auto satiri yenilenmeli"
-    assert any(l["week_start"] == START.isoformat() and l["mode"] == "auto" and l["id"] != inside_id for l in lines.values())
+    new_inside = [l for l in lines.values() if l["week_start"] == START.isoformat() and l["mode"] == "auto" and l["id"] != inside_id]
+    assert new_inside and round(sum(l["planned_hours"] for l in new_inside), 1) == 7.0
 
 
 def test_revision_apply_same_horizon_scope(client, auth, db):

@@ -34,6 +34,17 @@ def db():
         s.close()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_planning_artifacts(db):
+    """Testler arasi uretim/plan kalintisi otomatik planlamayi etkilemesin."""
+    from app.models import PlanLine, ProductionActual
+
+    db.query(PlanLine).delete()
+    db.query(ProductionActual).delete()
+    db.commit()
+    yield
+
+
 @pytest.fixture(scope="session")
 def client():
     with TestClient(app) as c:

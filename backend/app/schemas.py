@@ -410,7 +410,8 @@ class RequirementLine(BaseModel):
     operation_seq: int
     operation_name: str
     quantity: float
-    hours: float
+    hours: float  # brut is gucu ihtiyaci (saat)
+    remaining_hours: float = 0.0  # kalan planlanacak is (saat)
 
 
 class RequirementQuery(BaseModel):

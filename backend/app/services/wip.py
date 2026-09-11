@@ -68,76 +68,11 @@ def plan_ordered_ops(db: Session, ops: list[RoutingOperation], *, order_no: str 
 
 
 def _produced_qty_map(db: Session, *, as_of: date | None = None) -> dict[tuple[int, int], float]:
-    """(order_id, operation_id) -> uretilen miktar."""
-    out: dict[tuple[int, int], float] = defaultdict(float)
-    q = db.query(ProductionActual)
-    if as_of:
-        q = q.filter(ProductionActual.prod_date <= as_of)
-    actuals = q.order_by(ProductionActual.prod_date, ProductionActual.id).all()
-    if not actuals:
-        return out
+    """(order_id, operation_id) -> uretilen miktar (remaining_work ile ortak)."""
+    from app.services.remaining_work import produced_qty_map
 
-    idx = wip_index(db)
-    open_orders = (
-        db.query(Order)
-        .options(joinedload(Order.item).joinedload(Item.operations))
-        .filter(Order.status == "open")
-        .order_by(func.coalesce(Order.revised_due_date, Order.due_date), Order.order_no, Order.id)
-        .all()
-    )
-    orders_by_no = {(o.order_no.upper(), o.item_id): o for o in open_orders}
-    orders_by_item: dict[int, list[Order]] = defaultdict(list)
-    for o in open_orders:
-        orders_by_item[o.item_id].append(o)
-
-    def op_id_for(item, seq, wc_id, wip_code):
-        if not item:
-            return None
-        if wip_code:
-            try:
-                return resolve_wip(db, wip_code, item.code, idx).id
-            except ValueError:
-                pass
-        if seq is not None:
-            op = next((x for x in item.operations if x.seq == seq), None)
-            return op.id if op else None
-        op = next((x for x in item.operations if x.work_center_id == wc_id), None)
-        return op.id if op else None
-
-    fifo_left: dict[tuple[int, int], float] = {}
-    for a in actuals:
-        item = a.item
-        if not item:
-            continue
-        op_id = a.operation_seq and next((x.id for x in item.operations if x.seq == a.operation_seq), None)
-        if op_id is None:
-            op_id = op_id_for(item, a.operation_seq, a.work_center_id, a.semi_finished_code or "")
-        if op_id is None:
-            continue
-        if a.order_no:
-            target = orders_by_no.get((a.order_no.upper(), a.item_id))
-            if target is not None:
-                out[(target.id, op_id)] += a.quantity
-            continue
-        qty_left = a.quantity
-        for o in orders_by_item.get(a.item_id, []):
-            key = (o.id, op_id)
-            if key not in fifo_left:
-                fifo_left[key] = max(o.quantity - out[key], 0.0)
-            room = fifo_left[key]
-            if room <= 1e-9:
-                continue
-            take = min(room, qty_left)
-            out[key] += take
-            fifo_left[key] = room - take
-            qty_left -= take
-            if qty_left <= 1e-9:
-                break
-        if qty_left > 1e-9 and orders_by_item.get(a.item_id):
-            last = orders_by_item[a.item_id][-1]
-            out[(last.id, op_id)] += qty_left
-
-    return dict(out)
+    out, _ = produced_qty_map(db, as_of=as_of)
+    return out
 
 
 def _allocation_targets(

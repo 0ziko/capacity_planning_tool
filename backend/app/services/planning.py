@@ -33,6 +33,13 @@ from app.services import scenarios as scen
 from app.services.bom_tree import explode_order, has_wip_structure
 from app.services.gantt import actual_hours_by_week
 from app.services.plan_draft import DraftLine
+from app.services.remaining_work import (
+    SchedulingContext,
+    build_work_map_for_batch,
+    build_work_map_for_order,
+    operation_run_hours,
+    qty_and_setup_for_placement,
+)
 
 
 def _selected_work_centers(db: Session, ids: list[int] | None) -> list[WorkCenter]:
@@ -161,6 +168,7 @@ def _place_quantity(
     min_start_idx: int = 0,
     ops: list[RoutingOperation] | None = None,
     qty_by_op: dict[int, float] | None = None,
+    setup_by_op: dict[int, bool] | None = None,
 ) -> tuple[list[DraftLine], list[dict], int]:
     """Siparis veya uretim partisi miktari icin operasyonlari yerlestirir. Son hafta indeksini dondurur."""
     route_item = item or anchor.item
@@ -175,7 +183,10 @@ def _place_quantity(
         if op.work_center_id not in wc_by_id:
             continue
         op_qty = qty_by_op.get(op.id, quantity) if qty_by_op is not None else quantity
-        total_hours = op.hours_for(op_qty)
+        if op_qty <= 1e-6:
+            continue
+        setup = setup_by_op.get(op.id, True) if setup_by_op is not None else True
+        total_hours = operation_run_hours(op, op_qty, setup_required=setup)
         hours_left = total_hours
         if prev_op is None:
             idx = min_start_idx
@@ -237,13 +248,36 @@ def _place_order(
     weeks: list[date],
     remaining: dict[tuple[int, date], float],
     rules: scen.RuleLookup | None = None,
+    *,
+    sched_ctx: SchedulingContext | None = None,
+    work_map: dict | None = None,
 ) -> tuple[list[DraftLine], list[dict]]:
+    if sched_ctx is None:
+        sched_ctx = SchedulingContext(horizon_start=weeks[0], horizon_end_exclusive=weeks[-1] + timedelta(days=7))
+    if work_map is None:
+        work_map = build_work_map_for_order(db, o, sched_ctx)
+
+    def _maps_for_ops(ops: list[RoutingOperation]) -> tuple[dict[int, float], dict[int, bool]]:
+        qty: dict[int, float] = {}
+        setup: dict[int, bool] = {}
+        for op in ops:
+            q, s = qty_and_setup_for_placement(work_map, op)
+            qty[op.id] = q
+            setup[op.id] = s
+        return qty, setup
+
     if has_wip_structure(o):
         jobs = explode_order(db, o)
         all_lines: list[DraftLine] = []
         all_unplanned: list[dict] = []
         wip_end = 0
         for job in jobs.wip_jobs:
+            rem_ops = [op for op in sorted(job.item.operations or [], key=lambda x: x.seq) if op.work_center_id in wc_by_id]
+            if not rem_ops:
+                continue
+            qty_by_op, setup_by_op = _maps_for_ops(rem_ops)
+            if sum(qty_by_op.values()) <= 1e-6:
+                continue
             lbl = f"{o.order_no}/{job.label_suffix}" if job.label_suffix else o.order_no
             ls, un, end_idx = _place_quantity(
                 o,
@@ -257,28 +291,56 @@ def _place_order(
                 item=job.item,
                 semi_finished_code=job.semi_finished_code,
                 min_start_idx=0,
+                ops=rem_ops,
+                qty_by_op=qty_by_op,
+                setup_by_op=setup_by_op,
             )
             all_lines.extend(ls)
             all_unplanned.extend(un)
             wip_end = max(wip_end, end_idx)
         if jobs.finish_job:
-            ls, un, _ = _place_quantity(
-                o,
-                jobs.finish_job.quantity,
-                o.order_no,
-                None,
-                wc_by_id,
-                weeks,
-                remaining,
-                rules,
-                item=jobs.finish_job.item,
-                semi_finished_code="",
-                min_start_idx=wip_end,
-            )
-            all_lines.extend(ls)
-            all_unplanned.extend(un)
+            rem_ops = [op for op in sorted(jobs.finish_job.item.operations or [], key=lambda x: x.seq) if op.work_center_id in wc_by_id]
+            if rem_ops:
+                qty_by_op, setup_by_op = _maps_for_ops(rem_ops)
+                if sum(qty_by_op.values()) > 1e-6:
+                    ls, un, _ = _place_quantity(
+                        o,
+                        jobs.finish_job.quantity,
+                        o.order_no,
+                        None,
+                        wc_by_id,
+                        weeks,
+                        remaining,
+                        rules,
+                        item=jobs.finish_job.item,
+                        semi_finished_code="",
+                        min_start_idx=wip_end,
+                        ops=rem_ops,
+                        qty_by_op=qty_by_op,
+                        setup_by_op=setup_by_op,
+                    )
+                    all_lines.extend(ls)
+                    all_unplanned.extend(un)
         return all_lines, all_unplanned
-    ls, un, _ = _place_quantity(o, o.quantity, o.order_no, None, wc_by_id, weeks, remaining, rules)
+    rem_ops = [op for op in sorted(o.item.operations or [], key=lambda x: x.seq) if op.work_center_id in wc_by_id]
+    if not rem_ops:
+        return [], []
+    qty_by_op, setup_by_op = _maps_for_ops(rem_ops)
+    if sum(qty_by_op.values()) <= 1e-6:
+        return [], []
+    ls, un, _ = _place_quantity(
+        o,
+        o.quantity,
+        o.order_no,
+        None,
+        wc_by_id,
+        weeks,
+        remaining,
+        rules,
+        ops=rem_ops,
+        qty_by_op=qty_by_op,
+        setup_by_op=setup_by_op,
+    )
     return ls, un
 
 
@@ -292,6 +354,112 @@ def _order_hours(db: Session, o: Order, wc_by_id: dict[int, WorkCenter]) -> floa
             total += sum(op.hours_for(jobs.finish_job.quantity) for op in jobs.finish_job.item.operations if op.work_center_id in wc_by_id)
         return total
     return sum(op.hours_for(o.quantity) for op in o.item.operations if op.work_center_id in wc_by_id)
+
+
+def _place_batch(
+    db: Session,
+    batch: ProductionBatch,
+    anchor: Order,
+    wc_by_id: dict[int, WorkCenter],
+    weeks: list[date],
+    remaining: dict[tuple[int, date], float],
+    rules: scen.RuleLookup | None,
+    sched_ctx: SchedulingContext,
+    produced_map: dict,
+) -> tuple[list[DraftLine], list[dict], int]:
+    if not batch.item:
+        return [], [], 0
+    work_map = build_work_map_for_batch(db, batch, anchor, sched_ctx, produced=produced_map)
+    ratio = float(batch.quantity or 0) / float(anchor.quantity or 1) if anchor.quantity else 1.0
+
+    def _maps_for_ops(ops: list[RoutingOperation]) -> tuple[dict[int, float], dict[int, bool]]:
+        qty: dict[int, float] = {}
+        setup: dict[int, bool] = {}
+        for op in ops:
+            q, s = qty_and_setup_for_placement(work_map, op)
+            qty[op.id] = q
+            setup[op.id] = s
+        return qty, setup
+
+    if has_wip_structure(anchor):
+        jobs = explode_order(db, anchor)
+        all_lines: list[DraftLine] = []
+        all_unplanned: list[dict] = []
+        wip_end = 0
+        for job in jobs.wip_jobs:
+            rem_ops = [op for op in sorted(job.item.operations or [], key=lambda x: x.seq) if op.work_center_id in wc_by_id]
+            if not rem_ops:
+                continue
+            qty_by_op, setup_by_op = _maps_for_ops(rem_ops)
+            if sum(qty_by_op.values()) <= 1e-6:
+                continue
+            job_qty = job.quantity * ratio
+            lbl = f"{batch.batch_no}/{job.label_suffix}" if job.label_suffix else batch.batch_no
+            ls, un, end_idx = _place_quantity(
+                anchor,
+                job_qty,
+                lbl,
+                batch.id,
+                wc_by_id,
+                weeks,
+                remaining,
+                rules,
+                item=job.item,
+                semi_finished_code=job.semi_finished_code,
+                min_start_idx=0,
+                ops=rem_ops,
+                qty_by_op=qty_by_op,
+                setup_by_op=setup_by_op,
+            )
+            all_lines.extend(ls)
+            all_unplanned.extend(un)
+            wip_end = max(wip_end, end_idx)
+        if jobs.finish_job:
+            rem_ops = [op for op in sorted(jobs.finish_job.item.operations or [], key=lambda x: x.seq) if op.work_center_id in wc_by_id]
+            if rem_ops:
+                qty_by_op, setup_by_op = _maps_for_ops(rem_ops)
+                if sum(qty_by_op.values()) > 1e-6:
+                    ls, un, end_idx = _place_quantity(
+                        anchor,
+                        float(batch.quantity or 0),
+                        batch.batch_no,
+                        batch.id,
+                        wc_by_id,
+                        weeks,
+                        remaining,
+                        rules,
+                        item=jobs.finish_job.item,
+                        semi_finished_code="",
+                        min_start_idx=wip_end,
+                        ops=rem_ops,
+                        qty_by_op=qty_by_op,
+                        setup_by_op=setup_by_op,
+                    )
+                    all_lines.extend(ls)
+                    all_unplanned.extend(un)
+                    wip_end = max(wip_end, end_idx)
+        return all_lines, all_unplanned, wip_end
+
+    rem_ops = [op for op in sorted(batch.item.operations or [], key=lambda x: x.seq) if op.work_center_id in wc_by_id]
+    if not rem_ops:
+        return [], [], 0
+    qty_by_op, setup_by_op = _maps_for_ops(rem_ops)
+    if sum(qty_by_op.values()) <= 1e-6:
+        return [], [], 0
+    return _place_quantity(
+        anchor,
+        batch.quantity,
+        batch.batch_no,
+        batch.id,
+        wc_by_id,
+        weeks,
+        remaining,
+        rules,
+        item=batch.item,
+        ops=rem_ops,
+        qty_by_op=qty_by_op,
+        setup_by_op=setup_by_op,
+    )
 
 
 def _batch_hours(batch: ProductionBatch, wc_by_id: dict[int, WorkCenter]) -> float:
@@ -330,6 +498,14 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
 
     wc_ids = [w.id for w in wcs]
     wc_by_id = {w.id: w for w in wcs}
+    sched_ctx = SchedulingContext(
+        horizon_start=start,
+        horizon_end_exclusive=scope.end_exclusive,
+        replace_existing=req.replace_existing,
+    )
+    from app.services.remaining_work import produced_qty_map
+
+    produced_map, _ = produced_qty_map(db)
 
     # kalan kapasite = planlanabilir kapasite - mevcut plan (manuel + tahmin + otomatik)
     manual = planned_hours_by_week(db, wc_ids, start, weeks[-1], mode="manual")
@@ -385,7 +561,9 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
             if not anchor:
                 continue
             trial = dict(remaining)
-            ls, un, _ = _place_quantity(anchor, batch.quantity, batch.batch_no, batch.id, wc_by_id, weeks, trial, rules)
+            ls, un, _ = _place_batch(
+                db, batch, anchor, wc_by_id, weeks, trial, rules, sched_ctx, produced_map
+            )
             if un:
                 continue
             remaining = trial
@@ -394,7 +572,8 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
             if _order_hours(db, o, wc_by_id) <= 1e-6:
                 continue  # bu is merkezlerinde operasyonu yok
             trial = dict(remaining)
-            ls, un = _place_order(db, o, wc_by_id, weeks, trial, rules)
+            wm = build_work_map_for_order(db, o, sched_ctx, produced=produced_map)
+            ls, un = _place_order(db, o, wc_by_id, weeks, trial, rules, sched_ctx=sched_ctx, work_map=wm)
             if un:
                 leftover.append(o)
                 continue
@@ -402,7 +581,8 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
             lines.extend(ls)
         # kalan kapasiteyi termin sirasiyla kismen doldur
         for o in sorted(leftover, key=lambda o: (effective_due(o), o.order_no)):
-            ls, un = _place_order(db, o, wc_by_id, weeks, remaining, rules)
+            wm = build_work_map_for_order(db, o, sched_ctx, produced=produced_map)
+            ls, un = _place_order(db, o, wc_by_id, weeks, remaining, rules, sched_ctx=sched_ctx, work_map=wm)
             lines.extend(ls)
             unplanned.extend(un)
             if not ls:
@@ -414,11 +594,12 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
             anchor = sorted(batch.orders, key=lambda l: (effective_due(l.order) if l.order else date.max, l.order.order_no if l.order else "", l.order_id))[0].order
             if not anchor:
                 continue
-            ls, un, _ = _place_quantity(anchor, batch.quantity, batch.batch_no, batch.id, wc_by_id, weeks, remaining, rules)
+            ls, un, _ = _place_batch(db, batch, anchor, wc_by_id, weeks, remaining, rules, sched_ctx, produced_map)
             lines.extend(ls)
             unplanned.extend(un)
         for o in orders:
-            ls, un = _place_order(db, o, wc_by_id, weeks, remaining, rules)
+            wm = build_work_map_for_order(db, o, sched_ctx, produced=produced_map)
+            ls, un = _place_order(db, o, wc_by_id, weeks, remaining, rules, sched_ctx=sched_ctx, work_map=wm)
             lines.extend(ls)
             unplanned.extend(un)
 

@@ -17,7 +17,7 @@ from app.services import scenarios as scen
 from app.services.bom_tree import explode_order, flatten_fg_operations, has_wip_structure
 from app.services.orders import effective_due
 from app.services.plan_draft import DraftLine
-from app.services.wip import _produced_qty_map
+from app.services.remaining_work import produced_qty_map, required_qty_by_operation
 
 DONE_PCT = 99.5
 QTY_MODES = ("remaining", "split")
@@ -116,7 +116,8 @@ def remaining_chain(db: Session, order: Order, wc_ids: list[int] | None = None) 
         allow = set(wc_ids)
         flats = [f for f in flats if f.operation.work_center_id in allow]
 
-    produced = _produced_qty_map(db)
+    produced, _ = produced_qty_map(db)
+    req_by_op = required_qty_by_operation(db, order)
     first_plan: dict[int, date] = {}
     for pl in db.query(PlanLine).filter(PlanLine.order_id == order.id).all():
         cur = first_plan.get(pl.operation_id)
@@ -127,9 +128,10 @@ def remaining_chain(db: Session, order: Order, wc_ids: list[int] | None = None) 
     completed: set[int] = set()
     for f in flats:
         op = f.operation
+        rq = float(req_by_op.get(op.id, order.quantity or 0.0))
         pq = float(produced.get((order.id, op.id), 0.0))
-        rem = max((order.quantity or 0.0) - pq, 0.0)
-        locked = rem <= 1e-6 or (order.quantity and pq / order.quantity * 100 >= DONE_PCT)
+        rem = max(rq - pq, 0.0)
+        locked = rem <= 1e-6 or (rq > 1e-6 and pq / rq * 100 >= DONE_PCT)
         if locked:
             completed.add(op.id)
         ops.append(

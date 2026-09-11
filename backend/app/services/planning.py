@@ -33,6 +33,7 @@ from app.services import scenarios as scen
 from app.services.bom_tree import explode_order, has_wip_structure
 from app.services.gantt import actual_hours_by_week
 from app.services.plan_draft import DraftLine
+from app.services import operation_constraints as opcon
 from app.services.planning_candidates import (
     REVENUE_MODE_LABEL,
     PlanningCandidate,
@@ -176,76 +177,203 @@ def _place_quantity(
     ops: list[RoutingOperation] | None = None,
     qty_by_op: dict[int, float] | None = None,
     setup_by_op: dict[int, bool] | None = None,
+    completed_by_op: dict[int, float] | None = None,
+    assembly_outputs: dict[str, float] | None = None,
+    assembly_wip_req: list[tuple[str, float]] | None = None,
+    max_week_idx: int | None = None,
 ) -> tuple[list[DraftLine], list[dict], int]:
     """Siparis veya uretim partisi miktari icin operasyonlari yerlestirir. Son hafta indeksini dondurur."""
     route_item = item or anchor.item
-    route_ops = list(ops) if ops is not None else list(route_item.operations or [])
+    route_ops = [op for op in (list(ops) if ops is not None else list(route_item.operations or [])) if op.work_center_id in wc_by_id]
+    if not route_ops:
+        return [], [], min_start_idx
+
+    qty_map = qty_by_op or {op.id: quantity for op in route_ops}
+    graph = opcon.build_sequential_graph(route_ops, qty_map)
+    if graph.errors:
+        raise opcon.RouteCycleError(graph.errors[0])
+
+    completed_by_op = completed_by_op or {}
+    cum_planned: dict[int, float] = {}
+    pred_cum_by_week: dict[int, dict[int, float]] = {}
     lines: list[DraftLine] = []
     unplanned: list[dict] = []
-    prev_first_idx = min_start_idx
-    prev_last_idx = min_start_idx
     prev_op: RoutingOperation | None = None
     last_idx = min_start_idx
+    week_limit = len(weeks) - 1 if max_week_idx is None else min(max_week_idx, len(weeks) - 1)
+
     for op in route_ops:
-        if op.work_center_id not in wc_by_id:
-            continue
-        op_qty = qty_by_op.get(op.id, quantity) if qty_by_op is not None else quantity
+        op_qty = qty_map.get(op.id, quantity)
         if op_qty <= 1e-6:
             continue
         setup = setup_by_op.get(op.id, True) if setup_by_op is not None else True
-        total_hours = operation_run_hours(op, op_qty, setup_required=setup)
-        hours_left = total_hours
-        if prev_op is None:
-            idx = min_start_idx
-        else:
-            rule = rules.get(route_item, prev_op, op) if rules else scen.Rule()
-            idx = prev_first_idx if rule.rule == "cycles" else prev_last_idx
+        setup_left = setup
+        hours_per_unit = op.cycle_time_sec / 3600.0
+        pred_required = qty_map.get(prev_op.id, 0.0) if prev_op else 0.0
+        pred_week_map = pred_cum_by_week.get(prev_op.id, {}) if prev_op else {}
+
+        idx, wait_reason = opcon.resolve_min_start_for_op(
+            op, route_item, prev_op, rules, pred_required, pred_week_map, weeks, min_start_idx
+        )
+        if idx >= len(weeks) or idx > week_limit:
+            pred_avail_now = opcon.predecessor_available(prev_op.id, completed_by_op, cum_planned) if prev_op else op_qty
+            if wait_reason:
+                block_reason: opcon.BlockReason = wait_reason
+            elif prev_op and pred_avail_now + 1e-6 < pred_required:
+                block_reason = "oncul_eksik"
+            else:
+                block_reason = "kapasite_yetersiz"
+            unplanned.append(
+                opcon.unplanned_entry(
+                    order_no=label or anchor.order_no,
+                    item_code=route_item.code,
+                    semi_finished_code=semi_finished_code,
+                    operation_seq=op.seq,
+                    work_center_code=wc_by_id[op.work_center_id].code,
+                    hours=round(operation_run_hours(op, op_qty - cum_planned.get(op.id, 0.0), setup_required=setup_left and cum_planned.get(op.id, 0) <= 1e-6), 2),
+                    reason=block_reason,
+                )
+            )
+            prev_op = op
+            continue
+
         first_idx = None
         op_last_idx = None
-        while hours_left > 1e-6 and idx < len(weeks):
+        qty_left = op_qty - cum_planned.get(op.id, 0.0)
+
+        while qty_left > 1e-6 and idx <= week_limit:
+            rule = rules.get(route_item, prev_op, op) if rules and prev_op else scen.Rule()
+            pred_avail = opcon.predecessor_available(prev_op.id, completed_by_op, cum_planned) if prev_op else op_qty
+            qty_cap = opcon.max_successor_qty(
+                rule,
+                pred_required,
+                pred_avail,
+                op_qty,
+                cum_planned.get(op.id, 0.0),
+            )
+            if assembly_outputs is not None and assembly_wip_req:
+                qty_cap = min(
+                    qty_cap,
+                    opcon.assembly_cap_qty(assembly_outputs, assembly_wip_req, op_qty) - cum_planned.get(op.id, 0.0),
+                )
+            if qty_cap <= 1e-6:
+                if idx >= week_limit:
+                    reason: opcon.BlockReason = "oncul_eksik" if prev_op and pred_avail + 1e-6 < pred_required else "kapasite_yetersiz"
+                    if wait_reason:
+                        reason = wait_reason
+                    unplanned.append(
+                        opcon.unplanned_entry(
+                            order_no=label or anchor.order_no,
+                            item_code=route_item.code,
+                            semi_finished_code=semi_finished_code,
+                            operation_seq=op.seq,
+                            work_center_code=wc_by_id[op.work_center_id].code,
+                            hours=round(qty_left * hours_per_unit + (op.setup_time_min / 60.0 if setup_left else 0), 2),
+                            reason=reason,
+                        )
+                    )
+                    break
+                idx += 1
+                continue
+
+            week_qty_budget = min(qty_left, qty_cap)
+            run_hours = week_qty_budget * hours_per_unit
+            if setup_left and cum_planned.get(op.id, 0.0) <= 1e-6:
+                run_hours += op.setup_time_min / 60.0
+
             wk = weeks[idx]
             avail = remaining[(op.work_center_id, wk)]
-            if avail > 1e-6:
-                take = min(avail, hours_left)
-                qty = op_qty * (take / total_hours) if total_hours > 0 else 0
-                lines.append(
-                    DraftLine(
-                        order=anchor,
-                        order_id=anchor.id,
-                        operation_id=op.id,
-                        work_center_id=op.work_center_id,
-                        week_start=wk,
-                        planned_hours=round(take, 3),
-                        planned_qty=round(qty, 2),
-                        production_batch_id=production_batch_id,
-                        label=label or anchor.order_no,
-                        semi_finished_code=semi_finished_code or op.semi_finished_code or "",
+            if avail <= 1e-6:
+                if idx >= week_limit:
+                    unplanned.append(
+                        opcon.unplanned_entry(
+                            order_no=label or anchor.order_no,
+                            item_code=route_item.code,
+                            semi_finished_code=semi_finished_code,
+                            operation_seq=op.seq,
+                            work_center_code=wc_by_id[op.work_center_id].code,
+                            hours=round(run_hours, 2),
+                            reason="kapasite_yetersiz",
+                        )
                     )
-                )
-                remaining[(op.work_center_id, wk)] = avail - take
-                hours_left -= take
-                if first_idx is None:
-                    first_idx = idx
-                op_last_idx = idx
-                last_idx = max(last_idx, idx)
-            if hours_left > 1e-6:
+                    break
                 idx += 1
-        if first_idx is not None:
-            prev_first_idx = first_idx
-            prev_last_idx = op_last_idx if op_last_idx is not None else first_idx
-            prev_op = op
-        if hours_left > 1e-6:
-            unplanned.append(
-                {
-                    "order_no": label or anchor.order_no,
-                    "item_code": route_item.code,
-                    "semi_finished_code": semi_finished_code,
-                    "operation_seq": op.seq,
-                    "work_center_code": wc_by_id[op.work_center_id].code,
-                    "hours": round(hours_left, 2),
-                }
+                continue
+
+            if run_hours > avail + 1e-6:
+                if setup_left and cum_planned.get(op.id, 0.0) <= 1e-6:
+                    setup_h = op.setup_time_min / 60.0
+                    if avail <= setup_h + 1e-6:
+                        idx += 1
+                        continue
+                    prod_h = avail - setup_h
+                    placed_qty = min(week_qty_budget, prod_h / hours_per_unit if hours_per_unit > 0 else 0)
+                    take = setup_h + placed_qty * hours_per_unit
+                    setup_left = False
+                else:
+                    placed_qty = min(week_qty_budget, avail / hours_per_unit if hours_per_unit > 0 else 0)
+                    take = placed_qty * hours_per_unit
+            else:
+                placed_qty = week_qty_budget
+                take = run_hours
+                setup_left = False
+
+            if placed_qty <= 1e-6:
+                idx += 1
+                continue
+
+            lines.append(
+                DraftLine(
+                    order=anchor,
+                    order_id=anchor.id,
+                    operation_id=op.id,
+                    work_center_id=op.work_center_id,
+                    week_start=wk,
+                    planned_hours=round(take, 3),
+                    planned_qty=round(placed_qty, 2),
+                    production_batch_id=production_batch_id,
+                    label=label or anchor.order_no,
+                    semi_finished_code=semi_finished_code or op.semi_finished_code or "",
+                )
             )
+            remaining[(op.work_center_id, wk)] = avail - take
+            cum_planned[op.id] = cum_planned.get(op.id, 0.0) + placed_qty
+            pred_cum_by_week.setdefault(op.id, {})[idx] = pred_cum_by_week.get(op.id, {}).get(idx, 0.0) + placed_qty
+            qty_left -= placed_qty
+            if first_idx is None:
+                first_idx = idx
+            op_last_idx = idx
+            last_idx = max(last_idx, idx)
+            if qty_left > 1e-6:
+                idx += 1
+
+        if qty_left > 1e-6 and not any(u.get("operation_seq") == op.seq for u in unplanned):
+            pred_avail_now = opcon.predecessor_available(prev_op.id, completed_by_op, cum_planned) if prev_op else op_qty
+            tail_reason: opcon.BlockReason = (
+                "oncul_eksik"
+                if prev_op and pred_avail_now + 1e-6 < pred_required
+                else "kapasite_yetersiz"
+            )
+            unplanned.append(
+                opcon.unplanned_entry(
+                    order_no=label or anchor.order_no,
+                    item_code=route_item.code,
+                    semi_finished_code=semi_finished_code,
+                    operation_seq=op.seq,
+                    work_center_code=wc_by_id[op.work_center_id].code,
+                    hours=round(qty_left * hours_per_unit, 2),
+                    reason=tail_reason,
+                )
+            )
+        prev_op = op
+
     return lines, unplanned, last_idx
+
+
+def _completed_qty_by_op(produced_map: dict | None, order_id: int) -> dict[int, float]:
+    if not produced_map:
+        return {}
+    return {op_id: float(qty) for (oid, op_id), qty in produced_map.items() if oid == order_id}
 
 
 def _place_order(
@@ -258,6 +386,7 @@ def _place_order(
     *,
     sched_ctx: SchedulingContext | None = None,
     work_map: dict | None = None,
+    produced_map: dict | None = None,
 ) -> tuple[list[DraftLine], list[dict]]:
     if sched_ctx is None:
         sched_ctx = SchedulingContext(horizon_start=weeks[0], horizon_end_exclusive=weeks[-1] + timedelta(days=7))
@@ -273,11 +402,13 @@ def _place_order(
             setup[op.id] = s
         return qty, setup
 
+    completed = _completed_qty_by_op(produced_map, o.id)
     if has_wip_structure(o):
         jobs = explode_order(db, o)
         all_lines: list[DraftLine] = []
         all_unplanned: list[dict] = []
         wip_end = 0
+        wip_placed: dict[int, float] = {}
         for job in jobs.wip_jobs:
             rem_ops = [op for op in sorted(job.item.operations or [], key=lambda x: x.seq) if op.work_center_id in wc_by_id]
             if not rem_ops:
@@ -301,15 +432,27 @@ def _place_order(
                 ops=rem_ops,
                 qty_by_op=qty_by_op,
                 setup_by_op=setup_by_op,
+                completed_by_op=completed,
             )
             all_lines.extend(ls)
             all_unplanned.extend(un)
+            for ln in ls:
+                wip_placed[ln.operation_id] = wip_placed.get(ln.operation_id, 0.0) + ln.planned_qty
             wip_end = max(wip_end, end_idx)
         if jobs.finish_job:
             rem_ops = [op for op in sorted(jobs.finish_job.item.operations or [], key=lambda x: x.seq) if op.work_center_id in wc_by_id]
             if rem_ops:
                 qty_by_op, setup_by_op = _maps_for_ops(rem_ops)
                 if sum(qty_by_op.values()) > 1e-6:
+                    assembly_outputs: dict[str, float] = {}
+                    wip_req: list[tuple[str, float]] = []
+                    for job in jobs.wip_jobs:
+                        wops = sorted(job.item.operations or [], key=lambda x: x.seq)
+                        if not wops:
+                            continue
+                        last_op = wops[-1]
+                        assembly_outputs[job.semi_finished_code] = completed.get(last_op.id, 0.0) + wip_placed.get(last_op.id, 0.0)
+                        wip_req.append((job.semi_finished_code, job.quantity))
                     ls, un, _ = _place_quantity(
                         o,
                         jobs.finish_job.quantity,
@@ -325,6 +468,9 @@ def _place_order(
                         ops=rem_ops,
                         qty_by_op=qty_by_op,
                         setup_by_op=setup_by_op,
+                        completed_by_op=completed,
+                        assembly_outputs=assembly_outputs,
+                        assembly_wip_req=wip_req,
                     )
                     all_lines.extend(ls)
                     all_unplanned.extend(un)
@@ -347,6 +493,7 @@ def _place_order(
         ops=rem_ops,
         qty_by_op=qty_by_op,
         setup_by_op=setup_by_op,
+        completed_by_op=completed,
     )
     return ls, un
 
@@ -388,11 +535,13 @@ def _place_batch(
             setup[op.id] = s
         return qty, setup
 
+    completed = _completed_qty_by_op(produced_map, anchor.id)
     if has_wip_structure(anchor):
         jobs = explode_order(db, anchor)
         all_lines: list[DraftLine] = []
         all_unplanned: list[dict] = []
         wip_end = 0
+        wip_placed: dict[int, float] = {}
         for job in jobs.wip_jobs:
             rem_ops = [op for op in sorted(job.item.operations or [], key=lambda x: x.seq) if op.work_center_id in wc_by_id]
             if not rem_ops:
@@ -417,15 +566,27 @@ def _place_batch(
                 ops=rem_ops,
                 qty_by_op=qty_by_op,
                 setup_by_op=setup_by_op,
+                completed_by_op=completed,
             )
             all_lines.extend(ls)
             all_unplanned.extend(un)
+            for ln in ls:
+                wip_placed[ln.operation_id] = wip_placed.get(ln.operation_id, 0.0) + ln.planned_qty
             wip_end = max(wip_end, end_idx)
         if jobs.finish_job:
             rem_ops = [op for op in sorted(jobs.finish_job.item.operations or [], key=lambda x: x.seq) if op.work_center_id in wc_by_id]
             if rem_ops:
                 qty_by_op, setup_by_op = _maps_for_ops(rem_ops)
                 if sum(qty_by_op.values()) > 1e-6:
+                    assembly_outputs: dict[str, float] = {}
+                    wip_req: list[tuple[str, float]] = []
+                    for job in jobs.wip_jobs:
+                        wops = sorted(job.item.operations or [], key=lambda x: x.seq)
+                        if not wops:
+                            continue
+                        last_op = wops[-1]
+                        assembly_outputs[job.semi_finished_code] = completed.get(last_op.id, 0.0) + wip_placed.get(last_op.id, 0.0)
+                        wip_req.append((job.semi_finished_code, job.quantity * ratio))
                     ls, un, end_idx = _place_quantity(
                         anchor,
                         float(batch.quantity or 0),
@@ -441,6 +602,9 @@ def _place_batch(
                         ops=rem_ops,
                         qty_by_op=qty_by_op,
                         setup_by_op=setup_by_op,
+                        completed_by_op=completed,
+                        assembly_outputs=assembly_outputs,
+                        assembly_wip_req=wip_req,
                     )
                     all_lines.extend(ls)
                     all_unplanned.extend(un)
@@ -466,6 +630,7 @@ def _place_batch(
         ops=rem_ops,
         qty_by_op=qty_by_op,
         setup_by_op=setup_by_op,
+        completed_by_op=completed,
     )
 
 
@@ -497,6 +662,7 @@ def _place_candidate(
             rules,
             sched_ctx=sched_ctx,
             work_map=wm,
+            produced_map=produced_map,
         )
     if candidate.batch and candidate.anchor_order:
         ls, un, _ = _place_batch(
@@ -975,12 +1141,7 @@ def lead_time(db: Session, req: LeadTimeRequest) -> LeadTimeOut:
         rule_desc = ""
         if prev_op is not None and prev_start is not None and prev_end is not None:
             rule = rules.get(item, prev_op, op)
-            if rule.rule == "cycles":
-                frac = min(rule.lag_cycles / req.quantity, 1.0) if req.quantity > 0 else 1.0
-                earliest = prev_start + (prev_end - prev_start) * frac
-            else:
-                earliest = prev_end
-            earliest += timedelta(minutes=rule.wait_minutes)
+            earliest = opcon.leadtime_earliest_datetime(rule, req.quantity, prev_start, prev_end, req.quantity)
             rule_desc = rule.describe() + ("" if rule.source == "default" else f" ({'stok' if rule.source == 'item' else 'grup'} kuralı)")
         else:
             earliest = cursor

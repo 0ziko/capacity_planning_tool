@@ -277,7 +277,10 @@ def _place_remaining(
     weeks: list[date],
     remaining: dict[tuple[int, date], float],
     rules: scen.RuleLookup | None,
+    *,
+    produced_map: dict | None = None,
 ) -> tuple[list[DraftLine], list[dict]]:
+    completed = planning._completed_qty_by_op(produced_map, order.id)
     qty_by_op = {r.operation.id: min(move_qty, r.remaining_qty) for r in chain.ops if not r.locked}
     if has_wip_structure(order):
         jobs = explode_order(db, order)
@@ -310,6 +313,7 @@ def _place_remaining(
                 min_start_idx=min_start_idx,
                 ops=rem_ops,
                 qty_by_op=job_qty_by_op,
+                completed_by_op=completed,
             )
             all_lines.extend(ls)
             all_unplanned.extend(un)
@@ -336,6 +340,7 @@ def _place_remaining(
                     min_start_idx=max(wip_end, min_start_idx),
                     ops=rem_ops,
                     qty_by_op={op.id: qty_by_op.get(op.id, fin_qty) for op in rem_ops},
+                    completed_by_op=completed,
                 )
                 all_lines.extend(ls)
                 all_unplanned.extend(un)
@@ -354,6 +359,7 @@ def _place_remaining(
         min_start_idx=min_start_idx,
         ops=rem_ops,
         qty_by_op=qty_by_op,
+        completed_by_op=completed,
     )
     return ls, un
 
@@ -509,6 +515,7 @@ def _simulate_insert(
         return planning.simulate(db, req)
 
     rules = scen.RuleLookup(db)
+    produced, _ = produced_qty_map(db)
     week_idx = {wk: i for i, wk in enumerate(weeks)}
     frozen: list[DraftLine] = []
     displaced: list[DraftLine] = []
@@ -574,7 +581,7 @@ def _simulate_insert(
 
     priority_lines: list[DraftLine] = []
     for move, chain, move_qty, idx, _rem_ids, _wcs in move_specs:
-        ls, un = _place_remaining(db, chain.order, chain, move_qty, idx, wc_by_id, weeks, remaining, rules)
+        ls, un = _place_remaining(db, chain.order, chain, move_qty, idx, wc_by_id, weeks, remaining, rules, produced_map=produced)
         priority_lines.extend(ls)
         unplanned.extend(un)
         notes.append(f"{chain.order.order_no} {move_qty:g} adet {weeks[idx].isoformat()} haftasina oncelikli")

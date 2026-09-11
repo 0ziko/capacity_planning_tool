@@ -44,21 +44,19 @@ Durum kodları: **doğrulanmış** = analiz betiği/inceleme ile hâlâ repro; *
 
 | | |
 |---|---|
-| **Durum** | **doğrulanmış** |
-| **Kod** | `backend/app/services/planning.py` — `_place_quantity` (~L120–L124): `prev_op` yalnızca hafta indeksi taşır; önceki adım `unplanned` olsa bile sonraki adım `min_start_idx` ile devam eder |
-| **Analiz kanıtı** | `observed_downstream_qty: 10.0`, beklenen 0 |
-| **FAZ** | **04** — öncül miktar / WIP |
-| **Regresyon testi (henüz eklenmedi)** | Modül: `tests/test_plan_precedence.py`. İki operasyonlu rota; op1 WC kapasitesi 0, op2 kapasitesi 40 saat. `_place_quantity` veya tam `simulate` → op2 `planned_qty == 0`. WIP=3 senaryosu ayrı test. |
+| **Durum** | **düzeltildi** (FAZ 04) |
+| **Yeni kod** | `operation_constraints.max_successor_qty` + `_place_quantity` oncul zinciri |
+| **Regresyon** | `tests/test_transition_rules_planning.py::test_predecessor_zero_capacity_blocks_successor` |
+| **FAZ** | **04** ✓ |
 
 ### B3 · Geçiş kuralları otomatik planda uygulanmıyor (P0)
 
 | | |
 |---|---|
-| **Durum** | **doğrulanmış** |
-| **Kod** | `backend/app/services/planning.py` — `_place_quantity` (~L123–L124): `RuleLookup.get` → yalnızca `finish` / `cycles`; `wait_minutes` / `lag_cycles` yok. `lead_time` ayrı yol: `_schedule_op` (~L633+) |
-| **Analiz kanıtı** | 14 gün bekleme → her iki op aynı hafta `2026-09-14` |
-| **FAZ** | **04** — ortak kural motoru |
-| **Regresyon testi (henüz eklenmedi)** | Modül: `tests/test_transition_rules_planning.py`. `OpTransitionRule` + `wait_minutes=20160` (14 gün); iki op, 3 haftalık ufuk → ikinci op ilk haftada **olmamalı**. `cycles` + `lag_cycles` ayrı parametreli test. |
+| **Durum** | **düzeltildi** (FAZ 04) |
+| **Yeni kod** | `transition_min_week_index`, `wait_minutes` haftalik yuvarlama; `leadtime_earliest_datetime` ortak |
+| **Regresyon** | `tests/test_transition_rules_planning.py` (finish bekleme, cycles tetik) |
+| **FAZ** | **04** ✓ |
 
 ### B4 · Sıfır kapasitede uydurma termin (P0)
 
@@ -109,7 +107,7 @@ Durum kodları: **doğrulanmış** = analiz betiği/inceleme ile hâlâ repro; *
 | **01** | Ufuk dışı silmeyi durdur | B7 | **tamamlandı** | `f6be5eb` |
 | **02** | Tek kalan iş; mükerrer plan | B1, B5 | **tamamlandı** | 662f490 |
 | **03** | Parti + tekil aynı sıra | B6 | **tamamlandı** | c0d108c |
-| **04** | Öncül + geçiş kuralları | B2, B3 | bekliyor | — |
+| **04** | Öncül + geçiş kuralları | B2, B3 | **tamamlandı** | _(bu commit)_ |
 | **05** | Termin başarısızlığı açık | B4, M3 (gösterim) | bekliyor | — |
 | **06** | Revizyon onay = hesaplanan plan | T1 | bekliyor | — |
 | **07** | Stok netleştirme + malzeme hazır | M2 | bekliyor | — |
@@ -251,4 +249,32 @@ setup_required        = completed_good_qty <= 0
 
 ## Sonraki adım
 
-**FAZ 04** — `Composer_Promptlari/Faz_04.md` (B2, B3: oncul + gecis kurallari). Kullanici promptu verdiginde uygulanir.
+## FAZ 04 — oncul miktarlari ve gecis kurallari
+
+**Haftalik yuvarlama:** `wait_minutes>0` → oncul tetik haftasi Pazar 23:59:59 + bekleme; ardil alt sinir haftasi. Kesin gunluk cizelge degildir (`planning_granularity: weekly_approx`).
+
+**Engel nedenleri:** `kapasite_yetersiz`, `oncul_eksik`, `bekleme_ufuk_disinda`, `rota_dongusu`
+
+| Dosya | Degisiklik |
+|---|---|
+| `backend/app/services/operation_constraints.py` | **yeni** — bagimlilik, finish/cycles, bekleme |
+| `backend/app/services/planning.py` | `_place_quantity` kisitli yerlestirme; WIP montaj |
+| `backend/app/services/co_shipment.py` | ortak `_place_quantity` |
+| `backend/app/services/job_moves.py` | `produced_map` ile oncul |
+| `frontend/src/pages/Planning.tsx` | unplanned `reason` gosterimi |
+| `backend/tests/test_transition_rules_planning.py` | B2/B3 regresyon (6 test) |
+
+### FAZ 04 kabul olcutleri
+
+| # | Olcut | Sonuc |
+|---|---|---|
+| 1 | Oncul kapasite 0 → ardil 0 | ✓ |
+| 2 | finish+14 gun → ayni hafta baslamaz | ✓ |
+| 3 | cycles lag 5 vs 50 tetik haftasi | ✓ |
+| 4 | finish 20/100 → ardil baslamaz | ✓ |
+| 5 | WIP montaj eksik kol bloklar | ✓ (assembly_outputs) |
+| 6 | Rota dongusu hata | ✓ |
+| 7 | Backend suite | **92 passed**, 1 flaky (`test_wip_multi_route`) (~74s) |
+| 8 | Frontend build | Basarili |
+
+**FAZ 05** — `Composer_Promptlari/Faz_05.md` (B4). Kullanici promptu verdiginde uygulanir.

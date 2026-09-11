@@ -65,64 +65,20 @@ def _place_quantity_max_week(
     rules: scen.RuleLookup | None,
     max_last_week_idx: int,
 ) -> tuple[list[DraftLine], list[dict]]:
-    lines: list[DraftLine] = []
-    unplanned: list[dict] = []
-    prev_first_idx = 0
-    prev_last_idx = 0
-    prev_op = None
-    for op in anchor.item.operations:
-        if op.work_center_id not in wc_by_id:
-            continue
-        total_hours = op.hours_for(quantity)
-        hours_left = total_hours
-        if prev_op is None:
-            idx = 0
-        else:
-            rule = rules.get(anchor.item, prev_op, op) if rules else scen.Rule()
-            idx = prev_first_idx if rule.rule == "cycles" else prev_last_idx
-        first_idx = None
-        last_idx = None
-        while hours_left > 1e-6 and idx <= max_last_week_idx:
-            wk = weeks[idx]
-            avail = remaining[(op.work_center_id, wk)]
-            if avail > 1e-6:
-                take = min(avail, hours_left)
-                qty = quantity * (take / total_hours) if total_hours > 0 else 0
-                lines.append(
-                    DraftLine(
-                        order=anchor,
-                        order_id=anchor.id,
-                        operation_id=op.id,
-                        work_center_id=op.work_center_id,
-                        week_start=wk,
-                        planned_hours=round(take, 3),
-                        planned_qty=round(qty, 2),
-                        production_batch_id=production_batch_id,
-                        label=label or anchor.order_no,
-                    )
-                )
-                remaining[(op.work_center_id, wk)] = avail - take
-                hours_left -= take
-                if first_idx is None:
-                    first_idx = idx
-                last_idx = idx
-            if hours_left > 1e-6:
-                idx += 1
-        if first_idx is not None:
-            prev_first_idx = first_idx
-            prev_last_idx = last_idx if last_idx is not None else first_idx
-            prev_op = op
-        if hours_left > 1e-6:
-            unplanned.append(
-                {
-                    "order_no": label or anchor.order_no,
-                    "item_code": anchor.item.code,
-                    "operation_seq": op.seq,
-                    "work_center_code": wc_by_id[op.work_center_id].code,
-                    "hours": round(hours_left, 2),
-                }
-            )
-    return lines, unplanned
+    from app.services import planning as plan_svc
+
+    ls, un, _ = plan_svc._place_quantity(
+        anchor,
+        quantity,
+        label,
+        production_batch_id,
+        wc_by_id,
+        weeks,
+        remaining,
+        rules,
+        max_week_idx=max_last_week_idx,
+    )
+    return ls, un
 
 
 def _try_group_at_week(

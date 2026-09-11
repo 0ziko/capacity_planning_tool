@@ -19,7 +19,7 @@ interface AutoResult {
   created: number;
   message: string;
   mode: PlanMode;
-  unplanned: { order_no: string; item_code: string; operation_seq: number; work_center_code: string; hours: number }[];
+  unplanned: { order_no: string; item_code: string; operation_seq: number; work_center_code: string; hours: number; reason?: string; planning_granularity?: string }[];
   skipped: { order_no?: string; batch_no?: string; kind?: string; item_code: string; revenue: number; hours: number }[];
   co_shipment_results?: CoShipmentResult[];
   co_shipment_exceptions?: CoShipmentException[];
@@ -158,7 +158,7 @@ export default function Planning() {
               {result.unplanned.length > 0 && (
                 <>
                   <div className="error">Ufuk içine sığmayan {result.unplanned.length} operasyon (hafta sayısını artırın veya kapasite ekleyin):</div>
-                  <ul className="errors">{result.unplanned.map((u, i) => <li key={i}>{u.order_no} / {u.item_code} op.{u.operation_seq} @ {u.work_center_code}: {fmt(u.hours)} saat</li>)}</ul>
+                  <ul className="errors">{result.unplanned.map((u, i) => <li key={i}>{u.order_no} / {u.item_code} op.{u.operation_seq} @ {u.work_center_code}: {fmt(u.hours)} saat{u.reason ? ` · ${u.reason}` : ""}{u.planning_granularity === "weekly_approx" ? " (haftalık yaklaşık)" : ""}</li>)}</ul>
                 </>
               )}
               {(result.co_shipment_results?.length ?? 0) > 0 && (

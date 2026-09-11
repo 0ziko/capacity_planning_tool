@@ -1121,6 +1121,10 @@ class PlanRevisionChangeIn(BaseModel):
     new_value: str = ""
 
 
+class PlanRevisionChangesBulkIn(BaseModel):
+    changes: list[PlanRevisionChangeIn]
+
+
 class PlanRevisionChangeOut(BaseModel):
     id: int
     entity_type: str

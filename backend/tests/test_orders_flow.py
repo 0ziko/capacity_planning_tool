@@ -38,6 +38,23 @@ def test_single_order_crud(client, auth):
     assert client.get("/api/orders", headers=auth).json() == []
 
 
+def test_orders_filter_by_item_code(client, auth):
+    _setup(client, auth)
+    _upload(client, auth, "items", ["Stok Kodu", "Stok Adı", "Ürün Grubu"], [["MAM-2", "Fırın", "OCAK"]])
+    for no, code in [("IC-1", "MAM-1"), ("IC-2", "MAM-2"), ("IC-3", "MAM-1")]:
+        assert client.post(
+            "/api/orders",
+            headers=auth,
+            json={"order_no": no, "due_date": "2026-09-30", "item_code": code, "quantity": 10},
+        ).status_code == 201
+    mam1 = client.get("/api/orders", headers=auth, params={"item_code": "MAM-1"}).json()
+    assert sorted(o["order_no"] for o in mam1) == ["IC-1", "IC-3"]
+    partial = client.get("/api/orders", headers=auth, params={"item_code": "mam-2"}).json()
+    assert len(partial) == 1 and partial[0]["order_no"] == "IC-2"
+    multi = client.get("/api/orders", headers=auth, params={"item_code": "MAM-1, MAM-2"}).json()
+    assert sorted(o["order_no"] for o in multi) == ["IC-1", "IC-2", "IC-3"]
+
+
 def test_order_date_import_and_planned_end(client, auth):
     """Siparis tarihi import ile gelir; planlanan teslim kapasite planindan listeye yansir."""
     _setup(client, auth)

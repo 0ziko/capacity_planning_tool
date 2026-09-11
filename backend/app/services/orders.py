@@ -205,6 +205,7 @@ def list_orders(
     position: str | None = None,
     customer: str | None = None,
     order_no: str | None = None,
+    item_code: str | None = None,
     market: str | None = None,
     plan_status: str | None = None,
     reservation_status: str | None = None,
@@ -226,6 +227,13 @@ def list_orders(
         q = q.filter(Order.customer.ilike(f"%{customer.strip()}%"))
     if order_no and order_no.strip():
         q = q.filter(Order.order_no.ilike(f"%{order_no.strip()}%"))
+    if item_code and item_code.strip():
+        from sqlalchemy import or_
+
+        parts = [p.strip() for p in item_code.replace(";", ",").split(",") if p.strip()]
+        code_match = or_(*[Item.code.ilike(f"%{p}%") for p in parts])
+        matching_item_ids = db.query(Item.id).filter(code_match)
+        q = q.filter(Order.item_id.in_(matching_item_ids))
     if market:
         q = q.filter(Order.market == market)
     orders = q.order_by(func.coalesce(Order.revised_due_date, Order.due_date), Order.order_no, Order.position_no).all()

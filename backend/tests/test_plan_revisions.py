@@ -65,6 +65,60 @@ def test_revision_calculate_apply_and_horizon_lock(client, auth):
     assert again.status_code == 200, again.text
 
 
+def test_revision_bulk_due_date_changes(client, auth):
+    wc_id = _setup(client, auth)
+    ids = []
+    for i, due in enumerate(("2026-09-18", "2026-09-20", "2026-09-22"), start=1):
+        r = client.post(
+            "/api/orders",
+            headers=auth,
+            json={"order_no": f"RV-B{i}", "due_date": due, "item_code": "UCUZ", "quantity": 10, "unit_price": 5},
+        )
+        assert r.status_code == 201, r.text
+        ids.append(r.json()["id"])
+
+    body = {
+        "reason_codes": ["other"],
+        "note": "Toplu vade",
+        "start_week": WEEK.isoformat(),
+        "weeks": 4,
+        "work_center_ids": [wc_id],
+        "mode": "due_date",
+    }
+    created = client.post("/api/plan/revisions", headers=auth, json=body)
+    assert created.status_code == 200, created.text
+    rev = created.json()
+    bulk = client.post(
+        f"/api/plan/revisions/{rev['id']}/changes/bulk",
+        headers=auth,
+        json={
+            "changes": [
+                {"entity_type": "order", "entity_id": oid, "field": "revised_due_date", "new_value": "2026-10-02"}
+                for oid in ids
+            ]
+        },
+    )
+    assert bulk.status_code == 200, bulk.text
+    assert len(bulk.json()["changes"]) == 3
+    assert all(c["new_value"] == "2026-10-02" for c in bulk.json()["changes"])
+
+    # Ayni siparis icin tekrar ekleme onceki girdiyi gunceller
+    again = client.post(
+        f"/api/plan/revisions/{rev['id']}/changes/bulk",
+        headers=auth,
+        json={
+            "changes": [
+                {"entity_type": "order", "entity_id": ids[0], "field": "revised_due_date", "new_value": "2026-10-09"}
+            ]
+        },
+    )
+    assert again.status_code == 200, again.text
+    due_changes = [c for c in again.json()["changes"] if c["field"] == "revised_due_date"]
+    assert len(due_changes) == 3
+    first = next(c for c in due_changes if c["entity_id"] == ids[0])
+    assert first["new_value"] == "2026-10-09"
+
+
 def test_revision_cancel_frees_horizon(client, auth):
     wc_id = _setup(client, auth)
     body = {

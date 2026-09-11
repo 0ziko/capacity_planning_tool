@@ -1,8 +1,28 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, fmt, qs, type Item, type Order, type OrderIn } from "../api";
 import { useAuth } from "../auth";
-import { ErrorText, useAsync } from "../components";
+import { ErrorText } from "../components";
 import RevenueAnalysis from "./orders/RevenueAnalysis";
+
+function splitCodes(raw: string): string[] {
+  return raw
+    .split(/[,;]/)
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function matchesItemCode(raw: string, code: string): boolean {
+  const parts = splitCodes(raw);
+  if (!parts.length) return true;
+  const c = code.toLowerCase();
+  return parts.some((p) => c.includes(p));
+}
+
+function matchesText(needle: string, hay: string): boolean {
+  const n = needle.trim().toLowerCase();
+  if (!n) return true;
+  return hay.toLowerCase().includes(n);
+}
 
 const STATUS_LABEL: Record<string, string> = { open: "Açık", closed: "Kapalı", forecast: "Tahmin" };
 const PLAN_LABEL: Record<string, string> = { unplanned: "Planlanmadı", planned: "Planlanan", partial: "Kısmi", late: "Gecikmeli", on_time: "Zamanında", no_ops: "Rota yok", closed: "Kapalı", forecast: "Tahmin" };
@@ -18,6 +38,7 @@ export default function Orders() {
   const [position, setPosition] = useState("");
   const [customer, setCustomer] = useState("");
   const [orderNo, setOrderNo] = useState("");
+  const [itemCode, setItemCode] = useState("");
   const [market, setMarket] = useState("");
   const [planStatus, setPlanStatus] = useState("");
   const [resStatus, setResStatus] = useState("");
@@ -25,25 +46,91 @@ export default function Orders() {
   const [to, setTo] = useState("");
   const [editing, setEditing] = useState<Order | "new" | null>(null);
   const [msg, setMsg] = useState("");
+  const [rows, setRows] = useState<Order[] | null>(null);
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [debouncedItemCode, setDebouncedItemCode] = useState("");
 
-  const filterParams = {
-    status,
-    due_from: from || undefined,
-    due_to: to || undefined,
-    position: position || undefined,
-    customer: customer || undefined,
-    order_no: orderNo || undefined,
-    market: market || undefined,
-    plan_status: planStatus || undefined,
-    reservation_status: resStatus || undefined,
-  };
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebouncedItemCode(itemCode), 300);
+    return () => window.clearTimeout(t);
+  }, [itemCode]);
 
-  const orders = useAsync(() => api.get<Order[]>(`/api/orders${qs(filterParams)}`), [JSON.stringify(filterParams)]);
+  const loadOrders = useCallback(() => {
+    const url = `/api/orders${qs({
+      status,
+      due_from: from || undefined,
+      due_to: to || undefined,
+      position: position.trim() || undefined,
+      customer: customer.trim() || undefined,
+      order_no: orderNo.trim() || undefined,
+      item_code: debouncedItemCode.trim() || undefined,
+      market: market || undefined,
+      plan_status: planStatus || undefined,
+      reservation_status: resStatus || undefined,
+    })}`;
+    setLoading(true);
+    setErr("");
+    return api
+      .get<Order[]>(url)
+      .then(setRows)
+      .catch((e) => {
+        setErr((e as Error).message);
+        setRows([]);
+      })
+      .finally(() => setLoading(false));
+  }, [status, from, to, position, customer, orderNo, debouncedItemCode, market, planStatus, resStatus]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setErr("");
+    const url = `/api/orders${qs({
+      status,
+      due_from: from || undefined,
+      due_to: to || undefined,
+      position: position.trim() || undefined,
+      customer: customer.trim() || undefined,
+      order_no: orderNo.trim() || undefined,
+      item_code: debouncedItemCode.trim() || undefined,
+      market: market || undefined,
+      plan_status: planStatus || undefined,
+      reservation_status: resStatus || undefined,
+    })}`;
+    api
+      .get<Order[]>(url)
+      .then((d) => {
+        if (!cancelled) setRows(d);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setErr((e as Error).message);
+          setRows([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [status, from, to, position, customer, orderNo, debouncedItemCode, market, planStatus, resStatus]);
+
+  const visibleRows = useMemo(() => {
+    const list = rows ?? [];
+    return list.filter(
+      (o) =>
+        matchesItemCode(itemCode, o.item_code) &&
+        matchesText(orderNo, o.order_no) &&
+        matchesText(position, o.position_no || "") &&
+        matchesText(customer, o.customer || ""),
+    );
+  }, [rows, itemCode, orderNo, position, customer]);
 
   const afterSave = (o: Order, created: boolean) => {
     setEditing(null);
     setMsg(`${o.order_no}${o.position_no ? ` / poz ${o.position_no}` : ""} / ${o.item_code} ${created ? "eklendi" : "güncellendi"}.`);
-    orders.reload();
+    void loadOrders();
   };
 
   const remove = async (o: Order) => {
@@ -51,7 +138,7 @@ export default function Orders() {
     try {
       await api.del(`/api/orders/${o.id}`);
       setMsg(`${o.order_no} silindi.`);
-      orders.reload();
+      void loadOrders();
     } catch (e) { setMsg((e as Error).message); }
   };
 
@@ -71,6 +158,7 @@ export default function Orders() {
             <label>Durum<select value={status} onChange={(e) => setStatus(e.target.value)}><option value="open">Açık</option><option value="forecast">Tahmin</option><option value="closed">Kapalı</option><option value="">Tümü</option></select></label>
             <label>Sipariş no<input value={orderNo} onChange={(e) => setOrderNo(e.target.value)} placeholder="filtre" /></label>
             <label>Poz no<input value={position} onChange={(e) => setPosition(e.target.value)} placeholder="filtre" /></label>
+            <label>Stok kodu<input value={itemCode} onChange={(e) => setItemCode(e.target.value)} placeholder="6010527 veya 6010527, 6012081" title="Virgülle birden fazla stok kodu" /></label>
             <label>Müşteri<input value={customer} onChange={(e) => setCustomer(e.target.value)} placeholder="filtre" /></label>
             <label>Pazar<select value={market} onChange={(e) => setMarket(e.target.value)}><option value="">Tümü</option><option value="domestic">Yerli</option><option value="export">Yurtdışı</option></select></label>
             <label>Plan durumu<select value={planStatus} onChange={(e) => setPlanStatus(e.target.value)}><option value="">Tümü</option><option value="planned">Planlanan</option><option value="forecast">Tahmin</option><option value="unplanned">Planlanmadı</option><option value="partial">Kısmi</option><option value="late">Gecikmeli</option><option value="on_time">Zamanında</option><option value="no_ops">Rota yok</option></select></label>
@@ -79,11 +167,14 @@ export default function Orders() {
             <label>Termin (bitiş)<input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
             {can("poweruser") && <button onClick={() => { setEditing("new"); setMsg(""); }} disabled={editing === "new"}>+ Yeni sipariş</button>}
           </div>
-          <ErrorText err={orders.err} />
+          <ErrorText err={err} />
           {msg && <div className="success" style={{ marginBottom: 8 }}>{msg}</div>}
           {editing && <OrderForm initial={editing === "new" ? null : editing} onSaved={afterSave} onCancel={() => setEditing(null)} />}
 
-          <h2>{STATUS_LABEL[status] ?? "Tüm"} siparişler</h2>
+          <h2>
+            {STATUS_LABEL[status] ?? "Tüm"} siparişler
+            {loading && <span className="muted" style={{ fontSize: "0.85em", fontWeight: "normal" }}> · yükleniyor…</span>}
+          </h2>
           <div className="table-wrap">
             <table>
               <thead>
@@ -95,7 +186,7 @@ export default function Orders() {
                 </tr>
               </thead>
               <tbody>
-                {orders.data?.map((o) => (
+                {visibleRows.map((o) => (
                   <tr key={o.id}>
                     <td>
                       {o.order_no}
@@ -121,21 +212,25 @@ export default function Orders() {
                         <>
                           <button className="secondary small" onClick={() => { setEditing(o); setMsg(""); }}>Düzenle</button>{" "}
                           {o.status === "open"
-                            ? <button className="secondary small" onClick={async () => { await api.patch(`/api/orders/${o.id}/status?status=closed`); orders.reload(); }}>Kapat</button>
-                            : <button className="secondary small" onClick={async () => { await api.patch(`/api/orders/${o.id}/status?status=open`); orders.reload(); }}>Aç</button>}{" "}
+                            ? <button className="secondary small" onClick={async () => { await api.patch(`/api/orders/${o.id}/status?status=closed`); void loadOrders(); }}>Kapat</button>
+                            : <button className="secondary small" onClick={async () => { await api.patch(`/api/orders/${o.id}/status?status=open`); void loadOrders(); }}>Aç</button>}{" "}
                           <button className="danger small" onClick={() => remove(o)}>Sil</button>
                         </>
                       )}
                     </td>
                   </tr>
                 ))}
-                {orders.data?.length === 0 && <tr><td colSpan={16} className="muted">Sipariş yok.</td></tr>}
+                {!loading && visibleRows.length === 0 && <tr><td colSpan={16} className="muted">Sipariş yok.</td></tr>}
               </tbody>
             </table>
           </div>
           <p className="muted">
-            {orders.data?.length ?? 0} sipariş · toplam ciro <b>{fmt(orders.data?.reduce((s, o) => s + (o.revenue || 0), 0), 0)}</b>
-            {!!orders.data?.some((o) => !o.unit_price) && <> · <span style={{ color: "var(--warn)" }}>{orders.data.filter((o) => !o.unit_price).length} siparişte birim fiyat yok</span></>}
+            {visibleRows.length} sipariş
+            {rows && visibleRows.length !== rows.length && (
+              <> <span className="muted">({rows.length} kayıttan filtrelendi)</span></>
+            )}
+            {" · "}toplam ciro <b>{fmt(visibleRows.reduce((s, o) => s + (o.revenue || 0), 0), 0)}</b>
+            {!!visibleRows.some((o) => !o.unit_price) && <> · <span style={{ color: "var(--warn)" }}>{visibleRows.filter((o) => !o.unit_price).length} siparişte birim fiyat yok</span></>}
           </p>
         </>
       )}

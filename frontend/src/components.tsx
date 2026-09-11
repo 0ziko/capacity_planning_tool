@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, isoWeekInputValue, mondayFromIsoWeek, weekLabel, weekLong, type WorkCenter } from "./api";
+import { api, isoWeekInputValue, mondayFromIsoWeek, weekLabel, weekLong, type Order, type WorkCenter } from "./api";
 
 export function useWorkCenters() {
   const [wcs, setWcs] = useState<WorkCenter[]>([]);
@@ -119,6 +119,114 @@ export function WeekInput({ value, onChange, label = "Hafta" }: { value: string;
         <span className="muted" style={{ whiteSpace: "nowrap" }}>{weekLong(value)}</span>
       </div>
     </label>
+  );
+}
+
+/** Açık siparişler için çoklu seçim (plan revizyonu vb.). */
+export function OrderMultiSelect({
+  orders,
+  value,
+  onChange,
+  label = "Siparişler",
+}: {
+  orders: Order[];
+  value: number[];
+  onChange: (v: number[]) => void;
+  label?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+  const nq = q.trim().toLocaleLowerCase("tr");
+  const filtered = nq
+    ? orders.filter((o) =>
+        `${o.order_no} ${o.position_no} ${o.item_code} ${o.customer} ${o.effective_due_date}`
+          .toLocaleLowerCase("tr")
+          .includes(nq),
+      )
+    : orders;
+  const selected = orders.filter((o) => value.includes(o.id));
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const toggle = (id: number) => onChange(value.includes(id) ? value.filter((x) => x !== id) : [...value, id]);
+  const selectShown = () => onChange(Array.from(new Set([...value, ...filtered.map((o) => o.id)])));
+  const clear = () => onChange([]);
+
+  return (
+    <div className="ms" ref={ref}>
+      <span className="ms-label">{label}</span>
+      <div className="ms-box">
+        <button type="button" className="ms-trigger" onClick={() => setOpen((o) => !o)} aria-haspopup="listbox" aria-expanded={open}>
+          {selected.length === 0 ? (
+            <span className="ms-all muted">Sipariş seçin…</span>
+          ) : (
+            <span className="ms-chips">
+              {selected.slice(0, 3).map((o) => (
+                <span key={o.id} className="chip" title={`${o.item_code} · ${o.effective_due_date}`}>
+                  {o.order_no}
+                  {o.position_no ? `/${o.position_no}` : ""}
+                  <span
+                    className="chip-x"
+                    role="button"
+                    aria-label={`${o.order_no} kaldır`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggle(o.id);
+                    }}
+                  >
+                    ×
+                  </span>
+                </span>
+              ))}
+              {selected.length > 3 && <span className="chip more">+{selected.length - 3}</span>}
+            </span>
+          )}
+          <span className="ms-caret">{open ? "▲" : "▼"}</span>
+        </button>
+        {open && (
+          <div className="ms-pop" role="listbox" aria-multiselectable>
+            <input autoFocus className="ms-search" placeholder="Sipariş no, stok, müşteri…" value={q} onChange={(e) => setQ(e.target.value)} />
+            <div className="ms-actions">
+              <button type="button" className="secondary small" onClick={selectShown}>
+                {nq ? "Listelenenleri seç" : "Tümünü seç"}
+              </button>
+              <button type="button" className="secondary small" onClick={clear} disabled={value.length === 0}>
+                Temizle
+              </button>
+              <span className="muted">{selected.length}/{orders.length} seçili</span>
+            </div>
+            <div className="ms-list">
+              {filtered.map((o) => {
+                const on = value.includes(o.id);
+                return (
+                  <div key={o.id} className={`ms-item ${on ? "on" : ""}`} role="option" aria-selected={on} onClick={() => toggle(o.id)}>
+                    <input type="checkbox" checked={on} readOnly tabIndex={-1} />
+                    <span className="ms-code">{o.order_no}{o.position_no ? `/${o.position_no}` : ""}</span>
+                    <span className="ms-name">{o.item_code} · {o.effective_due_date}</span>
+                  </div>
+                );
+              })}
+              {filtered.length === 0 && <div className="muted" style={{ padding: 8 }}>Eşleşen sipariş yok.</div>}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -266,8 +374,31 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[]) {
   const run = () => {
     setLoading(true);
     setErr("");
-    fn().then(setData).catch((e) => setErr((e as Error).message)).finally(() => setLoading(false));
+    fn()
+      .then(setData)
+      .catch((e) => setErr((e as Error).message))
+      .finally(() => setLoading(false));
   };
-  useEffect(run, deps); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setErr("");
+    fn()
+      .then((d) => {
+        if (!cancelled) setData(d);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setErr((e as Error).message);
+          setData(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, deps); // eslint-disable-line react-hooks/exhaustive-deps
   return { data, err, loading, reload: run };
 }

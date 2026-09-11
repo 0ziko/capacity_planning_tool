@@ -419,13 +419,16 @@ def get_orders_list(
     position: str | None = None,
     customer: str | None = None,
     order_no: str | None = None,
+    item_code: str | None = None,
     market: str | None = None,
     plan_status: str | None = None,
     reservation_status: str | None = None,
     db: Session = Depends(get_db),
     _=Depends(require_user),
 ):
-    return orders_svc.list_orders(db, status, due_from, due_to, position, customer, order_no, market, plan_status, reservation_status)
+    return orders_svc.list_orders(
+        db, status, due_from, due_to, position, customer, order_no, item_code, market, plan_status, reservation_status
+    )
 
 
 @router.get("/orders/analysis", response_model=OrderAnalysisOut)

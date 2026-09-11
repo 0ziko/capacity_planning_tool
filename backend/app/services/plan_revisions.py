@@ -298,11 +298,24 @@ def create_revision(db: Session, body: PlanRevisionCreate, username: str) -> Pla
     return to_out(_get(db, rev.id))
 
 
-def add_change(db: Session, revision_id: int, body: PlanRevisionChangeIn, username: str) -> PlanRevisionOut:
-    rev = _get(db, revision_id)
-    if rev.status not in MUTABLE_STATUSES:
-        raise ValueError("Bu revizyona girdi eklenemez")
+def _remove_existing_change(db: Session, rev: PlanRevision, body: PlanRevisionChangeIn) -> None:
+    q = db.query(PlanRevisionChange).filter(
+        PlanRevisionChange.revision_id == rev.id,
+        PlanRevisionChange.entity_type == body.entity_type,
+        PlanRevisionChange.field == body.field,
+    )
+    if body.entity_type == "order":
+        q = q.filter(PlanRevisionChange.entity_id == body.entity_id)
+        if body.field == "job_move":
+            q = q.filter(PlanRevisionChange.extra_key == (body.extra_key or ""))
+    elif body.entity_type == "wc_week":
+        q = q.filter(PlanRevisionChange.extra_key == (body.extra_key or ""))
+    q.delete()
+
+
+def _append_change(db: Session, rev: PlanRevision, body: PlanRevisionChangeIn) -> None:
     old = _current_field_value(db, body)
+    _remove_existing_change(db, rev, body)
     row = PlanRevisionChange(
         revision_id=rev.id,
         entity_type=body.entity_type,
@@ -314,10 +327,38 @@ def add_change(db: Session, revision_id: int, body: PlanRevisionChangeIn, userna
     )
     db.add(row)
     rev.changes.append(row)
+
+
+def add_change(db: Session, revision_id: int, body: PlanRevisionChangeIn, username: str) -> PlanRevisionOut:
+    rev = _get(db, revision_id)
+    if rev.status not in MUTABLE_STATUSES:
+        raise ValueError("Bu revizyona girdi eklenemez")
+    _append_change(db, rev, body)
     rev.status = "draft"
     rev.calculated_at = None
     db.query(PlanRevisionSnapshot).filter(PlanRevisionSnapshot.revision_id == rev.id).delete()
     _add_event(db, rev, "change", username, f"{body.entity_type}.{body.field}")
+    db.commit()
+    db.expire_all()
+    return to_out(_get(db, revision_id))
+
+
+def add_changes_bulk(db: Session, revision_id: int, bodies: list[PlanRevisionChangeIn], username: str) -> PlanRevisionOut:
+    if not bodies:
+        raise ValueError("En az bir girdi gerekli")
+    rev = _get(db, revision_id)
+    if rev.status not in MUTABLE_STATUSES:
+        raise ValueError("Bu revizyona girdi eklenemez")
+    for body in bodies:
+        _append_change(db, rev, body)
+    rev.status = "draft"
+    rev.calculated_at = None
+    db.query(PlanRevisionSnapshot).filter(PlanRevisionSnapshot.revision_id == rev.id).delete()
+    detail = f"toplu {len(bodies)} girdi"
+    kinds = sorted({f"{b.entity_type}.{b.field}" for b in bodies})
+    if len(kinds) <= 3:
+        detail = f"{detail} ({', '.join(kinds)})"
+    _add_event(db, rev, "change", username, detail)
     db.commit()
     db.expire_all()
     return to_out(_get(db, revision_id))

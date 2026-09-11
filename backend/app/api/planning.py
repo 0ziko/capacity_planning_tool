@@ -33,6 +33,7 @@ from app.schemas import (
     JobMovePreviewOut,
     PlanLineOut,
     PlanRevisionChangeIn,
+    PlanRevisionChangesBulkIn,
     PlanRevisionCreate,
     PlanRevisionOut,
     ProgressOut,
@@ -163,6 +164,19 @@ def add_plan_revision_change(
 ):
     try:
         return revisions_svc.add_change(db, revision_id, body, user.username)
+    except ValueError as e:
+        _revision_error(e)
+
+
+@router.post("/plan/revisions/{revision_id}/changes/bulk", response_model=PlanRevisionOut)
+def add_plan_revision_changes_bulk(
+    revision_id: int,
+    body: PlanRevisionChangesBulkIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_poweruser),
+):
+    try:
+        return revisions_svc.add_changes_bulk(db, revision_id, body.changes, user.username)
     except ValueError as e:
         _revision_error(e)
 

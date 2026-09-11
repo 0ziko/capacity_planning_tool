@@ -10,7 +10,7 @@ import {
   type PlanRevisionChange,
   type WorkCenter,
 } from "../../api";
-import { ErrorText, useAsync } from "../../components";
+import { ErrorText, OrderMultiSelect, useAsync } from "../../components";
 
 const STATUS: Record<string, [string, string]> = {
   draft: ["warn", "Taslak"],
@@ -69,40 +69,48 @@ export default function RevisionsPanel({
   const [reasons, setReasons] = useState<string[]>(["other"]);
   const [note, setNote] = useState("");
   const [replaceManual, setReplaceManual] = useState(false);
-  const [orderId, setOrderId] = useState(0);
+  const [orderIds, setOrderIds] = useState<number[]>([]);
   const [newDue, setNewDue] = useState("");
   const [wcId, setWcId] = useState(0);
   const [week, setWeek] = useState(start);
   const [headcount, setHeadcount] = useState("");
-  const [movePreview, setMovePreview] = useState<JobMovePreview | null>(null);
+  const [movePreviews, setMovePreviews] = useState<Record<number, JobMovePreview>>({});
   const [moveQtyMode, setMoveQtyMode] = useState<"remaining" | "split">("remaining");
   const [moveQty, setMoveQty] = useState("");
   const [moveStart, setMoveStart] = useState(start);
 
   const selected = useMemo(() => (list.data ?? []).find((r) => r.id === selId) || null, [list.data, selId]);
   const editable = selected && (selected.status === "draft" || selected.status === "calculated");
+  const singleOrderId = orderIds.length === 1 ? orderIds[0] : 0;
+  const movePreview = singleOrderId ? movePreviews[singleOrderId] ?? null : null;
 
   useEffect(() => {
-    if (!orderId) {
-      setMovePreview(null);
+    if (!orderIds.length) {
+      setMovePreviews({});
       return;
     }
     let cancelled = false;
-    api
-      .get<JobMovePreview>(`/api/plan/revisions/move-preview?order_id=${orderId}`)
-      .then((p) => {
-        if (!cancelled) {
-          setMovePreview(p);
-          setMoveQty(p.movable_qty ? String(p.movable_qty) : "");
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setMovePreview(null);
-      });
+    Promise.all(
+      orderIds.map((id) =>
+        api
+          .get<JobMovePreview>(`/api/plan/revisions/move-preview?order_id=${id}`)
+          .then((p) => ({ id, p }))
+          .catch(() => null),
+      ),
+    ).then((rows) => {
+      if (cancelled) return;
+      const next: Record<number, JobMovePreview> = {};
+      for (const row of rows) {
+        if (row) next[row.id] = row.p;
+      }
+      setMovePreviews(next);
+      const one = orderIds.length === 1 ? next[orderIds[0]] : undefined;
+      if (one?.movable_qty) setMoveQty(String(one.movable_qty));
+    });
     return () => {
       cancelled = true;
     };
-  }, [orderId]);
+  }, [orderIds]);
 
   const run = async (fn: () => Promise<PlanRevision>) => {
     setBusy(true);
@@ -133,24 +141,30 @@ export default function RevisionsPanel({
     );
 
   const addDue = () => {
-    if (!selected || !orderId || !newDue) return;
+    if (!selected || !orderIds.length || !newDue) return;
     run(() =>
-      api.post<PlanRevision>(`/api/plan/revisions/${selected.id}/changes`, {
-        entity_type: "order",
-        entity_id: orderId,
-        field: "revised_due_date",
-        new_value: newDue,
+      api.post<PlanRevision>(`/api/plan/revisions/${selected.id}/changes/bulk`, {
+        changes: orderIds.map((entity_id) => ({
+          entity_type: "order",
+          entity_id,
+          field: "revised_due_date",
+          new_value: newDue,
+        })),
       }),
     );
   };
 
   const addMove = () => {
-    if (!selected || !orderId || !moveStart || !movePreview) return;
-    const item = movePreview.item_code || orders.find((o) => o.id === orderId)?.item_code || "";
-    run(() =>
-      api.post<PlanRevision>(`/api/plan/revisions/${selected.id}/changes`, {
+    if (!selected || !orderIds.length || !moveStart) return;
+    const eligible = orderIds.filter((id) => (movePreviews[id]?.movable_qty ?? 0) > 0);
+    if (!eligible.length) return;
+    if (moveQtyMode === "split" && orderIds.length > 1) return;
+    const changes = eligible.map((entity_id) => {
+      const preview = movePreviews[entity_id];
+      const item = preview?.item_code || orders.find((o) => o.id === entity_id)?.item_code || "";
+      return {
         entity_type: "order",
-        entity_id: orderId,
+        entity_id,
         extra_key: item,
         field: "job_move",
         new_value: JSON.stringify({
@@ -159,8 +173,9 @@ export default function RevisionsPanel({
           qty_mode: moveQtyMode,
           quantity: moveQtyMode === "split" ? Number(moveQty) : null,
         }),
-      }),
-    );
+      };
+    });
+    run(() => api.post<PlanRevision>(`/api/plan/revisions/${selected.id}/changes/bulk`, { changes }));
   };
 
   const addLabor = () => {
@@ -278,23 +293,15 @@ export default function RevisionsPanel({
           {canEdit && editable && (
             <>
               <h4>Taslak girdiler</h4>
-              <div className="row" style={{ flexWrap: "wrap" }}>
-                <label>
-                  Sipariş
-                  <select value={orderId} onChange={(e) => setOrderId(Number(e.target.value))}>
-                    <option value={0}>—</option>
-                    {orders.map((o) => (
-                      <option key={o.id} value={o.id}>
-                        {o.order_no} {o.item_code} · {o.effective_due_date}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+              <div className="row" style={{ flexWrap: "wrap", alignItems: "flex-end", gap: 12 }}>
+                <OrderMultiSelect orders={orders} value={orderIds} onChange={setOrderIds} />
                 <label>
                   Yeni revize termin
                   <input type="date" value={newDue} onChange={(e) => setNewDue(e.target.value)} />
                 </label>
-                <button className="secondary" onClick={addDue} disabled={busy}>Vade ekle</button>
+                <button className="secondary" onClick={addDue} disabled={busy || !orderIds.length || !newDue}>
+                  {orderIds.length > 1 ? `${orderIds.length} siparişe vade ekle` : "Vade ekle"}
+                </button>
               </div>
               <div className="row" style={{ flexWrap: "wrap", marginTop: 8 }}>
                 <label>
@@ -318,9 +325,40 @@ export default function RevisionsPanel({
               </div>
               <h4>İş taşıma (kalan zincir)</h4>
               <p className="muted" style={{ marginTop: -8 }}>
-                Sipariş + mamul seçilir; tamamlanan operasyonlar kilitlenir. Yeni tarih yalnızca ilk kalan operasyonun
-                başlangıcıdır. Sonrakiler senaryo kurallarına uyar. Miktar: tüm kalan veya kısmi (aynı siparişte iki aile).
+                Yukarıdaki sipariş seçiminden bir veya birden fazla sipariş seçin. Tamamlanan operasyonlar kilitlenir.
+                Yeni tarih yalnızca ilk kalan operasyonun başlangıcıdır. Toplu iş taşımada miktar &quot;tüm kalan&quot; kullanılır;
+                kısmi bölme yalnızca tek sipariş seçiliyken kullanılabilir.
               </p>
+              {orderIds.length > 1 && (
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Sipariş</th>
+                        <th>Stok</th>
+                        <th>Kalan</th>
+                        <th>Mevcut başlangıç</th>
+                        <th>Etkilenen İM</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {orderIds.map((id) => {
+                        const o = orders.find((x) => x.id === id);
+                        const p = movePreviews[id];
+                        return (
+                          <tr key={id} style={{ opacity: p && p.movable_qty <= 0 ? 0.5 : 1 }}>
+                            <td>{o?.order_no}{o?.position_no ? `/${o.position_no}` : ""}</td>
+                            <td>{p?.item_code || o?.item_code || "—"}</td>
+                            <td>{p ? fmt(p.movable_qty) : "…"}</td>
+                            <td>{p?.current_start || "—"}</td>
+                            <td>{p?.consumed_work_centers?.join(", ") || "—"}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
               {movePreview && (
                 <>
                   <p>
@@ -364,18 +402,33 @@ export default function RevisionsPanel({
                     <option value="split">Kısmi (böl)</option>
                   </select>
                 </label>
-                {moveQtyMode === "split" && (
+                {moveQtyMode === "split" && orderIds.length === 1 && (
                   <label>
                     Taşınacak adet
                     <input type="number" min={0} step="any" value={moveQty} onChange={(e) => setMoveQty(e.target.value)} />
                   </label>
                 )}
+                {moveQtyMode === "split" && orderIds.length > 1 && (
+                  <span className="muted">Kısmi bölme için tek sipariş seçin</span>
+                )}
                 <label>
                   Yeni başlangıç (hafta)
                   <input type="date" value={moveStart} onChange={(e) => setMoveStart(e.target.value)} />
                 </label>
-                <button className="secondary" onClick={addMove} disabled={busy || !orderId || !movePreview || movePreview.movable_qty <= 0}>
-                  İş taşıma ekle
+                <button
+                  className="secondary"
+                  onClick={addMove}
+                  disabled={
+                    busy ||
+                    !orderIds.length ||
+                    (orderIds.length === 1 && (!movePreview || movePreview.movable_qty <= 0)) ||
+                    (orderIds.length > 1 && !orderIds.some((id) => (movePreviews[id]?.movable_qty ?? 0) > 0)) ||
+                    (moveQtyMode === "split" && orderIds.length > 1)
+                  }
+                >
+                  {orderIds.length > 1
+                    ? `${orderIds.filter((id) => (movePreviews[id]?.movable_qty ?? 0) > 0).length} siparişe iş taşıma ekle`
+                    : "İş taşıma ekle"}
                 </button>
               </div>
             </>

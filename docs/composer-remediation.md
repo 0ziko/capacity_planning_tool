@@ -110,7 +110,7 @@ Durum kodları: **doğrulanmış** = analiz betiği/inceleme ile hâlâ repro; *
 | Faz | Konu | Bulgu / kapsam | Durum | Commit |
 |---|---|---|---|---|
 | **00** | Başlangıç snapshot + regresyon planı | — | **tamamlandı** | `a0d879b` |
-| **01** | Ufuk dışı silmeyi durdur | B7 | **tamamlandı** | _(bu commit)_ |
+| **01** | Ufuk dışı silmeyi durdur | B7 | **tamamlandı** | `f6be5eb` |
 | **02** | Tek kalan iş; mükerrer plan | B1, B5 | bekliyor | — |
 | **03** | Parti + tekil aynı sıra | B6 | bekliyor | — |
 | **04** | Öncül + geçiş kuralları | B2, B3 | bekliyor | — |

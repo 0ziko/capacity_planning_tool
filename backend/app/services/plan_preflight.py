@@ -8,11 +8,19 @@ from datetime import date
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import Item, Order, WorkCenter
-from app.schemas import AutoPlanRequest, DataFreshnessCheckpoint, PlanPreflightOut, PreflightNoCapacity, PreflightNoRouting
+from app.schemas import AutoPlanRequest, DataFreshnessCheckpoint, PlanPreflightOut, PlanPreflightScopeOut, PreflightNoCapacity, PreflightNoRouting
 from app.services import capacity as cap
 from app.services import production_batches as pbatches
 from app.services.data_freshness import daily_freshness
-from app.services.planning import _open_orders_with_ops, _selected_work_centers
+from app.services.planning import (
+    _open_orders_with_ops,
+    _selected_work_centers,
+    count_lines_in_replace_scope,
+    plan_horizon_scope,
+    replace_scope_modes,
+)
+
+_MODE_LABELS = {"auto": "Otomatik", "manual": "Manuel"}
 
 
 def _items_without_routing(db: Session) -> list[PreflightNoRouting]:
@@ -116,6 +124,24 @@ def _capacity_issues(db: Session, req: AutoPlanRequest, planned_wcs: list[WorkCe
     return out
 
 
+def _replace_scope(db: Session, req: AutoPlanRequest, planned_wcs: list[WorkCenter]) -> PlanPreflightScopeOut:
+    scope = plan_horizon_scope(req.start_week, req.weeks)
+    wc_ids = [w.id for w in planned_wcs]
+    modes = replace_scope_modes(replace_manual=False)
+    lines_to_replace = 0
+    if req.replace_existing and wc_ids:
+        lines_to_replace = count_lines_in_replace_scope(db, wc_ids, scope, modes)
+    replace_modes = [_MODE_LABELS[m] for m in modes] if req.replace_existing else []
+    return PlanPreflightScopeOut(
+        horizon_start=scope.start,
+        horizon_end_inclusive=scope.end_inclusive,
+        work_center_codes=[w.code for w in planned_wcs],
+        replace_modes=replace_modes,
+        lines_to_replace=lines_to_replace,
+        replace_existing=req.replace_existing,
+    )
+
+
 def plan_preflight(db: Session, req: AutoPlanRequest) -> PlanPreflightOut:
     no_routing = _items_without_routing(db)
     planned_wcs = _selected_work_centers(db, req.work_center_ids)
@@ -138,4 +164,5 @@ def plan_preflight(db: Session, req: AutoPlanRequest) -> PlanPreflightOut:
         today=freshness["today"],
         needs_capacity_ack=needs_capacity_ack,
         needs_daily_data_ack=needs_daily_data_ack,
+        replace_scope=_replace_scope(db, req, planned_wcs),
     )

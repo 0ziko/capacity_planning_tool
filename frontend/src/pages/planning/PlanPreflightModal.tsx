@@ -45,11 +45,11 @@ export default function PlanPreflightModal({
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal panel" style={{ maxWidth: 720, width: "96vw" }} onClick={(e) => e.stopPropagation()}>
         <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
-          <h2 style={{ margin: 0 }}>Planlama ön kontrol</h2>
+          <h2 style={{ margin: 0 }}>Seçili ufku yeniden planla</h2>
           <button className="secondary small" onClick={onClose}>Kapat</button>
         </div>
         <p className="muted" style={{ marginTop: 4 }}>
-          Otomatik planlamadan önce veri bütünlüğü kontrol edilir. Açık sipariş havuzunda rotası tanımlı olmayan stok varsa planlama engellenir; kapasite ve günlük veri uyarılarında onayınız gerekir.
+          Yalnızca seçili tarih aralığındaki otomatik plan satırları yenilenir; ufuk dışındaki planlar korunur. Ön kontrol tamamlandıktan sonra onayınızla uygulanır.
         </p>
 
         {busy && <p className="muted">Kontroller çalışıyor…</p>}
@@ -57,6 +57,24 @@ export default function PlanPreflightModal({
 
         {data && (
           <>
+            <section style={{ marginBottom: 14, padding: "10px 12px", background: "var(--panel-alt, rgba(0,0,0,0.04))", borderRadius: 8 }}>
+              <h3 style={{ margin: "0 0 8px" }}>Yeniden planlama kapsamı</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px", fontSize: "0.95em" }}>
+                <span className="muted">Tarih aralığı</span>
+                <span>
+                  {new Date(data.replace_scope.horizon_start + "T12:00:00").toLocaleDateString("tr-TR")}
+                  {" – "}
+                  {new Date(data.replace_scope.horizon_end_inclusive + "T12:00:00").toLocaleDateString("tr-TR")}
+                </span>
+                <span className="muted">İş merkezleri</span>
+                <span>{data.replace_scope.work_center_codes.length ? data.replace_scope.work_center_codes.join(", ") : "Planlanan tüm merkezler"}</span>
+                <span className="muted">Değiştirilecek modlar</span>
+                <span>{data.replace_scope.replace_existing ? (data.replace_scope.replace_modes.join(", ") || "—") : "Mevcut otomatik plan korunur (ekleme)"}</span>
+                <span className="muted">Etkilenecek satır</span>
+                <span><b>{data.replace_scope.lines_to_replace}</b> plan satırı silinip yeniden yazılacak</span>
+              </div>
+            </section>
+
             <p style={{ margin: "8px 0" }}>
               <b>{data.order_count}</b> açık sipariş / parti plan kapsamında.
               <span className="muted"> · Kontrol günü: {new Date(data.today + "T12:00:00").toLocaleDateString("tr-TR")}</span>
@@ -179,7 +197,7 @@ export default function PlanPreflightModal({
             <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
               <button className="secondary" onClick={onClose}>Vazgeç</button>
               <button onClick={onConfirm} disabled={!canProceed}>
-                {data.can_plan ? "Planlamayı başlat" : "Planlama yapılamaz"}
+                {data.can_plan ? "Seçili ufku yeniden planla" : "Planlama yapılamaz"}
               </button>
             </div>
           </>

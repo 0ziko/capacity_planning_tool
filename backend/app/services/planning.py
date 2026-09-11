@@ -74,6 +74,66 @@ class Simulation:
         return sum(l.planned_hours for l in self.lines)
 
 
+@dataclass(frozen=True)
+class PlanHorizonScope:
+    """Planlama ufku: [start, end_exclusive) yarı açık aralık (Pazartesi hafta başları)."""
+
+    start: date
+    end_exclusive: date
+
+    @property
+    def end_inclusive(self) -> date:
+        return self.end_exclusive - timedelta(days=1)
+
+    def contains_week(self, week_start: date) -> bool:
+        wk = cap.week_start(week_start)
+        return self.start <= wk < self.end_exclusive
+
+
+def plan_horizon_scope(start_week: date, weeks: int) -> PlanHorizonScope:
+    start = cap.week_start(start_week)
+    return PlanHorizonScope(start=start, end_exclusive=start + timedelta(days=weeks * 7))
+
+
+def replace_scope_modes(*, replace_manual: bool) -> list[str]:
+    modes = ["auto"]
+    if replace_manual:
+        modes.append("manual")
+    return modes
+
+
+def query_lines_in_replace_scope(
+    db: Session,
+    wc_ids: list[int],
+    scope: PlanHorizonScope,
+    modes: list[str],
+):
+    return db.query(PlanLine).filter(
+        PlanLine.work_center_id.in_(wc_ids),
+        PlanLine.week_start >= scope.start,
+        PlanLine.week_start < scope.end_exclusive,
+        PlanLine.mode.in_(modes),
+    )
+
+
+def count_lines_in_replace_scope(
+    db: Session,
+    wc_ids: list[int],
+    scope: PlanHorizonScope,
+    modes: list[str],
+) -> int:
+    return query_lines_in_replace_scope(db, wc_ids, scope, modes).count()
+
+
+def delete_lines_in_replace_scope(
+    db: Session,
+    wc_ids: list[int],
+    scope: PlanHorizonScope,
+    modes: list[str],
+) -> int:
+    return query_lines_in_replace_scope(db, wc_ids, scope, modes).delete(synchronize_session=False)
+
+
 def _open_orders_with_ops(db: Session) -> list[Order]:
     in_batch = pbatches.batched_order_ids(db)
     rows = (
@@ -250,7 +310,8 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
               alinir (ciro teslimde gerceklesir), sigmayanlar atlanir. Kalan kapasite,
               atlanan siparislerle termin sirasiyla kismen doldurulur (sonraki ufka devreder).
     """
-    start = cap.week_start(req.start_week)
+    scope = plan_horizon_scope(req.start_week, req.weeks)
+    start = scope.start
     weeks = [start + timedelta(weeks=i) for i in range(req.weeks)]
     wcs = _selected_work_centers(db, req.work_center_ids)
     extra_batches = extra_batches or []
@@ -391,14 +452,9 @@ def write_simulation(
         }
     wc_ids = [w.id for w in sim.work_centers]
     if req.replace_existing:
-        modes = ["auto"]
-        if replace_manual:
-            modes.append("manual")
-        db.query(PlanLine).filter(
-            PlanLine.work_center_id.in_(wc_ids),
-            PlanLine.week_start >= sim.start,
-            PlanLine.mode.in_(modes),
-        ).delete(synchronize_session=False)
+        scope = plan_horizon_scope(sim.start, len(sim.weeks))
+        modes = replace_scope_modes(replace_manual=replace_manual)
+        delete_lines_in_replace_scope(db, wc_ids, scope, modes)
         db.flush()
     for l in sim.lines:
         db.add(

@@ -97,11 +97,11 @@ Durum kodları: **doğrulanmış** = analiz betiği/inceleme ile hâlâ repro; *
 
 | | |
 |---|---|
-| **Durum** | **doğrulanmış** |
-| **Kod** | `backend/app/services/planning.py` — `write_simulation` / `auto_plan` (~L397–L401): `week_start >= sim.start`, **üst sınır yok** |
-| **Analiz kanıtı** | Kasım satırı silindi (`observed_future_line_count: 0`) |
-| **FAZ** | **01** |
-| **Regresyon testi (henüz eklenmedi)** | Modül: `tests/test_plan_horizon_scope.py`. Kasım `PlanLine` + 1 haftalık Eylül `auto_plan(replace_existing=True)` → Kasım satırı kalır. Üst sınır haftası (start+weeks) korunur testi. Revizyon `approve` aynı kapsam testi (FAZ 01 sonrası). |
+| **Durum** | **düzeltildi** (FAZ 01) |
+| **Eski kod** | `write_simulation`: `week_start >= sim.start` — üst sınır yok → Kasım dahil tüm gelecek auto satırları siliniyordu |
+| **Yeni kod** | `plan_horizon_scope` + `delete_lines_in_replace_scope`: `[start, start+weeks×7)` yarı açık aralık; seçili WC; `auto` (+ isteğe `manual`); forecast dokunulmaz |
+| **Regresyon** | `tests/test_plan_horizon_scope.py` — 5 test geçti |
+| **FAZ** | **01** ✓ |
 
 ---
 
@@ -110,7 +110,7 @@ Durum kodları: **doğrulanmış** = analiz betiği/inceleme ile hâlâ repro; *
 | Faz | Konu | Bulgu / kapsam | Durum | Commit |
 |---|---|---|---|---|
 | **00** | Başlangıç snapshot + regresyon planı | — | **tamamlandı** | `a0d879b` |
-| **01** | Ufuk dışı silmeyi durdur | B7 | bekliyor | — |
+| **01** | Ufuk dışı silmeyi durdur | B7 | **tamamlandı** | _(bu commit)_ |
 | **02** | Tek kalan iş; mükerrer plan | B1, B5 | bekliyor | — |
 | **03** | Parti + tekil aynı sıra | B6 | bekliyor | — |
 | **04** | Öncül + geçiş kuralları | B2, B3 | bekliyor | — |
@@ -124,6 +124,33 @@ Durum kodları: **doğrulanmış** = analiz betiği/inceleme ile hâlâ repro; *
 | **12** | Kabul ve ölçüm özeti | T3, tüm fazlar | bekliyor | — |
 
 Prompt dosyaları: `C:\Users\ozan.deniz\Desktop\Kapasite_Planlama_Analizi\Composer_Promptlari\Faz_XX.md`
+
+---
+
+## FAZ 01 — değişen dosyalar ve testler
+
+| Dosya | Değişiklik |
+|---|---|
+| `backend/app/services/planning.py` | `PlanHorizonScope`, `plan_horizon_scope`, `delete_lines_in_replace_scope`; `write_simulation` silme kapsamı |
+| `backend/app/services/plan_preflight.py` | `replace_scope` — tarih, WC, mod, etkilenecek satır sayısı |
+| `backend/app/schemas.py` | `PlanPreflightScopeOut` |
+| `frontend/src/api.ts` | `PlanPreflightScope` tipi |
+| `frontend/src/pages/planning/PlanPreflightModal.tsx` | “Seçili ufku yeniden planla” onay UI |
+| `backend/tests/test_plan_horizon_scope.py` | B7 regresyon (5 test) |
+
+### FAZ 01 kabul ölçütleri
+
+| # | Ölçüt | Sonuç |
+|---|---|---|
+| 1 | 14.09 + 1 hf → 02.11 auto korunur | ✓ `test_replan_preserves_future_auto_line` |
+| 2 | Önce / başka WC / manuel / forecast korunur | ✓ `test_replan_preserves_before_other_wc_manual_forecast` |
+| 3 | Üst sınır haftası korunur, ufuk içi yenilenir | ✓ `test_replan_upper_bound_week_preserved_inside_replaced` |
+| 4 | Revizyon onay aynı kapsam | ✓ `test_revision_apply_same_horizon_scope` |
+| 5 | Preflight kapsam raporu | ✓ `test_preflight_reports_replace_scope` |
+| 6 | Backend suite | **77 passed** (~52.8s) |
+| 7 | Frontend build | Başarılı (Vite 5.4.21) |
+
+**Not:** `DELETE /api/plan/lines` (açık silme) davranışı değiştirilmedi — başlangıçtan sonrasını sınırsız siler.
 
 ---
 
@@ -148,4 +175,4 @@ Prompt dosyaları: `C:\Users\ozan.deniz\Desktop\Kapasite_Planlama_Analizi\Compos
 
 ## Sonraki adım
 
-**FAZ 01** — `Composer_Promptlari/Faz_01.md` (B7: plan silme kapsamını ufupla sınırla). Kullanıcı promptu verdiğinde uygulanır.
+**FAZ 02** — `Composer_Promptlari/Faz_02.md` (B1, B5: kalan iş + mükerrer plan). Kullanıcı promptu verdiğinde uygulanır.

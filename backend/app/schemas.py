@@ -509,6 +509,16 @@ class DataFreshnessCheckpoint(BaseModel):
     detail: str
 
 
+class PlanPreflightScopeOut(BaseModel):
+    action_label: str = "Seçili ufku yeniden planla"
+    horizon_start: date
+    horizon_end_inclusive: date
+    work_center_codes: list[str]
+    replace_modes: list[str]
+    lines_to_replace: int
+    replace_existing: bool
+
+
 class PlanPreflightOut(BaseModel):
     can_plan: bool
     order_count: int
@@ -518,6 +528,7 @@ class PlanPreflightOut(BaseModel):
     today: str
     needs_capacity_ack: bool
     needs_daily_data_ack: bool
+    replace_scope: PlanPreflightScopeOut
 
 
 class DataFreshnessOut(BaseModel):

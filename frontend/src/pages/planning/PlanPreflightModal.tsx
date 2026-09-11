@@ -134,7 +134,7 @@ export default function PlanPreflightModal({
               </p>
               <div className="table-wrap">
                 <table>
-                  <thead><tr><th>Veri</th><th>Durum</th><th>Son import</th><th>Kullanıcı</th></tr></thead>
+                  <thead><tr><th>Veri</th><th>Durum</th><th>Son işlem</th><th>Kullanıcı</th></tr></thead>
                   <tbody>
                     {data.daily_data.map((d) => (
                       <tr key={d.key}>
@@ -142,12 +142,20 @@ export default function PlanPreflightModal({
                           <Link to={`/imports?kind=${d.import_kind}`}>{d.label}</Link>
                         </td>
                         <td>
-                          <span className={`badge ${d.status === "ok" ? "ok" : d.status === "missing" ? "bad" : "warn"}`}>
-                            {d.status === "ok" ? "Güncel" : d.status === "missing" ? "Eksik" : "Güncellenmeli"}
+                          <span className={`badge ${d.update_source === "manual_ack" ? "info" : d.status === "ok" ? "ok" : d.status === "missing" ? "bad" : "warn"}`}>
+                            {d.update_source === "manual_ack" ? "Manuel onay" : d.status === "ok" ? "Güncel" : d.status === "missing" ? "Eksik" : "Güncellenmeli"}
                           </span>
                         </td>
-                        <td className="muted">{fmtDt(d.last_import_at)}</td>
-                        <td className="muted">{d.last_import_by || "—"}</td>
+                        <td className="muted">
+                          {d.update_source === "manual_ack" && d.confirmed_no_change_at
+                            ? fmtDt(d.confirmed_no_change_at)
+                            : fmtDt(d.last_import_at)}
+                        </td>
+                        <td className="muted">
+                          {d.update_source === "manual_ack"
+                            ? d.confirmed_no_change_by || "—"
+                            : d.last_import_by || "—"}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

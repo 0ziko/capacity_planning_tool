@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.models import Item, Order, RoutingOperation, WorkCenter
 from app.schemas import RequirementLine, RequirementQuery
+from app.services.bom_tree import flatten_fg_operations
 
 
 def requirement_lines(db: Session, q: RequirementQuery) -> list[RequirementLine]:
@@ -38,22 +39,26 @@ def requirement_lines(db: Session, q: RequirementQuery) -> list[RequirementLine]
 
     items = (
         db.query(Item)
-        .options(joinedload(Item.operations).joinedload(RoutingOperation.work_center))
+        .options(
+            joinedload(Item.operations).joinedload(RoutingOperation.work_center),
+            joinedload(Item.bom_lines),
+        )
         .filter(Item.code.in_(list(qty_by_code.keys())))
         .all()
     )
     lines: list[RequirementLine] = []
     for item in items:
         qty = qty_by_code[item.code]
-        for op in item.operations:
+        for flat in flatten_fg_operations(db, item):
+            op = flat.operation
             if (wc_filter and op.work_center_id not in wc_filter) or op.work_center is None:
-                continue  # silinmis is merkezine bagli (yetim) operasyonlar hesaba girmez
+                continue
             lines.append(
                 RequirementLine(
                     work_center_id=op.work_center_id,
                     work_center_code=op.work_center.code,
                     item_code=item.code,
-                    operation_seq=op.seq,
+                    operation_seq=flat.display_seq,
                     operation_name=op.operation_name,
                     quantity=qty,
                     hours=round(op.hours_for(qty), 3),
@@ -72,19 +77,28 @@ def summarize_by_work_center(lines: list[RequirementLine]) -> list[dict]:
 
 
 def item_total_hours(db: Session, item_code: str, quantity: float) -> dict:
-    item = db.query(Item).options(joinedload(Item.operations).joinedload(RoutingOperation.work_center)).filter(Item.code == item_code).first()
+    item = (
+        db.query(Item)
+        .options(
+            joinedload(Item.operations).joinedload(RoutingOperation.work_center),
+            joinedload(Item.bom_lines),
+        )
+        .filter(Item.code == item_code)
+        .first()
+    )
     if not item:
         return {"item_code": item_code, "quantity": quantity, "total_hours": 0.0, "operations": []}
     ops = [
         {
-            "seq": op.seq,
-            "operation_name": op.operation_name,
-            "work_center_code": op.work_center.code if op.work_center else "(silinmiş İM)",
-            "cycle_time_sec": op.cycle_time_sec,
-            "setup_time_min": op.setup_time_min,
-            "hours": round(op.hours_for(quantity), 3),
+            "seq": flat.display_seq,
+            "operation_name": flat.operation.operation_name,
+            "work_center_code": flat.operation.work_center.code if flat.operation.work_center else "(silinmiş İM)",
+            "cycle_time_sec": flat.operation.cycle_time_sec,
+            "setup_time_min": flat.operation.setup_time_min,
+            "wip_code": flat.wip_code,
+            "hours": round(flat.operation.hours_for(quantity), 3),
         }
-        for op in item.operations
+        for flat in flatten_fg_operations(db, item)
     ]
     return {
         "item_code": item.code,

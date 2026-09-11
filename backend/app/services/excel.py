@@ -66,16 +66,33 @@ TEMPLATES: dict[str, dict] = {
         "required": ["code", "name"],
     },
     "machines": {
-        "title": "Makineler",
+        "title": "İstasyonlar / Makineler",
         "columns": [
             ("wc_code", "İş Merkezi Kodu", ["ismerkezi", "ismerkezikodu"]),
-            ("code", "Makine Kodu", ["makine", "makinekodu", "tezgahkodu", "kod"]),
-            ("name", "Makine Adı", ["makineadi", "ad", "adi"]),
+            ("wc_name", "Bağlı Olduğu İş Merkezi Tanımı", ["ismerkeziadi", "ismerkezitanimi", "bagliolduguismerkezitanimi"]),
+            ("code", "İstasyon / Makine Kodu", ["istasyonkodu", "makine", "makinekodu", "tezgahkodu", "kod"]),
+            ("name", "İstasyon / Makine Adı", ["istasyontanimi", "makineadi", "ad", "adi"]),
             ("description", "Açıklama", []),
             ("is_active", "Aktif (E/H)", ["aktif"]),
         ],
-        "example": ["PRESHANE 1", "PRS1-EKS-01", "Eksantrik Pres 60t", "", "E"],
-        "required": ["wc_code", "code"],
+        "example": ["PRESHANE 1", "PRESHANE 1", "PRS1-EKS-01", "Eksantrik Pres 60t", "", "E"],
+        "required": ["code"],
+    },
+    "istasyonlar": {
+        "title": "İstasyonlar (İstasyonlar.xlsx)",
+        "columns": [
+            ("station_code", "İstasyon Kodu", ["istasyonkodu", "kod", "code"]),
+            ("station_name", "İstasyon Tanımı", ["istasyontanimi", "ad", "name"]),
+            ("wc_name", "Bağlı Olduğu İş Merkezi Tanımı", ["ismerkezi", "ismerkeziadi", "bagliolduguismerkezitanimi"]),
+        ],
+        "example": ["PRS1-EKS-01", "Eksantrik Pres 60t", "PRESHANE 1"],
+        "required": ["station_code", "wc_name"],
+    },
+    "production_bom": {
+        "title": "Production BOM (ERP RECETELER)",
+        "columns": [],
+        "example": [],
+        "required": [],
     },
     "shifts": {
         "title": "Vardiyalar",
@@ -124,8 +141,9 @@ TEMPLATES: dict[str, dict] = {
             ("component_name", "Bileşen Adı", ["hammaddeadi", "bilesenadi"]),
             ("quantity", "Miktar", ["kullanimmiktari"]),
             ("unit", "Birim", []),
+            ("source_wip", "Kaynak Yarımamül", ["kaynakwip", "sourcewip", "dal"]),
         ],
-        "example": ["MAM-0001", "HM-SAC-2MM", "Paslanmaz Sac 2mm", 3.5, "KG"],
+        "example": ["MAM-0001", "HM-SAC-2MM", "Paslanmaz Sac 2mm", 3.5, "KG", ""],
         "required": ["item_code", "component_code"],
     },
     "routing": {
@@ -148,6 +166,7 @@ TEMPLATES: dict[str, dict] = {
             ("order_no", "Sipariş No", ["siparis", "siparisno", "belgeno"]),
             ("position_no", "Poz No", ["poz", "pozno", "pozisyon", "pozisyonno"]),
             ("customer", "Müşteri", ["musteriadi", "cari"]),
+            ("order_date", "Sipariş Tarihi", ["siparistarihi", "siparis tarihi", "siparistarih"]),
             ("due_date", "Termin", ["termintarihi", "teslimtarihi", "tarih"]),
             ("revised_due_date", "Revize Termin", ["revizetermin", "revizetermintarihi"]),
             ("market", "Pazar", ["pazar", "yerliyurtdisi"]),
@@ -155,7 +174,7 @@ TEMPLATES: dict[str, dict] = {
             ("quantity", "Miktar", ["adet"]),
             ("unit_price", "Birim Fiyat", ["fiyat", "birimfiyat", "satisfiyati", "birimsatisfiyati"]),
         ],
-        "example": ["SIP-2026-001", "10", "ABC Otel", "2026-10-15", "", "Yerli", "MAM-0001", 40, 1250],
+        "example": ["SIP-2026-001", "10", "ABC Otel", "2026-09-01", "2026-10-15", "", "Yerli", "MAM-0001", 40, 1250],
         "required": ["order_no", "due_date", "item_code", "quantity"],
     },
     "production": {
@@ -502,15 +521,22 @@ def import_workcenters(db: Session, rows: list[dict]) -> tuple[int, int, list[st
 
 def import_machines(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
     """Makine kodu benzersizdir; varsa gunceller (is merkezi degisebilir), yoksa ekler."""
+    from app.services.stations import get_or_create_wc_by_name, wc_lookup_by_name
+
     ins = upd = 0
     errs = []
     wcs = _wc_lookup(db)
+    wc_by_name = wc_lookup_by_name(db)
     existing = {m.code.upper(): m for m in db.query(Machine).all()}
     for r in rows:
         try:
             wc = wcs.get(_str(r.get("wc_code")).upper())
             if not wc:
-                raise ValueError(f"Is merkezi bulunamadi: {r.get('wc_code')}")
+                wc_name = _str(r.get("wc_name"))
+                if wc_name:
+                    wc = get_or_create_wc_by_name(db, wc_name, wc_by_name)
+            if not wc:
+                raise ValueError(f"Is merkezi bulunamadi: {r.get('wc_code') or r.get('wc_name')}")
             code = _str(r.get("code"))
             if not code:
                 raise ValueError("Makine kodu bos")
@@ -641,9 +667,13 @@ def import_bom(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
             comp = _str(r.get("component_code"))
             if not comp:
                 raise ValueError("Bilesen kodu bos")
-            line = next((b for b in item.bom_lines if b.component_code.upper() == comp.upper()), None)
+            src = _str(r.get("source_wip")) or ""
+            line = next(
+                (b for b in item.bom_lines if b.component_code.upper() == comp.upper() and (b.source_wip or "") == src),
+                None,
+            )
             if not line:
-                line = BomLine(item=item, component_code=comp)
+                line = BomLine(item=item, component_code=comp, source_wip=src)
                 db.add(line)
                 ins += 1
             else:
@@ -651,6 +681,7 @@ def import_bom(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
             line.component_name = _str(r.get("component_name")) or line.component_name
             line.quantity = _float(r.get("quantity"), 1.0)
             line.unit = _str(r.get("unit")) or line.unit or "AD"
+            line.source_wip = src
         except Exception as e:  # noqa: BLE001
             errs.append(f"Satir {r['_row']}: {e}")
     return ins, upd, errs
@@ -692,6 +723,12 @@ def import_routing(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
 def _order_preview_from_row(r: dict, item_code: str, order_id: int | None = None) -> OrderImportRowPreview:
     from app.services.orders import normalize_market
 
+    od = None
+    try:
+        od_raw = r.get("order_date")
+        od = _date(od_raw) if od_raw not in (None, "") else None
+    except Exception:  # noqa: BLE001
+        pass
     due = None
     try:
         due = _date(r.get("due_date"))
@@ -710,6 +747,7 @@ def _order_preview_from_row(r: dict, item_code: str, order_id: int | None = None
         position_no=_str(r.get("position_no")),
         item_code=item_code,
         customer=_str(r.get("customer")),
+        order_date=od,
         due_date=due,
         revised_due_date=rev,
         market=normalize_market(m) if m else "domestic",
@@ -726,6 +764,7 @@ def _order_preview_from_model(o: Order) -> OrderImportRowPreview:
         position_no=o.position_no or "",
         item_code=o.item.code if o.item else "",
         customer=o.customer,
+        order_date=o.order_date,
         due_date=o.due_date,
         revised_due_date=o.revised_due_date,
         market=o.market or "domestic",
@@ -806,6 +845,8 @@ def preview_orders_import(db: Session, rows: list[dict]) -> OrderImportPreview:
             changes.append(f"miktar: {o.quantity:g} → {fp.quantity:g}")
         if fp.customer and fp.customer != o.customer:
             changes.append(f"musteri: {o.customer or '—'} → {fp.customer}")
+        if fp.order_date != o.order_date:
+            changes.append(f"siparis tarihi: {o.order_date or '—'} → {fp.order_date or '—'}")
         if fp.unit_price is not None and abs(fp.unit_price - (o.unit_price or 0)) > 1e-9:
             changes.append(f"birim fiyat: {o.unit_price or 0:g} → {fp.unit_price:g}")
         sys_rev = o.revised_due_date
@@ -821,6 +862,7 @@ def preview_orders_import(db: Session, rows: list[dict]) -> OrderImportPreview:
                     position_no=fp.position_no,
                     item_code=fp.item_code,
                     customer=fp.customer,
+                    order_date=fp.order_date,
                     due_date=fp.due_date,
                     revised_due_date=fp.revised_due_date,
                     market=fp.market,
@@ -887,6 +929,9 @@ def import_orders(db: Session, rows: list[dict], remove_missing: bool = False) -
             else:
                 upd += 1
             o.customer = _str(r.get("customer")) or o.customer
+            od_raw = r.get("order_date")
+            if od_raw not in (None, ""):
+                o.order_date = _date(od_raw)
             o.due_date = _date(r.get("due_date"))
             rev = r.get("revised_due_date")
             o.revised_due_date = _date(rev) if rev not in (None, "") else None
@@ -1142,9 +1187,32 @@ def import_stock_receipts(db: Session, rows: list[dict]) -> tuple[int, int, list
     return ins, 0, errs
 
 
+def import_istasyonlar(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
+    from app.services.stations import import_stations
+
+    ins, upd, deactivated, errs = import_stations(db, rows, replace_missing=True)
+    return ins, upd + deactivated, errs
+
+
+def import_production_bom_kind(db: Session, _rows: list[dict]) -> tuple[int, int, list[str]]:
+    raise ValueError("production_bom satir okuma ile calismaz; run_import_raw kullanin")
+
+
+def _import_production_bom_raw(db: Session, content: bytes) -> tuple[int, int, list[str]]:
+    from app.services.production_bom import import_production_bom_excel
+
+    return import_production_bom_excel(db, content)
+
+
+RAW_IMPORTERS: dict[str, Callable[[Session, bytes], tuple[int, int, list[str]]]] = {
+    "production_bom": _import_production_bom_raw,
+}
+
+
 IMPORTERS: dict[str, Callable[[Session, list[dict]], tuple[int, int, list[str]]]] = {
     "workcenters": import_workcenters,
     "machines": import_machines,
+    "istasyonlar": import_istasyonlar,
     "shifts": import_shifts,
     "wc_weeks": import_wc_weeks,
     "employees": import_employees,
@@ -1156,20 +1224,25 @@ IMPORTERS: dict[str, Callable[[Session, list[dict]], tuple[int, int, list[str]]]
     "production": import_production,
     "downtime": import_downtime,
     "stock_receipts": import_stock_receipts,
+    "production_bom": import_production_bom_kind,
 }
 
 
 def run_import(db: Session, kind: str, content: bytes, filename: str, username: str, remove_missing: bool = False) -> ImportResult:
-    if kind not in IMPORTERS:
+    if kind not in IMPORTERS and kind not in RAW_IMPORTERS:
         raise ValueError(f"Bilinmeyen import turu: {kind}")
-    rows, errs = read_rows(content, kind)
     ins = upd = removed = 0
-    if not errs:
-        if kind == "orders":
-            ins, upd, removed, errs = import_orders(db, rows, remove_missing=remove_missing)
-        else:
-            ins, upd, imp_errs = IMPORTERS[kind](db, rows)
-            errs = imp_errs
+    errs: list[str] = []
+    if kind in RAW_IMPORTERS:
+        ins, upd, errs = RAW_IMPORTERS[kind](db, content)
+    else:
+        rows, errs = read_rows(content, kind)
+        if not errs:
+            if kind == "orders":
+                ins, upd, removed, errs = import_orders(db, rows, remove_missing=remove_missing)
+            else:
+                ins, upd, imp_errs = IMPORTERS[kind](db, rows)
+                errs = imp_errs
     if kind == "production" and not errs:
         from app.services.stock import sync_progress_receipts
 
@@ -1220,7 +1293,7 @@ def build_backup(db: Session) -> bytes:
     _ws_from_rows(wb, "Rota", [c[1] for c in TEMPLATES["routing"]["columns"]],
                   [[item_code.get(o.item_id), o.seq, o.operation_name, wc_code.get(o.work_center_id), o.cycle_time_sec, o.setup_time_min, o.semi_finished_code] for o in db.query(RoutingOperation).order_by(RoutingOperation.item_id, RoutingOperation.seq)])
     _ws_from_rows(wb, "Siparişler", [c[1] for c in TEMPLATES["orders"]["columns"]] + ["Durum"],
-                  [[o.order_no, o.position_no or "", o.customer, o.due_date, item_code.get(o.item_id), o.quantity, o.unit_price, o.status] for o in db.query(Order).order_by(Order.due_date, Order.order_no, Order.position_no)])
+                  [[o.order_no, o.position_no or "", o.customer, o.order_date, o.due_date, o.revised_due_date, _market_cell(o.market), item_code.get(o.item_id), o.quantity, o.unit_price, o.status] for o in db.query(Order).order_by(Order.due_date, Order.order_no, Order.position_no)])
     _ws_from_rows(wb, "Plan", ["Hafta", "İş Merkezi Kodu", "Sipariş No", "Stok Kodu", "Operasyon Id", "Planlanan Saat", "Planlanan Miktar", "Mod", "Oluşturan"],
                   [[p.week_start, wc_code.get(p.work_center_id), p.order.order_no, item_code.get(p.order.item_id), p.operation_id, p.planned_hours, p.planned_qty, p.mode, p.created_by] for p in db.query(PlanLine).order_by(PlanLine.week_start, PlanLine.work_center_id)])
     _ws_from_rows(wb, "Günlük Üretim", [c[1] for c in TEMPLATES["production"]["columns"]] + ["Kazanılan Saat"],
@@ -1258,10 +1331,12 @@ def _order_row_values(r: dict) -> list[Any]:
     qty = _float(r.get("quantity"))
     price = _float(r.get("unit_price"), None)
     rev = r.get("revised_due_date")
+    od = r.get("order_date")
     return [
         _str(r.get("order_no")),
         _str(r.get("position_no")),
         _str(r.get("customer")),
+        _date_cell(od) if od not in (None, "") else "",
         _date_cell(r.get("due_date")),
         _date_cell(rev) if rev not in (None, "") else "",
         _market_cell(_str(r.get("market"))),
@@ -1276,6 +1351,7 @@ def _preview_row_values(r: OrderImportRowPreview) -> list[Any]:
         r.order_no,
         r.position_no or "",
         r.customer or "",
+        _date_cell(r.order_date) if r.order_date else "",
         _date_cell(r.due_date),
         _date_cell(r.revised_due_date) if r.revised_due_date else "",
         _market_cell(r.market),

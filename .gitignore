@@ -12,3 +12,5 @@ frontend/dist/
 .vite/
 
 backend/logs/
+backend/.postgres/
+backend/backup/

@@ -89,7 +89,7 @@ export default function Orders() {
               <thead>
                 <tr>
                   <th>Sipariş</th><th>Poz</th><th>Müşteri</th><th>Pazar</th>
-                  <th>Termin</th><th>Revize termin</th><th>Plan termin</th>
+                  <th>Sipariş tarihi</th><th>Termin</th><th>Revize termin</th><th>Planlanan teslim</th>
                   <th>Stok</th><th className="num">Miktar</th><th className="num">Birim fiyat</th><th className="num">Ciro</th>
                   <th>Plan</th><th>Rezerv</th><th>Not</th><th></th>
                 </tr>
@@ -105,9 +105,10 @@ export default function Orders() {
                     <td>{o.position_no || <span className="muted">—</span>}</td>
                     <td>{o.customer}</td>
                     <td>{MARKET_LABEL[o.market] ?? o.market}</td>
+                    <td>{o.order_date || <span className="muted">—</span>}</td>
                     <td>{o.due_date}</td>
                     <td>{o.revised_due_date || <span className="muted">—</span>}</td>
-                    <td><b>{o.effective_due_date}</b></td>
+                    <td>{o.planned_end || <span className="muted">—</span>}</td>
                     <td><b>{o.item_code}</b> <span className="muted">{o.item_name}</span></td>
                     <td className="num">{fmt(o.quantity, 0)}</td>
                     <td className="num" style={{ color: o.unit_price ? undefined : "var(--muted)" }}>{o.unit_price ? fmt(o.unit_price, 2) : "—"}</td>
@@ -128,7 +129,7 @@ export default function Orders() {
                     </td>
                   </tr>
                 ))}
-                {orders.data?.length === 0 && <tr><td colSpan={15} className="muted">Sipariş yok.</td></tr>}
+                {orders.data?.length === 0 && <tr><td colSpan={16} className="muted">Sipariş yok.</td></tr>}
               </tbody>
             </table>
           </div>
@@ -147,6 +148,7 @@ function OrderForm({ initial, onSaved, onCancel }: { initial: Order | null; onSa
     order_no: initial?.order_no ?? "",
     position_no: initial?.position_no ?? "",
     customer: initial?.customer ?? "",
+    order_date: initial?.order_date ?? "",
     due_date: initial?.due_date ?? "",
     revised_due_date: initial?.revised_due_date ?? "",
     market: initial?.market ?? "domestic",
@@ -174,6 +176,7 @@ function OrderForm({ initial, onSaved, onCancel }: { initial: Order | null; onSa
         order_no: form.order_no.trim(),
         position_no: form.position_no.trim(),
         item_code: form.item_code.trim(),
+        order_date: form.order_date || null,
         revised_due_date: form.revised_due_date || null,
         market: form.market || "domestic",
       };
@@ -197,6 +200,7 @@ function OrderForm({ initial, onSaved, onCancel }: { initial: Order | null; onSa
         <label>Miktar *<input type="number" min={0} step="1" value={form.quantity || ""} onChange={(e) => set("quantity", Number(e.target.value))} /></label>
         <label title="Birim satış fiyatı; ciro = miktar × birim fiyat">Birim fiyat<input type="number" min={0} step="0.01" value={form.unit_price || ""} onChange={(e) => set("unit_price", Number(e.target.value))} placeholder="0" /></label>
         <label>Ciro<input value={form.quantity && form.unit_price ? fmt(form.quantity * form.unit_price, 2) : "—"} readOnly style={{ background: "#f5f5f5", width: 110 }} /></label>
+        <label>Sipariş tarihi<input type="date" value={form.order_date || ""} onChange={(e) => set("order_date", e.target.value || null)} /></label>
         <label>Termin *<input type="date" value={form.due_date} onChange={(e) => set("due_date", e.target.value)} /></label>
         <label title="Dolu ise planlama bu tarihi kullanır">Revize termin<input type="date" value={form.revised_due_date || ""} onChange={(e) => set("revised_due_date", e.target.value || null)} /></label>
         <label style={{ minWidth: 220 }}>Not<input value={form.note} onChange={(e) => set("note", e.target.value)} /></label>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, fmt, qs, type Item, type ItemDetail } from "../api";
 import { ErrorText, StringMultiSelect, useAsync, useWorkCenters } from "../components";
+import BomTreeView from "../components/BomTreeView";
 
 interface ItemHours { item_code: string; item_name?: string; quantity: number; total_hours: number; operations: { seq: number; operation_name: string; work_center_code: string; cycle_time_sec: number; setup_time_min: number; hours: number }[] }
 interface ItemGroups { main_groups: string[]; sub_groups: string[] }
@@ -66,26 +67,50 @@ export default function Items() {
                   <label>Miktar<input type="number" min={1} value={qty} onChange={(e) => setQty(Number(e.target.value) || 1)} /></label>
                   <div className="kpi"><span className="v">{fmt(hours.data?.total_hours, 2)} saat</span><span className="l">Toplam iş gücü ihtiyacı</span></div>
                 </div>
+                {(detail.data.child_wips?.length ?? 0) > 0 && (
+                  <p className="muted" style={{ marginBottom: 8 }}>
+                    Alt yarı mamuller: {detail.data.child_wips!.map((w) => `${w.code} (${w.operation_count} op.)`).join(" · ")}
+                  </p>
+                )}
                 <table>
-                  <thead><tr><th>Sıra</th><th>Operasyon</th><th>Yarımamül Kodu</th><th>İş Merkezi</th><th className="num">Çevrim (sn)</th><th className="num">Setup (dk)</th><th className="num">Saat ({qty} adet)</th></tr></thead>
+                  <thead><tr><th>Sıra</th><th>Operasyon</th><th>Dal</th><th>Yarımamül</th><th>İş Merkezi</th><th>Birincil istasyon</th><th>Alternatif istasyonlar</th><th className="num">Çevrim (sn)</th><th className="num">Setup (dk)</th><th className="num">Saat ({qty} adet)</th></tr></thead>
                   <tbody>
                     {detail.data.operations.map((op) => {
                       const h = hours.data?.operations.find((o) => o.seq === op.seq)?.hours;
-                      return <tr key={op.id}><td>{op.seq}</td><td>{op.operation_name}</td><td><code>{op.semi_finished_code || "—"}</code></td><td>{wcCode(op.work_center_id)}</td><td className="num">{fmt(op.cycle_time_sec)}</td><td className="num">{fmt(op.setup_time_min)}</td><td className="num">{fmt(h, 2)}</td></tr>;
+                      const alts = (op.stations ?? []).filter((s) => !s.is_primary).map((s) => s.machine_code).join(", ");
+                      return (
+                        <tr key={`${op.seq}-${op.id}-${op.wip_code ?? ""}`}>
+                          <td>{op.seq}</td>
+                          <td>{op.operation_name}</td>
+                          <td><code>{op.wip_code || "—"}</code></td>
+                          <td><code>{op.semi_finished_code || "—"}</code></td>
+                          <td>{wcCode(op.work_center_id)}</td>
+                          <td><code>{op.primary_machine_code || "—"}</code></td>
+                          <td className="muted">{alts || "—"}</td>
+                          <td className="num">{fmt(op.cycle_time_sec)}</td>
+                          <td className="num">{fmt(op.setup_time_min)}</td>
+                          <td className="num">{fmt(h, 2)}</td>
+                        </tr>
+                      );
                     })}
-                    {detail.data.operations.length === 0 && <tr><td colSpan={7} className="muted">Rota tanımı yok</td></tr>}
+                    {detail.data.operations.length === 0 && <tr><td colSpan={10} className="muted">Rota tanımı yok</td></tr>}
                   </tbody>
                 </table>
               </div>
               <div className="panel">
-                <h2 style={{ marginTop: 0 }}>BOM (hammadde)</h2>
-                <table>
-                  <thead><tr><th>Bileşen</th><th>Ad</th><th className="num">Miktar</th><th>Birim</th><th className="num">× {qty}</th></tr></thead>
-                  <tbody>
-                    {detail.data.bom_lines.map((b) => <tr key={b.id}><td>{b.component_code}</td><td>{b.component_name}</td><td className="num">{fmt(b.quantity, 3)}</td><td>{b.unit}</td><td className="num">{fmt(b.quantity * qty, 3)}</td></tr>)}
-                    {detail.data.bom_lines.length === 0 && <tr><td colSpan={5} className="muted">BOM yok</td></tr>}
-                  </tbody>
-                </table>
+                <h2 style={{ marginTop: 0 }}>Malzeme reçetesi (BOM)</h2>
+                <BomTreeView
+                  lines={detail.data.bom_lines}
+                  qty={qty}
+                  productCode={detail.data.code}
+                  productName={detail.data.name}
+                  operations={detail.data.operations.map((op) => ({
+                    seq: op.seq,
+                    operation_name: op.operation_name,
+                    semi_finished_code: op.semi_finished_code,
+                    wip_code: op.wip_code,
+                  }))}
+                />
               </div>
             </>
           )}

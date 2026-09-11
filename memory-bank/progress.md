@@ -68,6 +68,13 @@
 ## Mevcut Durum
 Pilot denemeye hazır. Yerelde çalışıyor: backend :8000, frontend :5173 (SQLite).
 
+## Çalışan (2026-09-10 — iş taşıma revizyonu)
+- [x] Plan revizyonunda iş taşıma: sipariş + mamul, tamamlanan operasyon kilitli, tüm kalan veya kısmi miktar, yeni başlangıç tarihi
+- [x] Öncelikli yerleştirme: hedef haftada boş yer varsa diğer işler yerinde kalır
+- [x] Kaydırma yalnızca tükettiğiniz iş merkezlerindeki, o haftadan sonraki çakışan işler; ilgisiz hatlar (lazer/pres/paket) ötelenmez
+- [x] Ufka sığmayan kalan açıkça plansız bırakılır (sessiz sonsuz öteleme yok)
+- [x] Onayla ve devreye al, canlı plana yazar; kullanıcı kapasite yerleşimini çalıştırıp senaryolarla doğrulayacak
+
 ## Bilinen Sorunlar / Sınırlamalar
 - Terminleme, gün içi ardışıklığı yaklaşık hesaplar (verimli saat → nominal saate oransal).
 - Sipariş bitiş tarihi hafta granüler plandan gün tahminidir (son haftada İM'nin termin sıralı doluluğuna göre); gün bazlı çizelgeleme değildir.

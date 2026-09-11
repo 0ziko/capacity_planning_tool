@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import auth, data, imports, master, owner, planning, scenarios, stock
 from app.core.config import get_settings
 from app.core.security import hash_password
-from app.db.migrate import ensure_columns, repair_orphans
+from app.db.migrate import ensure_columns, repair_bom_constraints, repair_orphans, widen_revision_change_values
 from app.db.session import Base, SessionLocal, engine
 from app.models import User
 
@@ -29,6 +29,8 @@ def seed_admin() -> None:
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     ensure_columns(engine)
+    widen_revision_change_values(engine)
+    repair_bom_constraints(engine)
     removed = repair_orphans(engine)
     if removed:
         logging.getLogger("uvicorn.error").warning("Yetim kayitlar temizlendi: %s", removed)
@@ -68,4 +70,16 @@ app.include_router(stock.router)
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "app": settings.app_name}
+    from sqlalchemy import text
+
+    from app.db.session import engine
+
+    db_ok = False
+    db_dialect = engine.dialect.name
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception:  # noqa: BLE001
+        pass
+    return {"status": "ok" if db_ok else "degraded", "app": settings.app_name, "database": db_dialect, "db_ok": db_ok}

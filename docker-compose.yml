@@ -1,0 +1,25 @@
+# Yerel gelistirme / canli oncesi PostgreSQL
+# Baslat: docker compose up -d
+# Durdur: docker compose down
+# Veri kalici: volume kapasite_pg
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: kapasite-postgres
+    environment:
+      POSTGRES_USER: kapasite
+      POSTGRES_PASSWORD: kapasite
+      POSTGRES_DB: kapasite
+    ports:
+      - "5432:5432"
+    volumes:
+      - kapasite_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kapasite -d kapasite"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  kapasite_pg:

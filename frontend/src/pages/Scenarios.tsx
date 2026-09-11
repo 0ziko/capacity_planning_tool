@@ -21,7 +21,15 @@ export default function Scenarios() {
 
   const flow = useAsync(() => (group === null ? Promise.resolve(null) : api.get<Flow>(`/api/scenarios/flow${qs({ product_group: group, item_code: itemCode || undefined })}`)), [group, itemCode]);
   const rules = useAsync(() => (group === null ? Promise.resolve([] as RuleRow[]) : api.get<RuleRow[]>(`/api/scenarios/rules${qs({ product_group: group })}`)), [group, flow.data]);
-  const refresh = () => { flow.reload(); groups.reload(); };
+  const refresh = () => { flow.reload(); groups.reload(); rules.reload(); };
+  const generateFromGroups = async () => {
+    setErr("");
+    try {
+      const r = await api.post<{ created: number; updated: number; skipped: number; groups: string[] }>("/api/scenarios/generate-from-groups");
+      refresh();
+      alert(`Senaryo üretildi: ${r.created} yeni, ${r.updated} güncellendi, ${r.skipped} atlandı (${r.groups.length} grup).`);
+    } catch (e) { setErr((e as Error).message); }
+  };
 
   const save = async (t: FlowTransition, rule: RuleKind, lag: number, wait: number, note: string) => {
     setErr("");
@@ -51,6 +59,12 @@ export default function Scenarios() {
         Kurallar terminleme (yeni iş) ve otomatik planlamada kullanılır. Ürün grubu geneli için yazılır; gerekirse grup içindeki bir stok kodu için özelleştirilir.
       </p>
       <ErrorText err={err || groups.err || flow.err} />
+      {canEdit && (
+        <div className="panel row">
+          <button className="secondary" onClick={generateFromGroups}>Ana/alt gruptan senaryo üret</button>
+          <span className="muted">Stok kartlarında ana grup + alt grup doldurulduktan sonra ardışık operasyonlar için &quot;bitince&quot; kuralı oluşturur.</span>
+        </div>
+      )}
 
       <div className="wc-tabs">
         {groups.data?.map((g) => (

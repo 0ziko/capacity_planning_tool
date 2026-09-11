@@ -6,10 +6,12 @@ import { ErrorText, useAsync } from "../components";
 
 interface LogRow { id: number; kind: string; filename: string; username: string; inserted: number; updated: number; errors: string[]; created_at: string }
 
-const ORDER = ["workcenters", "machines", "shifts", "wc_weeks", "employees", "items", "bom", "routing", "op_rules", "orders", "production", "downtime", "stock_receipts"];
+const ORDER = ["workcenters", "istasyonlar", "machines", "production_bom", "shifts", "wc_weeks", "employees", "items", "bom", "routing", "op_rules", "orders", "production", "downtime", "stock_receipts"];
 const HINT: Record<string, string> = {
   workcenters: "Önce iş merkezleri. Alan Kodu/Adı ile gruplanır; Kapasite Kaynağı: İM (personel/vardiya) veya Makine (makine atamaları).",
-  machines: "İş merkezi altındaki makineler. Makine kodu benzersizdir.",
+  istasyonlar: "İstasyonlar.xlsx formatı: istasyon kodu, tanım, bağlı iş merkezi adı. Listedeki olmayan istasyonlar pasif yapılır.",
+  machines: "İş merkezi altındaki istasyon/makine listesi. Kod benzersizdir; wc_code veya iş merkezi adı ile eşleşir.",
+  production_bom: "ERP RECETELER (BOM.xlsx): tüm mamul rotası ve BOM tek seferde yüklenir. Önce istasyon import önerilir.",
   shifts: "Günler: 0=Pzt … 6=Paz (örn. 0,1,2,3,4). Kişi sayısı 0 ise personel listesinden sayılır.",
   wc_weeks: "Haftaya özel iş gücü: Hafta = Pazartesi tarihi ya da 2026-W37. Boş bırakılan alan varsayılanı korur; tüm alanlar boşsa istisna silinir.",
   employees: "Kimin hangi iş merkezinde (ve isteğe bağlı hangi makinede) çalıştığı → verimli kapasite.",

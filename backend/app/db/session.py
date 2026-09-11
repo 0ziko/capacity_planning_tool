@@ -12,9 +12,11 @@ class Base(DeclarativeBase):
 
 def _make_engine():
     url = get_settings().database_url
-    kwargs = {}
+    kwargs: dict = {}
     if url.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False}
+    elif url.startswith("postgresql"):
+        kwargs.update(pool_size=5, max_overflow=10)
     eng = create_engine(url, pool_pre_ping=True, **kwargs)
     if url.startswith("sqlite"):
         # SQLite yabanci anahtarlari varsayilan olarak denetlemez; acilmazsa silinen is merkezine

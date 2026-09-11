@@ -30,7 +30,11 @@ from app.schemas import (
     OrderScheduleOut,
     PlanCompareOut,
     PlanCompareRequest,
+    JobMovePreviewOut,
     PlanLineOut,
+    PlanRevisionChangeIn,
+    PlanRevisionCreate,
+    PlanRevisionOut,
     ProgressOut,
     RequirementLine,
     RequirementQuery,
@@ -42,6 +46,8 @@ from app.services import analysis, capacity, excel, gantt, planning, progress, r
 from app.services import merge_impact as merge_impact_svc
 from app.services import orders as orders_svc
 from app.services import plan_preflight as preflight_svc
+from app.services import job_moves as job_moves_svc
+from app.services import plan_revisions as revisions_svc
 from app.services import production_batches as pbatches
 
 router = APIRouter(prefix="/api", tags=["planning"])
@@ -101,6 +107,114 @@ def run_auto_plan(req: AutoPlanRequest, db: Session = Depends(get_db), user: Use
         codes = ", ".join(r.item_code for r in check.no_routing[:10])
         raise HTTPException(400, f"Acik siparislerde rotasi olmayan stok kodlari var; planlama yapilamaz: {codes}")
     return planning.auto_plan(db, req, user.username)
+
+
+def _revision_error(exc: ValueError):
+    msg = str(exc)
+    if "acik taslak" in msg:
+        raise HTTPException(409, msg)
+    raise HTTPException(400, msg)
+
+
+@router.get("/plan/revisions", response_model=list[PlanRevisionOut])
+def list_plan_revisions(
+    status: str | None = None,
+    db: Session = Depends(get_db),
+    _=Depends(require_user),
+):
+    return revisions_svc.list_revisions(db, status=status)
+
+
+@router.get("/plan/revisions/move-preview", response_model=JobMovePreviewOut)
+def preview_job_move(
+    order_id: int,
+    work_center_ids: list[int] | None = Query(None),
+    db: Session = Depends(get_db),
+    _=Depends(require_user),
+):
+    try:
+        return job_moves_svc.preview_move(db, order_id, work_center_ids)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/plan/revisions", response_model=PlanRevisionOut)
+def create_plan_revision(body: PlanRevisionCreate, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
+    try:
+        return revisions_svc.create_revision(db, body, user.username)
+    except ValueError as e:
+        _revision_error(e)
+
+
+@router.get("/plan/revisions/{revision_id}", response_model=PlanRevisionOut)
+def get_plan_revision(revision_id: int, db: Session = Depends(get_db), _=Depends(require_user)):
+    try:
+        return revisions_svc.to_out(revisions_svc._get(db, revision_id))
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.post("/plan/revisions/{revision_id}/changes", response_model=PlanRevisionOut)
+def add_plan_revision_change(
+    revision_id: int,
+    body: PlanRevisionChangeIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_poweruser),
+):
+    try:
+        return revisions_svc.add_change(db, revision_id, body, user.username)
+    except ValueError as e:
+        _revision_error(e)
+
+
+@router.delete("/plan/revisions/{revision_id}/changes/{change_id}", response_model=PlanRevisionOut)
+def delete_plan_revision_change(
+    revision_id: int,
+    change_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_poweruser),
+):
+    try:
+        return revisions_svc.delete_change(db, revision_id, change_id, user.username)
+    except ValueError as e:
+        _revision_error(e)
+
+
+@router.post("/plan/revisions/{revision_id}/calculate", response_model=PlanRevisionOut)
+def calculate_plan_revision(revision_id: int, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
+    try:
+        return revisions_svc.calculate(db, revision_id, user.username)
+    except ValueError as e:
+        _revision_error(e)
+
+
+@router.post("/plan/revisions/{revision_id}/approve", response_model=PlanRevisionOut)
+def approve_plan_revision(revision_id: int, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
+    try:
+        return revisions_svc.approve_and_apply(db, revision_id, user.username)
+    except ValueError as e:
+        _revision_error(e)
+
+
+@router.post("/plan/revisions/{revision_id}/reject", response_model=PlanRevisionOut)
+def reject_plan_revision(
+    revision_id: int,
+    note: str = "",
+    db: Session = Depends(get_db),
+    user: User = Depends(require_poweruser),
+):
+    try:
+        return revisions_svc.reject(db, revision_id, user.username, note)
+    except ValueError as e:
+        _revision_error(e)
+
+
+@router.post("/plan/revisions/{revision_id}/cancel", response_model=PlanRevisionOut)
+def cancel_plan_revision(revision_id: int, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
+    try:
+        return revisions_svc.cancel(db, revision_id, user.username)
+    except ValueError as e:
+        _revision_error(e)
 
 
 @router.post("/plan/manual", response_model=PlanLineOut)

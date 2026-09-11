@@ -1,6 +1,11 @@
 # Aktif Bağlam
 
 ## Şu Anki Odak
+2026-09-10: İş taşıma revizyonu uygulamaya alındı. Kullanıcı otomatik planı çalıştırıp kapasite yerleşimini yaptıktan sonra farklı senaryolarla algoritmayı doğrulayacak.
+
+Hüküm: hedef haftada yer varsa iş öncelikli yerleşir; kaydırılacak olan yalnızca o işin tükettiği iş merkezlerinde, o haftadan sonra çakışan işlerdir. Tüm kapasitenin dolu olduğu varsayımıyla tüm işleri ötelemek yok.
+
+## Önceki odak
 v0.5 (2026-09-07): kullanıcının 4 maddelik isteği tamamlandı — (1) Planlama yük tablosunda hafta numarası (H37 · 07.09) gösterimi; (2) **haftalık iş gücü** (İM × hafta istisnaları: kişi / verimli saat / gün — `WorkCenterWeek`), İş Merkezleri sayfasında "Haftalık" paneli + Planlama'da "Haftalık iş gücü" sekmesi; (3) **Senaryo Matrisi** sayfası (`/scenarios`): ürün grubu akış şeması üzerinde operasyon geçiş kuralları (önceki bitince / N çevrim sonra iç içe / + bekleme dk), grup geneli veya stok koduna özel; terminleme ve otomatik plan kuralları kullanır; (4) **Stok & Rezervasyon** sayfası (`/stock`): depo girişi → serbest stok → manuel/otomatik (termin sırası) rezervasyon → sevk (stoktan düşer, sipariş tamamen sevk edilince kapanır).
 Tarayıcıda uçtan uca doğrulandı (H38 istisnası → yük tablosunda 57/200; SIVAMA→FORMA 5 çevrim kuralı → terminlemede iç içe başlangıç; 60 adet giriş → 20 manuel + 40 otomatik → sevk). Test verileri geri alındı; **GN grubu için SIVAMA→FORMA ve FORMA→ETEK KESME "5 çevrim sonra" kuralları kullanıcının senaryosu olduğu için bırakıldı.**
 Önceki: v0.4 makineler/kapasite kaynağı; v0.3 ciro + planlama modları. Kullanıcı kendi verisiyle (PRESHANE 3, 6005510, a–e siparişleri) test ediyor. Sıradaki adım: kullanıcının yeni geri bildirimleri.

@@ -309,7 +309,7 @@ function WcDetail({ wc, cap, week, tab, setTab, canEdit, onEdit, onDelete, onTog
       </div>
       <div className="tabs" style={{ margin: "0 0 10px" }}>
         <button type="button" className={`tab ${tab === "shifts" ? "active" : ""}`} onClick={() => setTab("shifts")}>Vardiyalar ({wc.shifts.length})</button>
-        <button type="button" className={`tab ${tab === "machines" ? "active" : ""}`} onClick={() => setTab("machines")}>Makineler ({wc.machines.length})</button>
+        <button type="button" className={`tab ${tab === "machines" ? "active" : ""}`} onClick={() => setTab("machines")}>İstasyonlar ({wc.machines.length})</button>
         <button type="button" className={`tab ${tab === "weeks" ? "active" : ""}`} onClick={() => setTab("weeks")}>Haftalık iş gücü</button>
       </div>
       {tab === "shifts" && <Shifts wc={wc} canEdit={canEdit} onChanged={onChanged} />}
@@ -339,7 +339,7 @@ function Machines({ wc, canEdit, onChanged }: { wc: WorkCenter; canEdit: boolean
     }
   };
   const remove = async (m: Machine) => {
-    if (!confirm(`${m.code} makinesi silinsin mi?`)) return;
+    if (!confirm(`${m.code} istasyonu silinsin mi?`)) return;
     setErr("");
     try {
       await api.del(`/api/machines/${m.id}`);
@@ -364,11 +364,11 @@ function Machines({ wc, canEdit, onChanged }: { wc: WorkCenter; canEdit: boolean
                 <td>{canEdit && (<><button className="secondary small" onClick={() => setDraft(m)}>Düzenle</button>{" "}<button className="danger small" onClick={() => remove(m)}>Sil</button></>)}</td>
               </tr>
             ))}
-            {wc.machines.length === 0 && <tr><td colSpan={6} className="muted">Makine tanımı yok.</td></tr>}
+            {wc.machines.length === 0 && <tr><td colSpan={6} className="muted">İstasyon tanımı yok.</td></tr>}
           </tbody>
         </table>
       </div>
-      {canEdit && !draft && <button className="secondary small" style={{ marginTop: 6 }} onClick={() => setDraft({ ...emptyMachine })}>+ Makine ekle</button>}
+      {canEdit && !draft && <button className="secondary small" style={{ marginTop: 6 }} onClick={() => setDraft({ ...emptyMachine })}>+ İstasyon ekle</button>}
       {draft && (
         <div className="row" style={{ marginTop: 8 }}>
           <label>Kod<input value={draft.code} placeholder={`${wc.code}-01`} onChange={(e) => setDraft({ ...draft, code: e.target.value })} /></label>

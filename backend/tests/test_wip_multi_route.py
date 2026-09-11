@@ -5,7 +5,7 @@ from datetime import date
 from tests.test_capacity_flow import _upload
 
 WEEK = date(2026, 9, 7)
-WIP = "5005510-01"
+WIP = "5995510-01"
 
 
 def _setup_multi_route(client, auth):
@@ -22,12 +22,12 @@ def _setup_multi_route(client, auth):
         "items",
         ["Stok Kodu", "Stok Adı", "Ürün Grubu"],
         [
-            ["6005510", "Urun A", "GN"],
-            ["6005575", "Urun B", "GN"],
-            ["6005984", "Urun C", "GN"],
+            ["6995510", "Urun A", "GN"],
+            ["6995575", "Urun B", "GN"],
+            ["6995984", "Urun C", "GN"],
         ],
     )
-    for code in ("6005510", "6005575", "6005984"):
+    for code in ("6995510", "6995575", "6995984"):
         _upload(
             client,
             auth,
@@ -45,9 +45,9 @@ def test_production_import_multi_route_wip_fifo(client, auth):
         "orders",
         ["Sipariş No", "Termin", "Stok Kodu", "Miktar"],
         [
-            ["S-LATE", "2026-12-31", "6005984", 50],
-            ["S-MID", "2026-10-15", "6005575", 40],
-            ["S-EARLY", "2026-09-15", "6005510", 30],
+            ["S-LATE", "2026-12-31", "6995984", 50],
+            ["S-MID", "2026-10-15", "6995575", 40],
+            ["S-EARLY", "2026-09-15", "6995510", 30],
         ],
     )
     cols = [
@@ -77,7 +77,7 @@ def test_production_import_excel_serial_date(client, auth):
         auth,
         "orders",
         ["Sipariş No", "Termin", "Stok Kodu", "Miktar"],
-        [["S-1", "2026-12-01", "6005510", 100]],
+        [["S-1", "2026-12-01", "6995510", 100]],
     )
     cols = ["Tarih", "Yarımamül Kodu", "Miktar", "Sipariş No (opsiyonel)"]
     # 46273 = 2026-09-08 (Excel serial)
@@ -97,7 +97,7 @@ def test_production_import_multi_route_with_item_hint(client, auth):
         auth,
         "orders",
         ["Sipariş No", "Termin", "Stok Kodu", "Miktar"],
-        [["S-HINT", "2026-12-01", "6005575", 100]],
+        [["S-HINT", "2026-12-01", "6995575", 100]],
     )
     cols = [
         "Tarih",
@@ -111,7 +111,7 @@ def test_production_import_multi_route_with_item_hint(client, auth):
         auth,
         "production",
         cols,
-        [[WEEK.isoformat(), WIP, 15, "6005575", "S-HINT"]],
+        [[WEEK.isoformat(), WIP, 15, "6995575", "S-HINT"]],
     )
     assert not r["errors"], r["errors"]
     assert r["inserted"] == 1

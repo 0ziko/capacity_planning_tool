@@ -6,6 +6,7 @@ from app.models.master import (  # noqa: F401
     Machine,
     OpTransitionRule,
     RoutingOperation,
+    RoutingOperationStation,
     WorkCenter,
     WorkCenterShift,
     WorkCenterWeek,
@@ -13,10 +14,15 @@ from app.models.master import (  # noqa: F401
     norm_wip,
 )
 from app.models.planning import (  # noqa: F401
+    DailyDataAck,
     Downtime,
     ImportLog,
     Order,
     PlanLine,
+    PlanRevision,
+    PlanRevisionChange,
+    PlanRevisionEvent,
+    PlanRevisionSnapshot,
     ProductionActual,
     ProductionBatch,
     ProductionBatchOrder,

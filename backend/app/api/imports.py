@@ -87,7 +87,7 @@ async def upload(
     db: Session = Depends(get_db),
     user: User = Depends(require_poweruser),
 ):
-    if kind not in excel.TEMPLATES:
+    if kind not in excel.TEMPLATES and kind not in excel.RAW_IMPORTERS:
         raise HTTPException(404, "Bilinmeyen import turu")
     if not (file.filename or "").lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(400, "Yalnizca .xlsx dosyalari kabul edilir")

@@ -140,9 +140,26 @@ export interface WorkCenter {
 }
 export interface Employee { id: number; code: string; name: string; work_center_id: number | null; machine_id: number | null; is_active: boolean; machine_code?: string }
 export interface Item { id: number; code: string; name: string; main_group: string; sub_group: string; product_group: string; unit: string }
-export interface ItemDetail extends Item { bom_lines: { id: number; component_code: string; component_name: string; quantity: number; unit: string }[]; operations: { id: number; seq: number; operation_name: string; work_center_id: number; cycle_time_sec: number; setup_time_min: number; semi_finished_code: string }[] }
-export interface Order { id: number; order_no: string; position_no: string; customer: string; due_date: string; revised_due_date: string | null; effective_due_date: string; market: string; item_id: number; item_code: string; item_name: string; quantity: number; unit_price: number; revenue: number; status: string; merged_into_id: number | null; note: string; plan_status: string; reservation_status: string; reserved_qty: number }
-export interface OrderIn { order_no: string; position_no: string; customer: string; due_date: string; revised_due_date?: string | null; market?: string; item_code: string; quantity: number; unit_price: number; note: string }
+export interface BomLineOut {
+  id: number;
+  component_code: string;
+  component_name: string;
+  quantity: number;
+  unit: string;
+  source_wip?: string;
+  branch_listing_sira?: number;
+  recipe_seq?: number;
+}
+export interface ItemDetail extends Item {
+  bom_lines: BomLineOut[];
+  operations: {
+    id: number; seq: number; operation_name: string; work_center_id: number; cycle_time_sec: number; setup_time_min: number;
+    semi_finished_code: string; wip_code?: string; primary_machine_code?: string; stations?: { machine_code: string; machine_name?: string; is_primary: boolean }[];
+  }[];
+  child_wips?: { code: string; name: string; operation_count: number }[];
+}
+export interface Order { id: number; order_no: string; position_no: string; customer: string; order_date: string | null; due_date: string; revised_due_date: string | null; effective_due_date: string; planned_end: string | null; market: string; item_id: number; item_code: string; item_name: string; quantity: number; unit_price: number; revenue: number; status: string; merged_into_id: number | null; note: string; plan_status: string; reservation_status: string; reserved_qty: number }
+export interface OrderIn { order_no: string; position_no: string; customer: string; order_date?: string | null; due_date: string; revised_due_date?: string | null; market?: string; item_code: string; quantity: number; unit_price: number; note: string }
 export interface OrderAnalysisRow { customer: string; market: string; due_date: string; order_count: number; revenue: number }
 export interface OrderAnalysisParetoRow { customer: string; revenue: number; pct: number; cum_pct: number; order_count: number }
 export interface OrderAnalysis { rows: OrderAnalysisRow[]; total_revenue: number; domestic_revenue: number; export_revenue: number; by_customer: { customer: string; domestic: number; export: number; total: number }[]; pareto: OrderAnalysisParetoRow[]; period: string | null; due_from: string | null; due_to: string | null }
@@ -157,7 +174,7 @@ export interface AutoPlanRequest { start_week: string; weeks: number; work_cente
 export interface PreflightNoRouting { item_code: string; item_name: string; order_count: number; order_nos: string[] }
 export interface PreflightNoCapacity { work_center_id: number; work_center_code: string; work_center_name: string; needed_hours: number; capacity_hours: number; headcount: number; detail: string }
 export interface PreflightWipIssue { kind: string; item_code: string; operation_seq: number | null; operation_name: string; wip_code: string; detail: string }
-export interface DataFreshnessCheckpoint { key: string; label: string; import_kind: string; status: "ok" | "stale" | "missing"; last_import_at: string | null; last_import_by: string; last_data_date: string | null; detail: string }
+export interface DataFreshnessCheckpoint { key: string; label: string; import_kind: string; status: "ok" | "stale" | "missing"; update_source: "import" | "manual_ack" | null; last_import_at: string | null; last_import_by: string; last_data_date: string | null; confirmed_no_change_today: boolean; confirmed_no_change_at: string | null; confirmed_no_change_by: string; can_confirm_no_change: boolean; detail: string }
 export interface PlanPreflight { can_plan: boolean; order_count: number; no_routing: PreflightNoRouting[]; no_capacity: PreflightNoCapacity[]; daily_data: DataFreshnessCheckpoint[]; today: string; needs_capacity_ack: boolean; needs_daily_data_ack: boolean }
 export interface DataFreshness { today: string; needs_attention: boolean; open_order_count: number; checkpoints: DataFreshnessCheckpoint[] }
 export interface PeriodRevenue { period: string; completed_revenue: number; completed_orders: number; earned_revenue: number; cumulative_completed: number; cumulative_earned: number }
@@ -198,7 +215,89 @@ export interface GanttData {
   work_center_id: number; work_center_code: string; range_start: string; range_end: string; as_of: string;
   timeline_days: string[]; bars: GanttBar[];
 }
-export interface PlanLine { id: number; order_id: number; order_no: string; position_no: string; production_batch_id: number | null; batch_no: string; batch_order_nos: string[]; customer: string; due_date: string; item_code: string; operation_id: number; operation_seq: number; work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; planned_qty: number; mode: string; strategy: string }
+export interface PlanLine { id: number; order_id: number; order_no: string; position_no: string; production_batch_id: number | null; batch_no: string; batch_order_nos: string[]; customer: string; due_date: string; item_code: string; operation_id: number; operation_seq: number; work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; planned_qty: number; mode: string; strategy: string; revision_id?: number | null }
+
+export const REVISION_REASONS: { id: string; label: string }[] = [
+  { id: "material_issue", label: "Hammadde yok / eksik / hatalı / hurda" },
+  { id: "machine_down", label: "Makine arızası" },
+  { id: "absenteeism", label: "Devamsızlık" },
+  { id: "overtime_labor", label: "İş gücü artışı / fazla mesai" },
+  { id: "vip_pull_in", label: "Hatırlı müşteri — öne çek" },
+  { id: "customer_postpone", label: "Müşteri kaynaklı öteleme" },
+  { id: "other", label: "Diğer" },
+];
+
+export interface PlanRevisionKpis {
+  planned_hours: number;
+  line_count: number;
+  late: number;
+  on_time: number;
+  unplanned: number;
+  partial: number;
+}
+export interface PlanRevisionChange {
+  id: number;
+  entity_type: string;
+  entity_id: number;
+  extra_key: string;
+  field: string;
+  old_value: string;
+  new_value: string;
+}
+export interface PlanRevisionEvent {
+  id: number;
+  action: string;
+  username: string;
+  detail: string;
+  created_at: string;
+}
+export interface PlanRevision {
+  id: number;
+  revision_no: string;
+  status: string;
+  reason_codes: string[];
+  note: string;
+  start_week: string;
+  weeks: number;
+  mode: string;
+  work_center_ids: number[];
+  replace_manual: boolean;
+  created_by: string;
+  created_at: string;
+  calculated_at: string | null;
+  approved_by: string;
+  approved_at: string | null;
+  applied_at: string | null;
+  rejected_by: string;
+  reject_note: string;
+  changes: PlanRevisionChange[];
+  events: PlanRevisionEvent[];
+  compare: { baseline: PlanRevisionKpis; proposed: PlanRevisionKpis; schedule_rows: Record<string, unknown>[]; bumped_orders?: string[]; insert_notes?: string[]; unplanned?: { order_no?: string; work_center_code?: string; hours?: number }[] } | null;
+  apply_message: string;
+}
+export interface JobMoveOp {
+  operation_id: number;
+  operation_seq: number;
+  operation_name: string;
+  work_center_id: number;
+  work_center_code: string;
+  semi_finished_code: string;
+  produced_qty: number;
+  remaining_qty: number;
+  locked: boolean;
+  status: "completed" | "current" | "remaining" | string;
+}
+export interface JobMovePreview {
+  order_id: number;
+  order_no: string;
+  item_code: string;
+  quantity: number;
+  movable_qty: number;
+  current_start: string | null;
+  status: string;
+  ops: JobMoveOp[];
+  consumed_work_centers: string[];
+}
 export interface LoadDetailRow { plan_line_id: number; item_code: string; item_name: string; semi_finished_code: string; operation_name: string; order_no: string; position_no: string; customer: string; batch_no: string; batch_order_nos: string[]; operation_seq: number; planned_hours: number; planned_qty: number; planned_start: string | null; planned_end: string | null; mode: string }
 export interface LoadDetailParetoRow { item_code: string; hours: number; pct: number; cum_pct: number }
 export interface LoadDetail { work_center_id: number; work_center_code: string; week_start: string; total_hours: number; total_qty: number; rows: LoadDetailRow[]; pareto: LoadDetailParetoRow[] }
@@ -236,7 +335,7 @@ export interface Reservation { id: number; item_id: number; item_code: string; i
 export interface Shipment { id: number; item_id: number; item_code: string; order_id: number; order_no: string; position_no: string; customer: string; ship_date: string; quantity: number; note: string; created_by: string }
 export interface AutoReserveResult { created: number; reserved_qty: number; items: number; message: string }
 export interface ImportResult { kind: string; inserted: number; updated: number; removed?: number; errors: string[] }
-export interface OrderImportRowPreview { order_id: number | null; order_no: string; position_no: string; item_code: string; customer: string; due_date: string | null; revised_due_date?: string | null; market?: string; quantity: number | null; unit_price: number | null; excel_row: number | null }
+export interface OrderImportRowPreview { order_id: number | null; order_no: string; position_no: string; item_code: string; customer: string; order_date?: string | null; due_date: string | null; revised_due_date?: string | null; market?: string; quantity: number | null; unit_price: number | null; excel_row: number | null }
 export interface OrderImportChangePreview extends OrderImportRowPreview { changes: string[] }
 export interface OrderImportPreview { parse_errors: string[]; error_rows: OrderImportErrorRow[]; missing_item_codes: string[]; only_in_system: OrderImportRowPreview[]; only_in_file: OrderImportRowPreview[]; updated: OrderImportChangePreview[]; unchanged_count: number; file_row_count: number; system_open_count: number }
 export interface OrderImportErrorRow extends OrderImportRowPreview { error: string }

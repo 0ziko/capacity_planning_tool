@@ -111,6 +111,15 @@ class BomLineOut(ORM):
     component_name: str
     quantity: float
     unit: str
+    source_wip: str = ""
+    branch_listing_sira: int = 0
+    recipe_seq: int = 0
+
+
+class OperationStationOut(ORM):
+    machine_code: str
+    machine_name: str = ""
+    is_primary: bool = False
 
 
 class OperationOut(ORM):
@@ -121,6 +130,15 @@ class OperationOut(ORM):
     cycle_time_sec: float
     setup_time_min: float
     semi_finished_code: str = ""
+    wip_code: str = ""
+    primary_machine_code: str = ""
+    stations: list[OperationStationOut] = []
+
+
+class ChildWipOut(BaseModel):
+    code: str
+    name: str
+    operation_count: int = 0
 
 
 class ItemOut(ORM):
@@ -136,6 +154,7 @@ class ItemOut(ORM):
 class ItemDetail(ItemOut):
     bom_lines: list[BomLineOut] = []
     operations: list[OperationOut] = []
+    child_wips: list[ChildWipOut] = []
 
 
 # ---- Orders ----
@@ -143,6 +162,7 @@ class OrderIn(BaseModel):
     order_no: str = Field(min_length=1, max_length=64)
     position_no: str = ""
     customer: str = ""
+    order_date: date | None = None
     due_date: date
     revised_due_date: date | None = None
     market: str = "domestic"  # domestic / export
@@ -157,9 +177,11 @@ class OrderOut(ORM):
     order_no: str
     position_no: str = ""
     customer: str
+    order_date: date | None = None
     due_date: date
     revised_due_date: date | None = None
     effective_due_date: date | None = None
+    planned_end: date | None = None  # kapasite planindan son operasyon bitisi
     market: str = "domestic"
     item_id: int
     item_code: str = ""
@@ -476,9 +498,14 @@ class DataFreshnessCheckpoint(BaseModel):
     label: str
     import_kind: str
     status: str  # ok | stale | missing
+    update_source: str | None = None  # import | manual_ack
     last_import_at: str | None = None
     last_import_by: str = ""
     last_data_date: str | None = None
+    confirmed_no_change_today: bool = False
+    confirmed_no_change_at: str | None = None
+    confirmed_no_change_by: str = ""
+    can_confirm_no_change: bool = False
     detail: str
 
 
@@ -595,8 +622,10 @@ class PlanLineOut(ORM):
     week_start: date
     planned_hours: float
     planned_qty: float
+    semi_finished_code: str = ""
     mode: str
     strategy: str = ""
+    revision_id: int | None = None
 
 
 class WeekLoad(BaseModel):
@@ -794,6 +823,7 @@ class OrderImportRowPreview(BaseModel):
     position_no: str = ""
     item_code: str
     customer: str = ""
+    order_date: date | None = None
     due_date: date | None = None
     revised_due_date: date | None = None
     market: str = "domestic"
@@ -1034,3 +1064,119 @@ class AutoReserveResult(BaseModel):
     reserved_qty: float
     items: int
     message: str
+
+
+# ---- Plan revizyonu ----
+REVISION_REASON_CODES = (
+    "material_issue",
+    "machine_down",
+    "absenteeism",
+    "overtime_labor",
+    "vip_pull_in",
+    "customer_postpone",
+    "other",
+)
+
+
+class PlanRevisionCreate(BaseModel):
+    reason_codes: list[str]
+    note: str = ""
+    start_week: date
+    weeks: int = 8
+    mode: PlanMode = "due_date"
+    work_center_ids: list[int] | None = None
+    replace_manual: bool = False
+
+
+class JobMoveOpOut(BaseModel):
+    operation_id: int
+    operation_seq: int
+    operation_name: str
+    work_center_id: int
+    work_center_code: str
+    semi_finished_code: str = ""
+    produced_qty: float
+    remaining_qty: float
+    locked: bool
+    status: str  # completed | current | remaining
+
+
+class JobMovePreviewOut(BaseModel):
+    order_id: int
+    order_no: str
+    item_code: str
+    quantity: float
+    movable_qty: float
+    current_start: date | None = None
+    status: str
+    ops: list[JobMoveOpOut] = []
+    consumed_work_centers: list[str] = []
+
+
+class PlanRevisionChangeIn(BaseModel):
+    entity_type: str  # order | wc_week
+    entity_id: int = 0
+    extra_key: str = ""
+    field: str
+    new_value: str = ""
+
+
+class PlanRevisionChangeOut(BaseModel):
+    id: int
+    entity_type: str
+    entity_id: int
+    extra_key: str
+    field: str
+    old_value: str
+    new_value: str
+
+
+class PlanRevisionEventOut(BaseModel):
+    id: int
+    action: str
+    username: str
+    detail: str
+    created_at: datetime
+
+
+class PlanRevisionKpis(BaseModel):
+    planned_hours: float = 0
+    line_count: int = 0
+    late: int = 0
+    on_time: int = 0
+    unplanned: int = 0
+    partial: int = 0
+
+
+class PlanRevisionCompareOut(BaseModel):
+    baseline: PlanRevisionKpis
+    proposed: PlanRevisionKpis
+    schedule_rows: list[dict] = []
+    bumped_orders: list[str] = []
+    insert_notes: list[str] = []
+    unplanned: list[dict] = []
+
+
+class PlanRevisionOut(BaseModel):
+    id: int
+    revision_no: str
+    status: str
+    reason_codes: list[str]
+    note: str
+    start_week: date
+    weeks: int
+    mode: str
+    work_center_ids: list[int]
+    replace_manual: bool
+    created_by: str
+    created_at: datetime
+    calculated_at: datetime | None = None
+    approved_by: str = ""
+    approved_at: datetime | None = None
+    applied_at: datetime | None = None
+    rejected_by: str = ""
+    reject_note: str = ""
+    changes: list[PlanRevisionChangeOut] = []
+    events: list[PlanRevisionEventOut] = []
+    compare: PlanRevisionCompareOut | None = None
+    apply_message: str = ""

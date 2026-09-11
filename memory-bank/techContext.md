@@ -2,7 +2,7 @@
 
 ## Karar Verilen Yığın (2026-09-07, kullanıcı onayı)
 - **Backend:** Python 3.12 · FastAPI · SQLAlchemy 2.0 · Pydantic v2 · openpyxl · PyJWT · bcrypt · uvicorn
-- **Veri tabanı:** **PostgreSQL** (hedef, `psycopg` sürücüsü). Yerel geliştirmede `DATABASE_URL` verilmezse **SQLite** (`kapasite_dev.db`) ile çalışır; kod dialect-bağımsız (yalnızca ORM).
+- **Veri tabanı:** **PostgreSQL** (`psycopg`, portable kurulum `backend/.postgres/`). Varsayılan `DATABASE_URL`: `postgresql+psycopg://kapasite:kapasite@localhost:5432/kapasite`. Testler izole SQLite kullanır (`test_kapasite.db`).
 - **Frontend:** **React 18 + TypeScript + Vite** SPA, `react-router-dom`. UI kütüphanesi yok; `styles.css` ile sade tablo odaklı arayüz. Türkçe.
 - **Dağıtım:** Önce localhost (kullanıcı PC), sonra şirket içi sunucuya taşınacak.
 - **Şema yönetimi:** Şimdilik `Base.metadata.create_all` (ilk açılış). Şema değişikliği gerekirse Alembic eklenecek.
@@ -17,12 +17,14 @@
 - Python 3.12.10 → `%LOCALAPPDATA%\Programs\Python\Python312\python.exe` (winget, user scope)
 - Node v24 LTS (portable) → `%LOCALAPPDATA%\Programs\nodejs` (kullanıcı PATH'ine eklendi; yeni terminallerde geçerli)
 - Git 2.55 → `%LOCALAPPDATA%\Programs\Git\cmd` (winget, user scope)
-- PostgreSQL **kurulu değil** (kurulum admin gerektirir). Yerel geliştirme SQLite ile yapılıyor.
+- PostgreSQL **portable** kurulu → `backend/.postgres/` (admin gerektirmez). SQLite yedek: `backend/backup/kapasite_dev.db.pre-postgres`.
 - Proje kökü: `C:\Users\ozan.deniz\Desktop\BilgeInox-KapasitePlanlama\`
 
 ## Çalıştırma
 ```powershell
-cd backend;  .\run_dev.ps1            # venv + pip + .env + uvicorn :8000  (API dokümanı /docs)
+cd backend;  .\run_dev.ps1            # PostgreSQL otomatik baslar + uvicorn :8000
+cd backend;  .\scripts\finish_postgres_migration.ps1  # gecis dogrulama (bir kez)
+cd backend;  .\scripts\start_postgres.ps1 / stop_postgres.ps1
 cd frontend; npm install; npm run dev # :5173, /api -> :8000 proxy (vite.config.ts)
 # Backend'i arka planda, log dosyasina yazarak baslatmak icin (tercih edilen):
 cd backend; .\start_backend.ps1        # durdurmak: .\start_backend.ps1 -Stop ; loglar: backend\logs\backend.err.log

@@ -141,13 +141,21 @@ def _wip_between(items: list[Item], from_name: str, to_name: str, item: Item | N
     return fw, tw
 
 
+def _group_key(it: Item) -> str:
+    if it.main_group and it.sub_group:
+        return f"{it.main_group}|{it.sub_group}"
+    if it.main_group:
+        return it.main_group
+    return it.product_group or ""
+
+
 def groups(db: Session) -> list[dict]:
     items = db.query(Item).options(joinedload(Item.operations)).all()
     by_group: dict[str, list[Item]] = {}
     for it in items:
         if not it.operations:
             continue
-        by_group.setdefault(it.product_group or "", []).append(it)
+        by_group.setdefault(_group_key(it), []).append(it)
     rules = db.query(OpTransitionRule).all()
     rule_count: dict[str, int] = {}
     for r in rules:
@@ -302,3 +310,57 @@ def upsert_rule(
     r.to_wip_norm = tw
     db.flush()
     return r
+
+
+def generate_from_groups(db: Session, *, replace_group: bool = False) -> dict:
+    """Ana/alt grup dolu stoklar icin ardışık operasyon gecislerinde finish kurali uretir."""
+    items = (
+        db.query(Item)
+        .options(joinedload(Item.operations))
+        .filter(Item.main_group != "", Item.sub_group != "")
+        .all()
+    )
+    created = updated = skipped = 0
+    touched_groups: set[str] = set()
+    for it in items:
+        if len(it.operations) < 2:
+            skipped += 1
+            continue
+        gkey = _group_key(it)
+        touched_groups.add(gkey)
+        ops = sorted(it.operations, key=lambda o: o.seq)
+        for prev, nxt in zip(ops, ops[1:]):
+            try:
+                existing = db.query(OpTransitionRule).filter(
+                    OpTransitionRule.scope == "group",
+                    OpTransitionRule.product_group == gkey,
+                    OpTransitionRule.from_op_norm == norm_op(prev.operation_name),
+                    OpTransitionRule.to_op_norm == norm_op(nxt.operation_name),
+                    OpTransitionRule.item_id.is_(None),
+                ).first()
+                if existing:
+                    if replace_group:
+                        existing.rule = "finish"
+                        updated += 1
+                    else:
+                        skipped += 1
+                    continue
+                upsert_rule(
+                    db,
+                    scope="group",
+                    product_group=gkey,
+                    item_code=None,
+                    from_op=prev.operation_name,
+                    to_op=nxt.operation_name,
+                    rule="finish",
+                    lag_cycles=0,
+                    wait_minutes=0,
+                    note="Otomatik: ana/alt grup",
+                    from_wip_code=prev.semi_finished_code or "",
+                    to_wip_code=nxt.semi_finished_code or "",
+                )
+                created += 1
+            except ValueError:
+                skipped += 1
+    db.flush()
+    return {"created": created, "updated": updated, "skipped": skipped, "groups": sorted(touched_groups)}

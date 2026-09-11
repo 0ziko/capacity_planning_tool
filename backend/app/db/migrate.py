@@ -43,6 +43,58 @@ def ensure_columns(engine: Engine) -> list[str]:
     return added
 
 
+def widen_revision_change_values(engine: Engine) -> list[str]:
+    """job_move JSON icin old/new_value kolonlarini TEXT yapar."""
+    insp = inspect(engine)
+    actions: list[str] = []
+    if not insp.has_table("plan_revision_changes"):
+        return actions
+    dialect = engine.dialect.name
+    if dialect != "postgresql":
+        return actions
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE plan_revision_changes ALTER COLUMN new_value TYPE TEXT"))
+        conn.execute(text("ALTER TABLE plan_revision_changes ALTER COLUMN old_value TYPE TEXT"))
+        actions.append("plan_revision_changes old/new_value -> TEXT")
+    return actions
+
+
+def repair_bom_constraints(engine: Engine) -> list[str]:
+    """Eski uq_bom_item_component kisitini source_wip ile degistirir."""
+    insp = inspect(engine)
+    actions: list[str] = []
+    if not insp.has_table("bom_lines"):
+        return actions
+    cols = {c["name"] for c in insp.get_columns("bom_lines")}
+    with engine.begin() as conn:
+        if "source_wip" not in cols:
+            conn.execute(text("ALTER TABLE bom_lines ADD COLUMN source_wip VARCHAR(64) DEFAULT ''"))
+            actions.append("bom_lines.source_wip added")
+        dialect = engine.dialect.name
+        if dialect == "postgresql":
+            conn.execute(text("ALTER TABLE bom_lines DROP CONSTRAINT IF EXISTS uq_bom_item_component"))
+            exists = conn.execute(text(
+                "SELECT 1 FROM pg_constraint WHERE conname = 'uq_bom_item_component_wip'"
+            )).scalar()
+            if not exists:
+                conn.execute(text(
+                    "ALTER TABLE bom_lines ADD CONSTRAINT uq_bom_item_component_wip "
+                    "UNIQUE (item_id, component_code, source_wip)"
+                ))
+                actions.append("bom_lines constraint updated (pg)")
+        elif dialect == "sqlite":
+            # sqlite: recreate table if old unique exists without source_wip
+            try:
+                conn.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_bom_item_component_wip "
+                    "ON bom_lines (item_id, component_code, source_wip)"
+                ))
+                actions.append("bom_lines index uq_bom_item_component_wip (sqlite)")
+            except Exception:  # noqa: BLE001
+                pass
+    return actions
+
+
 # (tablo, kolon, referans tablo) — silinmis ana kayda isaret eden yetim satirlar.
 # SQLite'ta yabanci anahtar denetimi acilmadan once olusmus olabilirler; ekranlari bozar (500).
 _ORPHAN_CHECKS = [

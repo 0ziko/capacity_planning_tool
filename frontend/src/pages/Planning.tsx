@@ -13,6 +13,7 @@ import WcOrdersPanel from "./planning/WcOrdersPanel";
 import ProductionOutputPanel from "./planning/ProductionOutputPanel";
 import PlanPreflightModal from "./planning/PlanPreflightModal";
 import CoShipmentPanel, { defaultCoShipment } from "./planning/CoShipmentPanel";
+import RevisionsPanel from "./planning/RevisionsPanel";
 
 interface AutoResult {
   created: number;
@@ -24,12 +25,13 @@ interface AutoResult {
   co_shipment_exceptions?: CoShipmentException[];
 }
 
-type Tab = "load" | "labor" | "gantt" | "orders" | "wc" | "revenue" | "compare" | "progress" | "merge" | "leadtime" | "output";
+type Tab = "load" | "labor" | "gantt" | "orders" | "wc" | "revenue" | "compare" | "progress" | "merge" | "leadtime" | "output" | "revision";
 const TABS: { id: Tab; label: string; hint: string }[] = [
   { id: "load", label: "Haftalık yük & plan satırları", hint: "İş merkezi × hafta doluluk ve tüm plan satırları" },
   { id: "output", label: "Haftalık üretim planı", hint: "Seçilen hafta için iş merkezi bazlı üretim listesi (üretim ekibi çıktısı)" },
   { id: "gantt", label: "Gantt", hint: "İş merkezi bazında sipariş / yarımamül zaman çizelgesi" },
   { id: "labor", label: "Haftalık iş gücü", hint: "İş merkezi × hafta kişi / verimli saat / gün — haftaya özel değişiklikler" },
+  { id: "revision", label: "Plan revizyonu", hint: "Nedenli taslak, yeniden hesap, onayla ve devreye al" },
   { id: "orders", label: "Sipariş bitiş tarihleri", hint: "Plan sonucuna göre her siparişin tahmini üretim bitişi" },
   { id: "wc", label: "İş merkezi bazlı siparişler", hint: "Seçilen iş merkezine planlanmış siparişler" },
   { id: "revenue", label: "Ciro", hint: "Mevcut plana göre haftalık / aylık ciro" },
@@ -125,7 +127,8 @@ export default function Planning() {
                     <option value="revenue">💰 Maksimum ciro</option>
                   </select>
                 </label>
-                <button onClick={() => runAuto()} disabled={busy}>▶ Otomatik planla</button>
+                <button onClick={() => runAuto()} disabled={busy} title="Onay kaydı olmadan canlı plana yazar">▶ Otomatik planla (revizyonsuz)</button>
+                <button className="secondary" onClick={() => setTab("revision")}>Plan revizyonu</button>
                 <button className="secondary" onClick={() => setTab("compare")} title="İki modu kaydetmeden hesaplayıp karşılaştır">⚖ Karşılaştır</button>
                 <button className="danger" onClick={() => clearPlan("auto")}>Otomatik satırları sil</button>
                 <button className="danger" onClick={() => clearPlan()}>Tümünü sil</button>
@@ -206,6 +209,18 @@ export default function Planning() {
       </div>
 
       {tab === "labor" && <LaborPanel start={start} weeks={weeks} wcs={wcIds.length ? wcs.filter((w) => wcIds.includes(w.id)) : wcs.filter((w) => w.is_planned)} canEdit={can("poweruser")} onChanged={refresh} />}
+      {tab === "revision" && (
+        <RevisionsPanel
+          start={start}
+          weeks={weeks}
+          wcIds={wcIds}
+          mode={mode}
+          orders={openOrders.data ?? []}
+          wcs={wcIds.length ? wcs.filter((w) => wcIds.includes(w.id)) : wcs.filter((w) => w.is_planned)}
+          canEdit={can("poweruser")}
+          onApplied={refresh}
+        />
+      )}
       {tab === "gantt" && (
         <GanttPanel
           wcs={wcIds.length ? wcs.filter((w) => wcIds.includes(w.id)) : wcs.filter((w) => w.is_planned)}

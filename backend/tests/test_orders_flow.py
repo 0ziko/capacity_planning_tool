@@ -38,6 +38,24 @@ def test_single_order_crud(client, auth):
     assert client.get("/api/orders", headers=auth).json() == []
 
 
+def test_order_date_import_and_planned_end(client, auth):
+    """Siparis tarihi import ile gelir; planlanan teslim kapasite planindan listeye yansir."""
+    _setup(client, auth)
+    content = _xlsx(
+        ["Sipariş No", "Poz No", "Müşteri", "Sipariş Tarihi", "Termin", "Stok Kodu", "Miktar"],
+        [["S-DATE", "5", "Test", "2026-09-01", "2026-09-30", "MAM-1", 1000]],
+    )
+    r = client.post("/api/imports/orders", headers=auth, files={"file": ("orders.xlsx", content, "application/octet-stream")}).json()
+    assert r["inserted"] == 1 and r["errors"] == []
+    o = client.get("/api/orders", headers=auth, params={"position": "5"}).json()[0]
+    assert o["order_date"] == "2026-09-01"
+    assert o["planned_end"] is None
+
+    client.post("/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 6})
+    o2 = client.get("/api/orders", headers=auth, params={"position": "5"}).json()[0]
+    assert o2["planned_end"] is not None
+
+
 def test_schedule_progress_and_merge(client, auth):
     _setup(client, auth)
     for no, cust, due, qty in [("SP-1", "Musteri A", "2026-09-18", 1000), ("SP-2", "Musteri B", "2026-09-25", 500), ("SP-3", "Musteri C", "2026-10-02", 250)]:
@@ -226,9 +244,9 @@ def test_orders_import_preview_xlsx(client, auth):
     assert r.status_code == 200 and r.content[:2] == b"PK"
     wb = load_workbook(io.BytesIO(r.content), data_only=True)
     ws = wb["Düzenle ve yükle"]
-    assert ws.cell(2, 4).value == "2026-05-21"
-    assert ws.cell(3, 4).value == "2026-08-27"
-    assert "T" not in str(ws.cell(2, 4).value)
+    assert ws.cell(2, 5).value == "2026-05-21"
+    assert ws.cell(3, 5).value == "2026-08-27"
+    assert "T" not in str(ws.cell(2, 5).value)
 
     # onizleme raporunu tekrar yukle: duzenle sayfasi okunur
     r2 = client.post("/api/imports/orders/preview", headers=auth, files={"file": ("rapor.xlsx", r.content, "application/octet-stream")}).json()

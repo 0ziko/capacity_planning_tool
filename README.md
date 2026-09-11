@@ -11,7 +11,8 @@
 ```powershell
 # Backend (http://localhost:8000, API dokümanı /docs)
 cd backend
-.\run_dev.ps1          # venv kurar, bağımlılıkları yükler, .env oluşturur, uvicorn başlatır
+.\scripts\setup_postgres.ps1   # ilk kez: PostgreSQL + SQLite veri tasima + .env
+.\run_dev.ps1                  # venv kurar, uvicorn baslatir
 
 # Frontend (http://localhost:5173) — ayrı terminal
 cd frontend
@@ -20,7 +21,32 @@ npm run dev
 ```
 İlk giriş: `admin / admin123` (`.env` → `FIRST_ADMIN_*` ile değiştirin).
 
-PostgreSQL için `backend/.env` içinde `DATABASE_URL=postgresql+psycopg://kullanici:sifre@sunucu:5432/kapasite`.
+## PostgreSQL
+
+Uygulama PostgreSQL ile calisacak sekilde hazir (`psycopg` zaten requirements'ta). Yerel kurulum:
+
+**Portable (admin gerektirmez — önerilen):**
+```powershell
+cd backend
+.\scripts\install_portable_postgres.ps1
+.\run_dev.ps1
+```
+
+**Docker:**
+```powershell
+docker compose up -d
+cd backend
+.\scripts\setup_postgres.ps1   # portable'a yonlendirir; once start_postgres.ps1
+```
+Script mevcut `kapasite_dev.db` (SQLite) verisini PostgreSQL'e tasir ve `.env` icinde `DATABASE_URL` gunceller.
+
+Manuel veritabani olusturma (psql):
+```sql
+CREATE USER kapasite WITH PASSWORD 'kapasite';
+CREATE DATABASE kapasite OWNER kapasite;
+```
+
+Canli ortamda guclu sifre ve `SECRET_KEY` kullanin. SQLite yalnizca gecici/yedek gelistirme icin birakildi; testler otomatik SQLite kullanir.
 
 ## Test
 ```powershell

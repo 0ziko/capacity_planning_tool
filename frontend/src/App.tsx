@@ -1,4 +1,4 @@
-import { Navigate, NavLink, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./auth";
 import { setToken } from "./api";
 import Login from "./pages/Login";
@@ -16,6 +16,7 @@ import OwnerPanel from "./pages/OwnerPanel";
 import Scenarios from "./pages/Scenarios";
 import Stock from "./pages/Stock";
 import DataFreshnessBar from "./DataFreshnessBar";
+import SidebarNav from "./SidebarNav";
 
 export default function App() {
   const { user, loading, bootstrapError, logout, can } = useAuth();
@@ -45,19 +46,7 @@ export default function App() {
           Bilge İnox
           <small>İş Gücü Kapasite Planlama</small>
         </div>
-        <NavLink to="/">Özet</NavLink>
-        <NavLink to="/workcenters">İş Merkezleri</NavLink>
-        <NavLink to="/employees">Personel</NavLink>
-        <NavLink to="/items">Stok / BOM / Rota</NavLink>
-        <NavLink to="/orders">Siparişler & İhtiyaç</NavLink>
-        <NavLink to="/scenarios">Senaryo Matrisi</NavLink>
-        <NavLink to="/planning">Planlama</NavLink>
-        <NavLink to="/stock">Stok & Rezervasyon</NavLink>
-        <NavLink to="/progress">Günlük İlerleme</NavLink>
-        <NavLink to="/analysis">Duruş & Çevrim Süresi</NavLink>
-        <NavLink to="/imports">Excel Import / Yedek</NavLink>
-        {can("admin") && <NavLink to="/users">Kullanıcılar</NavLink>}
-        {can("owner") && <NavLink to="/owner">Owner Panel</NavLink>}
+        <SidebarNav canAdmin={can("admin")} canOwner={can("owner")} />
         <div className="spacer" />
         <div className="user">
           {user.full_name || user.username} · {user.role}

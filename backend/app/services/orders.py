@@ -79,9 +79,12 @@ def enrich_orders(db: Session, orders: list[Order]) -> list[OrderOut]:
             else:
                 row.plan_status = "closed"
         elif o.id in sched_map:
-            row.plan_status = sched_map[o.id].plan_status
+            s = sched_map[o.id]
+            row.plan_status = s.plan_status
+            row.planned_end = s.planned_end
         else:
             row.plan_status = "unplanned"
+            row.planned_end = None
         out.append(row)
     return out
 
@@ -289,6 +292,7 @@ def create_order(db: Session, data: OrderIn) -> Order:
         order_no=data.order_no.strip(),
         position_no=pos,
         customer=data.customer.strip(),
+        order_date=data.order_date,
         due_date=data.due_date,
         revised_due_date=data.revised_due_date,
         market=normalize_market(data.market),
@@ -312,6 +316,7 @@ def update_order(db: Session, o: Order, data: OrderIn) -> Order:
     o.order_no = data.order_no.strip()
     o.position_no = (data.position_no or "").strip()
     o.customer = data.customer.strip()
+    o.order_date = data.order_date
     o.due_date = data.due_date
     o.revised_due_date = data.revised_due_date
     o.market = normalize_market(data.market)

@@ -25,6 +25,8 @@ router = APIRouter(prefix="/api/owner", tags=["owner"])
 IMPORT_PURGE_MAP = {
     "workcenters": "workcenters_ds",
     "machines": "machines",
+    "istasyonlar": "machines",
+    "production_bom": "routing",
     "shifts": "shifts",
     "wc_weeks": "wc_weeks",
     "employees": "employees",

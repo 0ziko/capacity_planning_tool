@@ -20,3 +20,4 @@ class DraftLine:
     mode: str = "auto"
     production_batch_id: int | None = None
     label: str = ""
+    semi_finished_code: str = ""

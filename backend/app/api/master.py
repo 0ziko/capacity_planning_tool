@@ -8,12 +8,17 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.deps import require_poweruser, require_user
 from app.db.session import get_db
-from app.models import Downtime, Employee, Item, Machine, Order, PlanLine, ProductionActual, RoutingOperation, WorkCenter, WorkCenterShift, WorkCenterWeek
+from app.models import Downtime, Employee, Item, Machine, Order, PlanLine, ProductionActual, RoutingOperation, RoutingOperationStation, WorkCenter, WorkCenterShift, WorkCenterWeek
+from app.services.bom_tree import flatten_fg_operations, is_wip_asm_link, sort_bom_lines_for_display
+
 from app.schemas import (
+    ChildWipOut,
     EmployeeIn,
     EmployeeOut,
     ItemDetail,
     ItemOut,
+    OperationOut,
+    OperationStationOut,
     MachineIn,
     MachineOut,
     OrderIn,
@@ -341,12 +346,68 @@ def list_items(
     return query.order_by(Item.code).limit(limit).all()
 
 
+def _operation_out(op: RoutingOperation, seq: int, wip_code: str = "") -> OperationOut:
+    stations = [
+        OperationStationOut(
+            machine_code=s.machine.code if s.machine else "",
+            machine_name=s.machine.name if s.machine else "",
+            is_primary=s.is_primary,
+        )
+        for s in (op.alt_stations or [])
+    ]
+    primary_code = op.primary_machine.code if op.primary_machine else ""
+    return OperationOut(
+        id=op.id,
+        seq=seq,
+        operation_name=op.operation_name,
+        work_center_id=op.work_center_id,
+        cycle_time_sec=op.cycle_time_sec,
+        setup_time_min=op.setup_time_min,
+        semi_finished_code=op.semi_finished_code or "",
+        wip_code=wip_code,
+        primary_machine_code=primary_code,
+        stations=stations,
+    )
+
+
+def _item_detail_out(db: Session, it: Item) -> ItemDetail:
+    flat = flatten_fg_operations(db, it)
+    ops_out = [_operation_out(f.operation, f.display_seq, f.wip_code) for f in flat]
+
+    child_wips: list[ChildWipOut] = []
+    seen: set[str] = set()
+    for bl in it.bom_lines:
+        code = (bl.component_code or "").strip()
+        src = (bl.source_wip or "").strip()
+        if not is_wip_asm_link(code, src, getattr(bl, "recipe_seq", 0)) or code in seen:
+            continue
+        seen.add(code)
+        child = db.query(Item).options(joinedload(Item.operations)).filter(Item.code.ilike(code)).first()
+        child_wips.append(
+            ChildWipOut(code=code, name=child.name if child else bl.component_name, operation_count=len(child.operations) if child else 0)
+        )
+    base = ItemDetail.model_validate(it)
+    base.bom_lines = sort_bom_lines_for_display(base.bom_lines)
+    base.operations = ops_out
+    base.child_wips = child_wips
+    return base
+
+
 @router.get("/items/{item_id}", response_model=ItemDetail)
 def get_item(item_id: int, db: Session = Depends(get_db), _=Depends(require_user)):
-    it = db.query(Item).options(joinedload(Item.bom_lines), joinedload(Item.operations)).filter(Item.id == item_id).first()
+    it = (
+        db.query(Item)
+        .options(
+            joinedload(Item.bom_lines),
+            joinedload(Item.operations).joinedload(RoutingOperation.primary_machine),
+            joinedload(Item.operations).joinedload(RoutingOperation.alt_stations).joinedload(RoutingOperationStation.machine),
+        )
+        .filter(Item.id == item_id)
+        .first()
+    )
     if not it:
         raise HTTPException(404, "Stok kodu bulunamadi")
-    return it
+    return _item_detail_out(db, it)
 
 
 # ---- Orders ----

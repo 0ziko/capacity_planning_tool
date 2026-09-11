@@ -30,6 +30,7 @@ from app.schemas import (
 )
 from app.services import capacity as cap
 from app.services import scenarios as scen
+from app.services.bom_tree import explode_order, has_wip_structure
 from app.services.gantt import actual_hours_by_week
 from app.services.plan_draft import DraftLine
 
@@ -77,7 +78,7 @@ def _open_orders_with_ops(db: Session) -> list[Order]:
     in_batch = pbatches.batched_order_ids(db)
     rows = (
         db.query(Order)
-        .options(joinedload(Order.item).joinedload(Item.operations))
+        .options(joinedload(Order.item).joinedload(Item.operations), joinedload(Order.item).joinedload(Item.bom_lines))
         .filter(Order.status == "open")
         .order_by(func.coalesce(Order.revised_due_date, Order.due_date), Order.order_no, Order.id)
         .all()
@@ -94,31 +95,41 @@ def _place_quantity(
     weeks: list[date],
     remaining: dict[tuple[int, date], float],
     rules: scen.RuleLookup | None = None,
-) -> tuple[list[DraftLine], list[dict]]:
-    """Siparis veya uretim partisi miktari icin operasyonlari yerlestirir."""
+    *,
+    item: Item | None = None,
+    semi_finished_code: str = "",
+    min_start_idx: int = 0,
+    ops: list[RoutingOperation] | None = None,
+    qty_by_op: dict[int, float] | None = None,
+) -> tuple[list[DraftLine], list[dict], int]:
+    """Siparis veya uretim partisi miktari icin operasyonlari yerlestirir. Son hafta indeksini dondurur."""
+    route_item = item or anchor.item
+    route_ops = list(ops) if ops is not None else list(route_item.operations or [])
     lines: list[DraftLine] = []
     unplanned: list[dict] = []
-    prev_first_idx = 0
-    prev_last_idx = 0
+    prev_first_idx = min_start_idx
+    prev_last_idx = min_start_idx
     prev_op: RoutingOperation | None = None
-    for op in anchor.item.operations:
+    last_idx = min_start_idx
+    for op in route_ops:
         if op.work_center_id not in wc_by_id:
             continue
-        total_hours = op.hours_for(quantity)
+        op_qty = qty_by_op.get(op.id, quantity) if qty_by_op is not None else quantity
+        total_hours = op.hours_for(op_qty)
         hours_left = total_hours
         if prev_op is None:
-            idx = 0
+            idx = min_start_idx
         else:
-            rule = rules.get(anchor.item, prev_op, op) if rules else scen.Rule()
+            rule = rules.get(route_item, prev_op, op) if rules else scen.Rule()
             idx = prev_first_idx if rule.rule == "cycles" else prev_last_idx
         first_idx = None
-        last_idx = None
+        op_last_idx = None
         while hours_left > 1e-6 and idx < len(weeks):
             wk = weeks[idx]
             avail = remaining[(op.work_center_id, wk)]
             if avail > 1e-6:
                 take = min(avail, hours_left)
-                qty = quantity * (take / total_hours) if total_hours > 0 else 0
+                qty = op_qty * (take / total_hours) if total_hours > 0 else 0
                 lines.append(
                     DraftLine(
                         order=anchor,
@@ -130,37 +141,96 @@ def _place_quantity(
                         planned_qty=round(qty, 2),
                         production_batch_id=production_batch_id,
                         label=label or anchor.order_no,
+                        semi_finished_code=semi_finished_code or op.semi_finished_code or "",
                     )
                 )
                 remaining[(op.work_center_id, wk)] = avail - take
                 hours_left -= take
                 if first_idx is None:
                     first_idx = idx
-                last_idx = idx
+                op_last_idx = idx
+                last_idx = max(last_idx, idx)
             if hours_left > 1e-6:
                 idx += 1
         if first_idx is not None:
             prev_first_idx = first_idx
-            prev_last_idx = last_idx if last_idx is not None else first_idx
+            prev_last_idx = op_last_idx if op_last_idx is not None else first_idx
             prev_op = op
         if hours_left > 1e-6:
             unplanned.append(
                 {
                     "order_no": label or anchor.order_no,
-                    "item_code": anchor.item.code,
+                    "item_code": route_item.code,
+                    "semi_finished_code": semi_finished_code,
                     "operation_seq": op.seq,
                     "work_center_code": wc_by_id[op.work_center_id].code,
                     "hours": round(hours_left, 2),
                 }
             )
-    return lines, unplanned
+    return lines, unplanned, last_idx
 
 
-def _place_order(o: Order, wc_by_id: dict[int, WorkCenter], weeks: list[date], remaining: dict[tuple[int, date], float], rules: scen.RuleLookup | None = None) -> tuple[list[DraftLine], list[dict]]:
-    return _place_quantity(o, o.quantity, o.order_no, None, wc_by_id, weeks, remaining, rules)
+def _place_order(
+    db: Session,
+    o: Order,
+    wc_by_id: dict[int, WorkCenter],
+    weeks: list[date],
+    remaining: dict[tuple[int, date], float],
+    rules: scen.RuleLookup | None = None,
+) -> tuple[list[DraftLine], list[dict]]:
+    if has_wip_structure(o):
+        jobs = explode_order(db, o)
+        all_lines: list[DraftLine] = []
+        all_unplanned: list[dict] = []
+        wip_end = 0
+        for job in jobs.wip_jobs:
+            lbl = f"{o.order_no}/{job.label_suffix}" if job.label_suffix else o.order_no
+            ls, un, end_idx = _place_quantity(
+                o,
+                job.quantity,
+                lbl,
+                None,
+                wc_by_id,
+                weeks,
+                remaining,
+                rules,
+                item=job.item,
+                semi_finished_code=job.semi_finished_code,
+                min_start_idx=0,
+            )
+            all_lines.extend(ls)
+            all_unplanned.extend(un)
+            wip_end = max(wip_end, end_idx)
+        if jobs.finish_job:
+            ls, un, _ = _place_quantity(
+                o,
+                jobs.finish_job.quantity,
+                o.order_no,
+                None,
+                wc_by_id,
+                weeks,
+                remaining,
+                rules,
+                item=jobs.finish_job.item,
+                semi_finished_code="",
+                min_start_idx=wip_end,
+            )
+            all_lines.extend(ls)
+            all_unplanned.extend(un)
+        return all_lines, all_unplanned
+    ls, un, _ = _place_quantity(o, o.quantity, o.order_no, None, wc_by_id, weeks, remaining, rules)
+    return ls, un
 
 
-def _order_hours(o: Order, wc_by_id: dict[int, WorkCenter]) -> float:
+def _order_hours(db: Session, o: Order, wc_by_id: dict[int, WorkCenter]) -> float:
+    if has_wip_structure(o):
+        jobs = explode_order(db, o)
+        total = 0.0
+        for job in jobs.wip_jobs:
+            total += sum(op.hours_for(job.quantity) for op in job.item.operations if op.work_center_id in wc_by_id)
+        if jobs.finish_job:
+            total += sum(op.hours_for(jobs.finish_job.quantity) for op in jobs.finish_job.item.operations if op.work_center_id in wc_by_id)
+        return total
     return sum(op.hours_for(o.quantity) for op in o.item.operations if op.work_center_id in wc_by_id)
 
 
@@ -189,7 +259,7 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
     batches = list(pbatches.open_batches_with_ops(db)) + list(extra_batches)
     all_orders = (
         db.query(Order)
-        .options(joinedload(Order.item).joinedload(Item.operations))
+        .options(joinedload(Order.item).joinedload(Item.operations), joinedload(Order.item).joinedload(Item.bom_lines))
         .filter(Order.status == "open")
         .order_by(func.coalesce(Order.revised_due_date, Order.due_date), Order.order_no, Order.id)
         .all()
@@ -235,7 +305,7 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
 
     if req.mode == "revenue":
         def density(o: Order) -> float:
-            h = _order_hours(o, wc_by_id)
+            h = _order_hours(db, o, wc_by_id)
             rev = o.quantity * (o.unit_price or 0.0)
             return rev / h if h > 0 else 0.0
 
@@ -254,16 +324,16 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
             if not anchor:
                 continue
             trial = dict(remaining)
-            ls, un = _place_quantity(anchor, batch.quantity, batch.batch_no, batch.id, wc_by_id, weeks, trial, rules)
+            ls, un, _ = _place_quantity(anchor, batch.quantity, batch.batch_no, batch.id, wc_by_id, weeks, trial, rules)
             if un:
                 continue
             remaining = trial
             lines.extend(ls)
         for o in ranked:
-            if _order_hours(o, wc_by_id) <= 1e-6:
+            if _order_hours(db, o, wc_by_id) <= 1e-6:
                 continue  # bu is merkezlerinde operasyonu yok
             trial = dict(remaining)
-            ls, un = _place_order(o, wc_by_id, weeks, trial, rules)
+            ls, un = _place_order(db, o, wc_by_id, weeks, trial, rules)
             if un:
                 leftover.append(o)
                 continue
@@ -271,11 +341,11 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
             lines.extend(ls)
         # kalan kapasiteyi termin sirasiyla kismen doldur
         for o in sorted(leftover, key=lambda o: (effective_due(o), o.order_no)):
-            ls, un = _place_order(o, wc_by_id, weeks, remaining, rules)
+            ls, un = _place_order(db, o, wc_by_id, weeks, remaining, rules)
             lines.extend(ls)
             unplanned.extend(un)
             if not ls:
-                skipped.append({"order_no": o.order_no, "item_code": o.item.code, "revenue": round(o.quantity * (o.unit_price or 0.0), 2), "hours": round(_order_hours(o, wc_by_id), 2)})
+                skipped.append({"order_no": o.order_no, "item_code": o.item.code, "revenue": round(o.quantity * (o.unit_price or 0.0), 2), "hours": round(_order_hours(db, o, wc_by_id), 2)})
     else:
         for batch in batches:
             if not batch.orders:
@@ -283,11 +353,11 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
             anchor = sorted(batch.orders, key=lambda l: (effective_due(l.order) if l.order else date.max, l.order.order_no if l.order else "", l.order_id))[0].order
             if not anchor:
                 continue
-            ls, un = _place_quantity(anchor, batch.quantity, batch.batch_no, batch.id, wc_by_id, weeks, remaining, rules)
+            ls, un, _ = _place_quantity(anchor, batch.quantity, batch.batch_no, batch.id, wc_by_id, weeks, remaining, rules)
             lines.extend(ls)
             unplanned.extend(un)
         for o in orders:
-            ls, un = _place_order(o, wc_by_id, weeks, remaining, rules)
+            ls, un = _place_order(db, o, wc_by_id, weeks, remaining, rules)
             lines.extend(ls)
             unplanned.extend(un)
 
@@ -296,8 +366,19 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
     )
 
 
-def auto_plan(db: Session, req: AutoPlanRequest, username: str) -> dict:
-    sim = simulate(db, req)
+def write_simulation(
+    db: Session,
+    req: AutoPlanRequest,
+    sim: Simulation,
+    username: str,
+    *,
+    revision_id: int | None = None,
+    commit: bool = True,
+    replace_manual: bool = False,
+    message_tag: str | None = None,
+    keep_line_mode: bool = False,
+) -> dict:
+    """Simulasyon sonucunu plan satiri olarak yazar."""
     if not sim.work_centers:
         return {
             "created": 0,
@@ -310,8 +391,13 @@ def auto_plan(db: Session, req: AutoPlanRequest, username: str) -> dict:
         }
     wc_ids = [w.id for w in sim.work_centers]
     if req.replace_existing:
+        modes = ["auto"]
+        if replace_manual:
+            modes.append("manual")
         db.query(PlanLine).filter(
-            PlanLine.work_center_id.in_(wc_ids), PlanLine.week_start >= sim.start, PlanLine.mode == "auto"
+            PlanLine.work_center_id.in_(wc_ids),
+            PlanLine.week_start >= sim.start,
+            PlanLine.mode.in_(modes),
         ).delete(synchronize_session=False)
         db.flush()
     for l in sim.lines:
@@ -324,14 +410,20 @@ def auto_plan(db: Session, req: AutoPlanRequest, username: str) -> dict:
                 week_start=l.week_start,
                 planned_hours=l.planned_hours,
                 planned_qty=l.planned_qty,
-                mode="auto",
+                semi_finished_code=l.semi_finished_code or "",
+                mode=l.mode if keep_line_mode and l.mode in ("auto", "manual") else "auto",
                 strategy=req.mode,
+                revision_id=revision_id,
                 created_by=username,
             )
         )
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     label = "maksimum ciro" if req.mode == "revenue" else "termine gore"
-    msg = f"{len(sim.lines)} plan satiri olusturuldu ({label})."
+    tag = message_tag if message_tag is not None else ("revizyon" if revision_id else "revizyonsuz")
+    msg = f"{len(sim.lines)} plan satiri olusturuldu ({label}, {tag})."
     if sim.co_shipment_results:
         msg += f" Birlikte sevk modu: {len(sim.co_shipment_results)} siparis grubu."
     return {
@@ -343,6 +435,19 @@ def auto_plan(db: Session, req: AutoPlanRequest, username: str) -> dict:
         "co_shipment_results": sim.co_shipment_results or [],
         "co_shipment_exceptions": sim.co_shipment_exceptions or [],
     }
+
+
+def auto_plan(
+    db: Session,
+    req: AutoPlanRequest,
+    username: str,
+    *,
+    revision_id: int | None = None,
+    commit: bool = True,
+    replace_manual: bool = False,
+) -> dict:
+    sim = simulate(db, req)
+    return write_simulation(db, req, sim, username, revision_id=revision_id, commit=commit, replace_manual=replace_manual)
 
 
 def add_manual_line(db: Session, line: ManualPlanLineIn, username: str) -> PlanLine:
@@ -417,8 +522,10 @@ def plan_lines(db: Session, wc_ids: list[int] | None, start: date | None, end: d
                 week_start=pl.week_start,
                 planned_hours=pl.planned_hours,
                 planned_qty=pl.planned_qty,
+                semi_finished_code=pl.semi_finished_code or (pl.operation.semi_finished_code if pl.operation else ""),
                 mode=pl.mode,
                 strategy=pl.strategy or "",
+                revision_id=pl.revision_id,
             )
         )
     return out

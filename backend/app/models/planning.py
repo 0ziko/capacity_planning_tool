@@ -2,7 +2,7 @@
 
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -15,6 +15,7 @@ class Order(Base):
     order_no: Mapped[str] = mapped_column(String(64), index=True)
     position_no: Mapped[str] = mapped_column(String(32), default="", index=True)  # siparis pozisyonu (aynı no'da coklu satir)
     customer: Mapped[str] = mapped_column(String(128), default="")
+    order_date: Mapped[date | None] = mapped_column(Date, nullable=True)  # siparis tarihi (import / manuel)
     due_date: Mapped[date] = mapped_column(Date, index=True)
     revised_due_date: Mapped[date | None] = mapped_column(Date, nullable=True)  # dolu ise planlama bu tarihi kullanir
     market: Mapped[str] = mapped_column(String(16), default="domestic")  # domestic / export
@@ -81,9 +82,11 @@ class PlanLine(Base):
     week_start: Mapped[date] = mapped_column(Date, index=True)  # Pazartesi
     planned_hours: Mapped[float] = mapped_column(Float)
     planned_qty: Mapped[float] = mapped_column(Float, default=0.0)
+    semi_finished_code: Mapped[str] = mapped_column(String(64), default="", index=True)
     mode: Mapped[str] = mapped_column(String(8), default="auto")  # auto / manual
     # otomatik planin stratejisi: due_date (termine gore) / revenue (maksimum ciro); manuelde bos
     strategy: Mapped[str] = mapped_column(String(16), default="")
+    revision_id: Mapped[int | None] = mapped_column(ForeignKey("plan_revisions.id", ondelete="SET NULL"), nullable=True, index=True)
     created_by: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
@@ -196,3 +199,85 @@ class ImportLog(Base):
     updated: Mapped[int] = mapped_column(Integer, default=0)
     errors: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class DailyDataAck(Base):
+    """Gunluk veri basligi icin 'bugun degisiklik yok' onayi (baslik bazinda)."""
+
+    __tablename__ = "daily_data_acks"
+    __table_args__ = (UniqueConstraint("checkpoint_key", "ack_date", name="uq_daily_data_ack"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    checkpoint_key: Mapped[str] = mapped_column(String(32), index=True)
+    ack_date: Mapped[date] = mapped_column(Date, index=True)
+    username: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class PlanRevision(Base):
+    """Onayli plan revizyonu: taslak girdiler + yeniden hesap + onay kaydi."""
+
+    __tablename__ = "plan_revisions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_no: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(24), default="draft", index=True)
+    reason_codes: Mapped[str] = mapped_column(String(256), default="")
+    note: Mapped[str] = mapped_column(Text, default="")
+    start_week: Mapped[date] = mapped_column(Date, index=True)
+    weeks: Mapped[int] = mapped_column(Integer, default=8)
+    mode: Mapped[str] = mapped_column(String(16), default="due_date")
+    wc_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    horizon_key: Mapped[str] = mapped_column(String(128), default="", index=True)
+    replace_manual: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_by: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    calculated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    approved_by: Mapped[str] = mapped_column(String(64), default="")
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    rejected_by: Mapped[str] = mapped_column(String(64), default="")
+    reject_note: Mapped[str] = mapped_column(String(512), default="")
+
+    changes: Mapped[list["PlanRevisionChange"]] = relationship(back_populates="revision", cascade="all, delete-orphan")
+    snapshots: Mapped[list["PlanRevisionSnapshot"]] = relationship(back_populates="revision", cascade="all, delete-orphan")
+    events: Mapped[list["PlanRevisionEvent"]] = relationship(back_populates="revision", cascade="all, delete-orphan")
+
+
+class PlanRevisionChange(Base):
+    __tablename__ = "plan_revision_changes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("plan_revisions.id", ondelete="CASCADE"), index=True)
+    entity_type: Mapped[str] = mapped_column(String(16))  # order | wc_week
+    entity_id: Mapped[int] = mapped_column(Integer, default=0)
+    extra_key: Mapped[str] = mapped_column(String(64), default="")  # wc_id|YYYY-MM-DD | item_code
+    field: Mapped[str] = mapped_column(String(64))
+    old_value: Mapped[str] = mapped_column(Text, default="")
+    new_value: Mapped[str] = mapped_column(Text, default="")
+
+    revision: Mapped[PlanRevision] = relationship(back_populates="changes")
+
+
+class PlanRevisionSnapshot(Base):
+    __tablename__ = "plan_revision_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("plan_revisions.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(16))  # baseline | proposed
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+
+    revision: Mapped[PlanRevision] = relationship(back_populates="snapshots")
+
+
+class PlanRevisionEvent(Base):
+    __tablename__ = "plan_revision_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("plan_revisions.id", ondelete="CASCADE"), index=True)
+    action: Mapped[str] = mapped_column(String(24))
+    username: Mapped[str] = mapped_column(String(64), default="")
+    detail: Mapped[str] = mapped_column(String(512), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    revision: Mapped[PlanRevision] = relationship(back_populates="events")

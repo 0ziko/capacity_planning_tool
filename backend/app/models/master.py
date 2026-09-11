@@ -140,10 +140,12 @@ class Item(Base):
 
 
 class BomLine(Base):
-    """Hammadde / yari mamul satiri."""
+    """Hammadde / yari mamul satiri. source_wip: hangi yari mamul dalinda tuketildigi (ayni kod iki kez)."""
 
     __tablename__ = "bom_lines"
-    __table_args__ = (UniqueConstraint("item_id", "component_code", name="uq_bom_item_component"),)
+    __table_args__ = (
+        UniqueConstraint("item_id", "component_code", "source_wip", name="uq_bom_item_component_wip"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"), index=True)
@@ -151,6 +153,11 @@ class BomLine(Base):
     component_name: Mapped[str] = mapped_column(String(256), default="")
     quantity: Mapped[float] = mapped_column(Float, default=1.0)
     unit: Mapped[str] = mapped_column(String(16), default="AD")
+    source_wip: Mapped[str] = mapped_column(String(64), default="", index=True)
+    # ERP listesinde dalin en alt operasyonu (uretimde ilk adim); dallar arasi siralama icin
+    branch_listing_sira: Mapped[int] = mapped_column(default=0, index=True)
+    # Dal icinde operasyon/rota sirasi (10,20,30 adim; 11,21 hammadde) — BOM goruntuleme icin
+    recipe_seq: Mapped[int] = mapped_column(default=0, index=True)
 
     item: Mapped[Item] = relationship(back_populates="bom_lines")
 
@@ -169,12 +176,34 @@ class RoutingOperation(Base):
     cycle_time_sec: Mapped[float] = mapped_column(Float, default=0.0)
     setup_time_min: Mapped[float] = mapped_column(Float, default=0.0)
     semi_finished_code: Mapped[str] = mapped_column(String(64), default="", index=True)  # operasyon sonu yarımamül
+    primary_machine_id: Mapped[int | None] = mapped_column(
+        ForeignKey("machines.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     item: Mapped[Item] = relationship(back_populates="operations")
     work_center: Mapped[WorkCenter] = relationship()
+    primary_machine: Mapped["Machine | None"] = relationship(foreign_keys=[primary_machine_id])
+    alt_stations: Mapped[list["RoutingOperationStation"]] = relationship(
+        back_populates="operation", cascade="all, delete-orphan", order_by="RoutingOperationStation.id"
+    )
 
     def hours_for(self, quantity: float) -> float:
         return quantity * self.cycle_time_sec / 3600.0 + self.setup_time_min / 60.0
+
+
+class RoutingOperationStation(Base):
+    """Operasyon icin alternatif istasyon (makine) listesi."""
+
+    __tablename__ = "routing_operation_stations"
+    __table_args__ = (UniqueConstraint("operation_id", "machine_id", name="uq_op_station"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    operation_id: Mapped[int] = mapped_column(ForeignKey("routing_operations.id", ondelete="CASCADE"), index=True)
+    machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id", ondelete="CASCADE"), index=True)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    operation: Mapped[RoutingOperation] = relationship(back_populates="alt_stations")
+    machine: Mapped[Machine] = relationship()
 
 
 def norm_op(name: str) -> str:

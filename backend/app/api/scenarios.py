@@ -88,3 +88,10 @@ def delete_rule(rule_id: int, db: Session = Depends(get_db), _=Depends(require_p
 def group_items(product_group: str = Query(""), db: Session = Depends(get_db), _=Depends(require_user)):
     its = db.query(Item).options(joinedload(Item.operations)).filter(Item.product_group == product_group).order_by(Item.code).all()
     return [{"code": i.code, "name": i.name, "operations": [op.operation_name for op in i.operations]} for i in its if i.operations]
+
+
+@router.post("/generate-from-groups")
+def generate_from_groups(replace_group: bool = False, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    result = scen.generate_from_groups(db, replace_group=replace_group)
+    db.commit()
+    return result

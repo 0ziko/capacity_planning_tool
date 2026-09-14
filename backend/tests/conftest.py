@@ -43,7 +43,7 @@ def db():
 @pytest.fixture(autouse=True)
 def _isolate_planning_artifacts(db):
     """Testler arasi uretim/plan kalintisi otomatik planlamayi etkilemesin."""
-    from app.models import PlanLine, ProductionActual
+    from app.models import Downtime, PlanLine, ProductionActual
     from app.models.planning import (
         PlanRevision,
         PlanRevisionChange,
@@ -58,6 +58,7 @@ def _isolate_planning_artifacts(db):
     db.query(PlanRevisionChange).delete()
     db.query(PlanRevision).delete()
     db.query(PlanLine).delete()
+    db.query(Downtime).delete()
     db.query(ProductionActual).delete()
     db.query(ProductionBatchOrder).delete()
     db.query(ProductionBatch).delete()

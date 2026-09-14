@@ -117,10 +117,15 @@ class ProductionActual(Base):
     order_no: Mapped[str] = mapped_column(String(64), default="")
     semi_finished_code: Mapped[str] = mapped_column(String(64), default="", index=True)
     quantity: Mapped[float] = mapped_column(Float)
-    # cevrim suresine gore hesaplanan is gucu saati
+    good_qty: Mapped[float | None] = mapped_column(Float, nullable=True)
+    scrap_qty: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rework_qty: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quality_status: Mapped[str] = mapped_column(String(32), default="legacy_unspecified")
+    # cevrim suresine gore hesaplanan is gucu saati (standart saat karsiligi)
     earned_hours: Mapped[float] = mapped_column(Float, default=0.0)
     # sahadan gelen fiili calisma suresi (varsa) - cevrim suresi onerisi icin
     reported_hours: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reported_time_basis: Mapped[str] = mapped_column(String(24), default="legacy_unspecified")
 
     work_center = relationship("WorkCenter")
     item = relationship("Item")
@@ -135,6 +140,11 @@ class Downtime(Base):
     reason_code: Mapped[str] = mapped_column(String(32), default="")
     reason_desc: Mapped[str] = mapped_column(String(256), default="")
     minutes: Mapped[float] = mapped_column(Float)
+    duration_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
+    affected_headcount: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    machine_id: Mapped[int | None] = mapped_column(ForeignKey("machines.id"), nullable=True)
+    time_basis: Mapped[str] = mapped_column(String(24), default="legacy_unspecified")
+    planned_loss: Mapped[bool] = mapped_column(Boolean, default=False)
 
     work_center = relationship("WorkCenter")
 

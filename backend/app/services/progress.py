@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.models import PlanLine, ProductionActual, WorkCenter
 from app.schemas import ProgressOut
 from app.services import capacity as cap
+from app.services.kpi_units import week_plan_and_output_kpis
 
 
 def week_progress(db: Session, wc: WorkCenter, wk: date, as_of: date | None = None) -> ProgressOut:
@@ -38,7 +39,22 @@ def week_progress(db: Session, wc: WorkCenter, wk: date, as_of: date | None = No
         .scalar()
         or 0.0
     )
-    remaining = max(planned - actual, 0.0)
+    kpis = week_plan_and_output_kpis(db, wc.id, wk, as_of=as_of)
+    std_out = kpis["standard_hour_equivalent_output"]
+    if std_out > 0:
+        actual = std_out
+    remaining = kpis["plan_adherence_remaining_hours"]
+    unverified = (
+        db.query(ProductionActual.id)
+        .filter(
+            ProductionActual.work_center_id == wc.id,
+            ProductionActual.prod_date >= wk,
+            ProductionActual.prod_date <= min(wk_end, as_of - timedelta(days=1)),
+            ProductionActual.quality_status == "legacy_unspecified",
+        )
+        .first()
+        is not None
+    )
     capacity = cap.week_capacity_hours(db, wc, wk)
     daily_cap = capacity / n_days if n_days else 0.0
     remaining_days = remaining / daily_cap if daily_cap > 0 else 0.0
@@ -61,11 +77,14 @@ def week_progress(db: Session, wc: WorkCenter, wk: date, as_of: date | None = No
         planned_hours=round(planned, 2),
         expected_hours_to_date=round(expected, 2),
         actual_hours_to_date=round(actual, 2),
+        standard_hour_equivalent_output=round(actual, 2),
         remaining_hours=round(remaining, 2),
+        plan_adherence_remaining_hours=round(remaining, 2),
         remaining_days=round(remaining_days, 2),
         working_days=n_days,
         elapsed_days=elapsed,
         status=status,
+        quality_unverified=unverified,
     )
 
 

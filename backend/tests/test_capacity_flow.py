@@ -73,8 +73,17 @@ def test_full_flow(client, auth):
     assert prog["status"] == "on_track"
     assert prog["remaining_hours"] == 160 and prog["remaining_days"] == 4
 
-    # durus: beklenen (10-4)*10*60 = 3600 dk/gun; 3700 dk gerceklesen => 100 dk fazla
-    _upload(client, auth, "downtime", ["Tarih", "İş Merkezi Kodu", "Sebep Kodu", "Sebep", "Süre (dk)"], [[WEEK.isoformat(), "TZG-A", "MLZ", "Malzeme bekleme", 3000], [WEEK.isoformat(), "TZG-A", "SET", "Setup", 700]])
+    # durus: beklenen (10-4)*10*60 = 3600 adam-dk/gun; olculmus 3700 adam-dk => 100 dk fazla (M5: legacy minutes analize girmez)
+    _upload(
+        client,
+        auth,
+        "downtime",
+        ["Tarih", "İş Merkezi Kodu", "Sebep Kodu", "Sebep", "Süre (dk)", "Süre Değeri (dk)", "Süre Temeli"],
+        [
+            [WEEK.isoformat(), "TZG-A", "MLZ", "Malzeme bekleme", 3000, 3000, "labor_minutes"],
+            [WEEK.isoformat(), "TZG-A", "SET", "Setup", 700, 700, "labor_minutes"],
+        ],
+    )
     dt = client.get(
         "/api/analysis/downtime",
         headers=auth,

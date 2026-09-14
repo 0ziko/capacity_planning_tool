@@ -508,9 +508,9 @@ def downtime_xlsx(start: date, end: date, work_center_ids: list[int] | None = Qu
     a = analysis.downtime_analysis(db, work_center_ids, start, end)
     content = excel.build_report(
         {
-            "Özet": (["İş Merkezi", "Beklenen Duruş (dk)", "Gerçekleşen Duruş (dk)", "Fazla Duruş (dk)"], [[t["work_center_code"], t["expected_minutes"], t["actual_minutes"], t["excess_minutes"]] for t in a["totals"]]),
-            "Günlük": (["İş Merkezi", "Gün", "Beklenen (dk)", "Gerçekleşen (dk)", "Fazla (dk)"], [[d["work_center_code"], d["day"], d["expected_minutes"], d["actual_minutes"], d["excess_minutes"]] for d in a["daily"]]),
-            "Sebep Kırılımı": (["İş Merkezi", "Sebep Kodu", "Sebep", "Süre (dk)", "Adet", "Pay %", "Fazla Duruş Payı (dk)"], [[r["work_center_code"], r["reason_code"], r["reason_desc"], r["minutes"], r["count"], r["share_pct"], r["excess_attributed_minutes"]] for r in a["reasons"]]),
+            "Özet": (["İş Merkezi", "Beklenen Adam-dk", "Ölçülen Adam-dk", "Makine-dk", "Fazla Adam-dk"], [[t["work_center_code"], t["expected_minutes"], t["actual_minutes"], t.get("machine_minutes", 0), t["excess_minutes"]] for t in a["totals"]]),
+            "Günlük": (["İş Merkezi", "Gün", "Beklenen (dk)", "Ölçülen Adam-dk", "Makine-dk", "Fazla (dk)"], [[d["work_center_code"], d["day"], d["expected_minutes"], d["actual_minutes"], d.get("machine_minutes", 0), d["excess_minutes"]] for d in a["daily"]]),
+            "Sebep Kırılımı": (["İş Merkezi", "Sebep Kodu", "Sebep", "Ham Süre (dk)", "Ölçülen Adam-dk", "Adet", "Pay %", "Oransal Dağıtım (dk)"], [[r["work_center_code"], r["reason_code"], r["reason_desc"], r["minutes"], r.get("measured_labor_minutes", 0), r["count"], r["share_pct"], r.get("proportional_allocation_minutes", r.get("excess_attributed_minutes", 0))] for r in a["reasons"]]),
         }
     )
     return _xlsx(content, f"durus_raporu_{start}_{end}.xlsx")
@@ -546,8 +546,8 @@ def cycletime_xlsx(
     content = excel.build_report(
         {
             "Çevrim Süresi Önerileri": (
-                ["Stok Kodu", "Ürün Grubu", "İş Merkezi", "Operasyon", "Tanımlı CT (sn)", "Gözlenen Medyan (sn)", "Min", "Max", "Örnek", "Sapma %", "Önerilen CT (sn)", "Durum"],
-                [[r["item_code"], r["product_group"], r["work_center_code"], r["operation_seq"], r["defined_ct_sec"], r["observed_median_ct_sec"], r["observed_min_ct_sec"], r["observed_max_ct_sec"], r["samples"], r["deviation_pct"], r["suggested_ct_sec"], r["status"]] for r in rows],
+                ["Stok Kodu", "Ürün Grubu", "İş Merkezi", "Operasyon", "Tanımlı CT (sn)", "Gözlenen Medyan (sn)", "Min", "Max", "Örnek", "Sapma %", "Ölçüm Kaynağı", "Önerilen CT (sn)", "Durum"],
+                [[r["item_code"], r["product_group"], r["work_center_code"], r["operation_seq"], r["defined_ct_sec"], r["observed_median_ct_sec"], r["observed_min_ct_sec"], r["observed_max_ct_sec"], r["samples"], r["deviation_pct"], r.get("measurement_source", "measured"), r["suggested_ct_sec"], r["status"]] for r in rows],
             ),
             "Ürün Grubu Özeti": (["Ürün Grubu", "İş Merkezi", "Stok Sayısı", "Örnek", "Ort. Sapma %"], [[g["product_group"], g["work_center_code"], g["items"], g["samples"], g["avg_deviation_pct"]] for g in groups]),
         }

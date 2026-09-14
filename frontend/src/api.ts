@@ -232,7 +232,7 @@ export interface DataFreshnessCheckpoint { key: string; label: string; import_ki
 export interface PlanPreflightScope { action_label: string; horizon_start: string; horizon_end_inclusive: string; work_center_codes: string[]; replace_modes: string[]; lines_to_replace: number; replace_existing: boolean }
 export interface PlanPreflight { can_plan: boolean; order_count: number; no_routing: PreflightNoRouting[]; no_capacity: PreflightNoCapacity[]; daily_data: DataFreshnessCheckpoint[]; today: string; needs_capacity_ack: boolean; needs_daily_data_ack: boolean; replace_scope: PlanPreflightScope }
 export interface DataFreshness { today: string; needs_attention: boolean; open_order_count: number; checkpoints: DataFreshnessCheckpoint[] }
-export interface PeriodRevenue { period: string; completed_revenue: number; completed_orders: number; earned_revenue: number; cumulative_completed: number; cumulative_earned: number }
+export interface PeriodRevenue { period: string; completed_revenue: number; completed_orders: number; earned_revenue: number; proportional_plan_revenue?: number; planned_shipment_revenue?: number; actual_shipment_revenue?: number; cumulative_completed: number; cumulative_earned: number }
 export interface RevenueReport { start: string; end: string; total_open_revenue: number; planned_revenue: number; partial_revenue: number; unplanned_revenue: number; no_price_orders: number; weeks: PeriodRevenue[]; months: PeriodRevenue[] }
 export interface PlanScenario { mode: PlanMode; label: string; created_lines: number; planned_revenue: number; on_time: number; late: number; partial: number; unplanned: number; total_lateness_days: number; utilization_pct: number; orders: OrderSchedule[]; revenue: RevenueReport }
 export type CompareDiff = "same" | "rev_misses_due" | "rev_drops" | "due_drops" | "rev_earlier" | "rev_later" | "other";
@@ -253,7 +253,7 @@ export interface ProductionBatchOrder { order_id: number; order_no: string; posi
 export interface ProductionBatch { id: number; batch_no: string; item_id: number; item_code: string; item_name: string; due_date: string; quantity: number; note: string; status: string; orders: ProductionBatchOrder[] }
 export interface Capacity { work_center_id: number; work_center_code: string; start: string; end: string; capacity_hours: number; capacity_units: number; unit_hours: number; days: { day: string; hours: number }[] }
 export interface ForecastLoadDetail { order_no: string; item_code: string; hours: number }
-export interface WeekLoad { week_start: string; capacity_hours: number; planning_capacity_hours: number; planned_hours: number; forecast_hours: number; firm_planned_hours: number; forecast_details: ForecastLoadDetail[]; utilization: number; actual_hours: number; actual_utilization: number; remaining_hours: number; remaining_days: number; idle_hours: number; capacity_units: number; planned_units: number; actual_units: number }
+export interface WeekLoad { week_start: string; capacity_hours: number; planning_capacity_hours: number; planned_hours: number; forecast_hours: number; firm_planned_hours: number; forecast_details: ForecastLoadDetail[]; utilization: number; actual_hours: number; standard_hour_equivalent_output?: number; actual_utilization: number; remaining_hours: number; plan_adherence_remaining_hours?: number; plan_matched_output_hours?: number; remaining_days: number; idle_hours: number; capacity_units: number; planned_units: number; actual_units: number }
 export interface WorkCenterLoad { work_center_id: number; work_center_code: string; weeks: WeekLoad[] }
 export interface MergeLoadDelta { work_center_id: number; work_center_code: string; week_start: string; before_hours: number; after_hours: number; delta_hours: number }
 export interface MergeDelayRow { order_id: number; order_no: string; position_no: string; customer: string; item_code: string; due_date: string; before_end: string | null; after_end: string | null; delay_days: number; before_lateness: number | null; after_lateness: number | null }
@@ -371,7 +371,7 @@ export interface LeadTime {
   status: string; remaining_hours: number; failure_reason: string; planning_note: string;
 }
 export interface ForecastSummary { order_id: number; order_no: string; item_code: string; item_name: string; quantity: number; due_date: string; total_hours: number; line_count: number; week_from: string | null; week_to: string | null; created_at: string | null }
-export interface Progress { work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; expected_hours_to_date: number; actual_hours_to_date: number; remaining_hours: number; remaining_days: number; working_days: number; elapsed_days: number; status: string }
+export interface Progress { work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; expected_hours_to_date: number; actual_hours_to_date: number; standard_hour_equivalent_output?: number; remaining_hours: number; plan_adherence_remaining_hours?: number; remaining_days: number; working_days: number; elapsed_days: number; status: string; quality_unverified?: boolean }
 export interface ImportKind { kind: string; title: string; columns: string[]; required: string[] }
 
 // ---- Haftalık iş gücü ----

@@ -390,3 +390,32 @@ Ornekler: 100 siparis + 30 dis rezervasyon → net 70 plan saati; 20 uretim + 20
 | 8 | Frontend build | Basarili |
 
 **Sonraki:** FAZ 08 — (prompt sirasi; bu commit FAZ 07 ile sinirlidir).
+
+## FAZ 08 — olcum ve KPI birimleri (M5)
+
+| Dosya | Degisiklik |
+|---|---|
+| `backend/app/services/kpi_units.py` | **yeni** — plan uyumu, standart cikti, durus adam-dk |
+| `backend/app/models/planning.py` | uretim kalite/sure; durus olcum alanlari |
+| `backend/app/services/planning.py` | `WeekLoad` plan uyumu kalan + standart cikti |
+| `backend/app/services/progress.py` | ayni ayrim; `quality_unverified` |
+| `backend/app/services/analysis.py` | olculmus durus; CT yalniz fiili sure |
+| `backend/app/services/revenue.py` | planlanan / oransal / gerceklesen sevk cirosu |
+| `backend/app/schemas.py` | DTO alanlari |
+| `backend/app/services/excel.py` | import/export kolonlari (geriye uyumlu) |
+| `backend/app/api/planning.py` | analiz Excel basliklari |
+| `frontend` | `Planning`, `Analysis`, `RevenuePanel`, `api.ts` |
+| `docs/kpi-glossary.md` | KPI sozlugu |
+| `backend/tests/test_kpi_units.py` | M5 kabul testleri (5) |
+
+### FAZ 08 kabul olcutleri
+
+| # | Olcut | Sonuc |
+|---|---|---|
+| 1 | Plan A 8h; plansiz B 8h → A kalan 8, cikti 8 | ✓ `test_kpi_units::test_plan_a_unplanned_b_output_does_not_consume_plan` |
+| 2 | 10×30 elapsed → 300 adam-dk; 30 labor → 30 | ✓ `test_kpi_units::test_downtime_labor_minutes_elapsed_and_direct` |
+| 3 | legacy durus olculmez | ✓ `test_kpi_units::test_legacy_downtime_not_measured_in_analysis` |
+| 4 | Fiili sure yok → CT onerisi yok | ✓ `test_kpi_units::test_ct_no_suggestion_without_reported_hours` |
+| 5 | Import/export kalite + eski dosya | ✓ `test_kpi_units::test_import_export_quality_and_legacy_downtime` |
+| 6 | Backend suite | **116 passed**, 1 skipped, 2 flaky (`test_job_move_revision`, `test_wip_multi_route`; FAZ 07 oncesi de goruldu) (~38s) |
+| 7 | Frontend build | Basarili (Vite 5.4.21) |

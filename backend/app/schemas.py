@@ -562,7 +562,10 @@ class PeriodRevenue(BaseModel):
     period: str  # hafta: Pazartesi tarihi (YYYY-MM-DD); ay: YYYY-MM
     completed_revenue: float  # o donemde tamamlanan (son operasyonu biten) siparislerin cirosu
     completed_orders: int
-    earned_revenue: float  # planlanan saat payina gore oransal ciro
+    earned_revenue: float  # planlanan saat payina gore oransal ciro (oransal plan degeri)
+    proportional_plan_revenue: float = 0.0  # earned_revenue ile ayni; ayri etiket
+    planned_shipment_revenue: float = 0.0  # planlanan sevk (termin haftasi bazli acik siparis ciro tahmini)
+    actual_shipment_revenue: float = 0.0  # gerceklesen sevk ciro
     cumulative_completed: float
     cumulative_earned: float
 
@@ -662,9 +665,12 @@ class WeekLoad(BaseModel):
     firm_planned_hours: float = 0.0
     forecast_details: list["ForecastLoadDetail"] = []
     utilization: float  # plan / planlanabilir kapasite
-    actual_hours: float = 0.0
-    actual_utilization: float = 0.0  # gerceklesen uretim / kapasite
-    remaining_hours: float = 0.0  # plan - gerceklesen (kalan plan)
+    actual_hours: float = 0.0  # geriye uyumluluk: standard_hour_equivalent_output
+    standard_hour_equivalent_output: float = 0.0
+    actual_utilization: float = 0.0  # standart saat ciktisi / kapasite
+    remaining_hours: float = 0.0  # geriye uyumluluk: plan_adherence_remaining_hours
+    plan_adherence_remaining_hours: float = 0.0
+    plan_matched_output_hours: float = 0.0
     remaining_days: float = 0.0  # kalan saat / gunluk verimli kapasite
     idle_hours: float = 0.0  # planlanabilir kapasite - plan (atil)
     capacity_units: float
@@ -838,12 +844,15 @@ class ProgressOut(BaseModel):
     week_start: date
     planned_hours: float
     expected_hours_to_date: float
-    actual_hours_to_date: float
-    remaining_hours: float
+    actual_hours_to_date: float  # standard_hour_equivalent_output (geriye uyumlu ad)
+    standard_hour_equivalent_output: float = 0.0
+    remaining_hours: float  # plan_adherence_remaining_hours
+    plan_adherence_remaining_hours: float = 0.0
     remaining_days: float
     working_days: int
     elapsed_days: int
     status: str  # ahead / on_track / behind
+    quality_unverified: bool = False
 
 
 # ---- Imports ----

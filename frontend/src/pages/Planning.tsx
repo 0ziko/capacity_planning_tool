@@ -275,7 +275,7 @@ export default function Planning() {
                     title={w.planned_hours > 0 || w.forecast_hours > 0 ? `Plan: ${fmt(w.planned_hours)} sa (kesin: ${fmt(w.firm_planned_hours)} · tahmin: ${fmt(w.forecast_hours)})\nSipariş: ${firmPct}% · Tahmin: ${fcPct}%` : undefined}
                   >
                     <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 155 }}>
-                      <span style={{ fontSize: 12 }}>{fmt(w.planned_hours, 0)} / <b style={{ color: "var(--ok)" }}>{fmt(w.actual_hours, 0)}</b> / {fmt(w.remaining_hours, 0)} / <span title="Kalan iş gün">{fmt(w.remaining_days, 2)}</span></span>
+                      <span style={{ fontSize: 12 }} title="Plan / standart saat karşılığı çıktı / plan uyumu kalan">{fmt(w.planned_hours, 0)} / <b style={{ color: "var(--ok)" }}>{fmt(w.standard_hour_equivalent_output ?? w.actual_hours, 0)}</b> / {fmt(w.plan_adherence_remaining_hours ?? w.remaining_hours, 0)} / <span title="Plan uyumu kalan iş gün">{fmt(w.remaining_days, 2)}</span></span>
                       <span style={{ fontSize: 11 }} className="muted">Atıl: {w.idle_hours > 0.5 ? <b>{fmt(w.idle_hours, 0)} sa</b> : "yok"}</span>
                       <PlanStackBar utilization={w.utilization} forecastHours={w.forecast_hours} planningCapacity={w.planning_capacity_hours} />
                       <Bar ratio={w.actual_utilization} cls="actual" />

@@ -16,7 +16,9 @@ export function RevenueTable({ rows, granularity, showCumulative = true }: { row
             <th>{granularity === "week" ? "Hafta" : "Ay"}</th>
             <th className="num" title="Son operasyonu bu dönemde biten siparişlerin tüm cirosu (teslim / fatura mantığı)">Tamamlanan ciro</th>
             <th className="num">Sipariş</th>
-            <th className="num" title="Her plan satırı, sipariş cirosunun planlanan saat / gereken saat payını kendi dönemine yazar (oransal ilerleme)">Oransal ciro</th>
+            <th className="num" title="Her plan satırı, sipariş cirosunun planlanan saat / gereken saat payını kendi dönemine yazar (oransal plan değeri)">Oransal plan ciro</th>
+            <th className="num" title="Planlanan sevk haftası (tahmini bitiş) bazlı sipariş cirosu">Planlanan sevk</th>
+            <th className="num" title="Gerçekleşen sevk kayıtlarından ciro">Gerçekleşen sevk</th>
             <th style={{ minWidth: 160 }}></th>
             {showCumulative && <><th className="num">Kümülatif tamamlanan</th><th className="num">Kümülatif oransal</th></>}
           </tr>
@@ -28,6 +30,8 @@ export function RevenueTable({ rows, granularity, showCumulative = true }: { row
               <td className="num" style={{ fontWeight: 600 }}>{r.completed_revenue ? fmt(r.completed_revenue, 0) : "—"}</td>
               <td className="num">{r.completed_orders || "—"}</td>
               <td className="num">{r.earned_revenue ? fmt(r.earned_revenue, 0) : "—"}</td>
+              <td className="num">{r.planned_shipment_revenue ? fmt(r.planned_shipment_revenue, 0) : "—"}</td>
+              <td className="num">{r.actual_shipment_revenue ? fmt(r.actual_shipment_revenue, 0) : "—"}</td>
               <td>
                 <div className="rev-bars">
                   <div className="rev-bar c" style={{ width: `${(r.completed_revenue / max) * 100}%` }} title={`Tamamlanan ${fmt(r.completed_revenue, 0)}`} />
@@ -37,7 +41,7 @@ export function RevenueTable({ rows, granularity, showCumulative = true }: { row
               {showCumulative && <><td className="num">{fmt(r.cumulative_completed, 0)}</td><td className="num">{fmt(r.cumulative_earned, 0)}</td></>}
             </tr>
           ))}
-          {rows.length === 0 && <tr><td colSpan={7} className="muted">Veri yok.</td></tr>}
+          {rows.length === 0 && <tr><td colSpan={9} className="muted">Veri yok.</td></tr>}
         </tbody>
       </table>
     </div>

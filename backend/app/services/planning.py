@@ -32,6 +32,7 @@ from app.services import capacity as cap
 from app.services import scenarios as scen
 from app.services.bom_tree import explode_order, has_wip_structure
 from app.services.gantt import actual_hours_by_week
+from app.services.kpi_units import week_plan_and_output_kpis
 from app.services.plan_draft import DraftLine
 from app.services import operation_constraints as opcon
 from app.services.planning_candidates import (
@@ -1158,11 +1159,13 @@ def load(db: Session, wc_ids: list[int] | None, start: date, weeks: int) -> list
             p = planned.get((w.id, wk), 0.0)
             fc = forecast.get((w.id, wk), 0.0)
             a = actual.get((w.id, wk), 0.0)
-            remaining = max(p - a, 0.0)
+            kpis = week_plan_and_output_kpis(db, w.id, wk)
+            std_out = kpis["standard_hour_equivalent_output"]
+            plan_rem = kpis["plan_adherence_remaining_hours"]
             idle = max(c_plan - p, 0.0)
             n_days = len(cap.working_days(w, wk, wk + timedelta(days=6), ovl))
             daily_cap = c_raw / n_days if n_days else 0.0
-            rem_days = remaining / daily_cap if daily_cap > 0 else 0.0
+            rem_days = plan_rem / daily_cap if daily_cap > 0 else 0.0
             rows.append(
                 WeekLoad(
                     week_start=wk,
@@ -1173,14 +1176,17 @@ def load(db: Session, wc_ids: list[int] | None, start: date, weeks: int) -> list
                     firm_planned_hours=round(max(p - fc, 0.0), 2),
                     forecast_details=fc_detail.get((w.id, wk), []),
                     utilization=round(p / c_plan, 3) if c_plan > 0 else 0.0,
-                    actual_hours=round(a, 2),
-                    actual_utilization=round(a / c_raw, 3) if c_raw > 0 else 0.0,
-                    remaining_hours=round(remaining, 2),
+                    actual_hours=round(std_out if std_out else a, 2),
+                    standard_hour_equivalent_output=round(std_out, 2),
+                    actual_utilization=round(std_out / c_raw, 3) if c_raw > 0 else 0.0,
+                    remaining_hours=round(plan_rem, 2),
+                    plan_adherence_remaining_hours=round(plan_rem, 2),
+                    plan_matched_output_hours=round(kpis["plan_matched_output_hours"], 2),
                     remaining_days=round(rem_days, 2),
                     idle_hours=round(idle, 2),
                     capacity_units=round(c_raw / unit, 2),
                     planned_units=round(p / unit, 2),
-                    actual_units=round(a / unit, 2),
+                    actual_units=round(std_out / unit, 2),
                 )
             )
         result.append(WorkCenterLoad(work_center_id=w.id, work_center_code=w.code, weeks=rows))

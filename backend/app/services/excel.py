@@ -190,9 +190,14 @@ TEMPLATES: dict[str, dict] = {
             ("item_code", "Stok Kodu (opsiyonel)", ["stokkodu", "malzeme"]),
             ("operation_seq", "Operasyon Sıra (opsiyonel)", ["sira", "operasyon", "operasyonsira"]),
             ("reported_hours", "Fiili Süre (saat)", ["fiilisure", "calismasuresi", "sure"]),
+            ("reported_time_basis", "Fiili Süre Temeli", ["fiilisuretemeli", "suretemeli"]),
+            ("good_qty", "İyi Adet", ["iyadet", "goodqty"]),
+            ("scrap_qty", "Hurda Adet", ["hurda", "scrap"]),
+            ("rework_qty", "Yeniden İş Adet", ["yenidenis", "rework"]),
+            ("quality_status", "Kalite Durumu", ["kalitedurumu", "kalite"]),
             ("order_no", "Sipariş No (opsiyonel)", ["siparis", "siparisno"]),
         ],
-        "example": ["2026-09-06", "MAM-0001-K10", 120, "", "", "", "", ""],
+        "example": ["2026-09-06", "MAM-0001-K10", 120, "", "", "", "", "", "", "", "", ""],
         "required": ["prod_date", "quantity"],
     },
     "downtime": {
@@ -203,8 +208,13 @@ TEMPLATES: dict[str, dict] = {
             ("reason_code", "Sebep Kodu", ["sebepkodu", "kod"]),
             ("reason_desc", "Sebep", ["sebepaciklama", "aciklama", "durussebebi"]),
             ("minutes", "Süre (dk)", ["sure", "dakika", "durussuresi"]),
+            ("duration_minutes", "Süre Değeri (dk)", ["suredegeri", "duration"]),
+            ("time_basis", "Süre Temeli", ["suretemeli", "timebasis"]),
+            ("affected_headcount", "Etkilenen Kişi", ["etkilenenkisi", "kisisayisi"]),
+            ("machine_code", "Makine Kodu", ["makine", "makinekodu"]),
+            ("planned_loss", "Planlı Kayıp (E/H)", ["planlikayip", "planlidurus"]),
         ],
-        "example": ["2026-09-06", "TZG-A", "MLZ", "Malzeme bekleme", 45],
+        "example": ["2026-09-06", "TZG-A", "MLZ", "Malzeme bekleme", 45, "", "", "", "", ""],
         "required": ["dt_date", "wc_code", "minutes"],
     },
     "wc_weeks": {
@@ -982,6 +992,51 @@ def import_orders(db: Session, rows: list[dict], remove_missing: bool = False) -
     return ins, upd, removed, errs
 
 
+def _parse_downtime_time_basis(raw: str) -> str:
+    n = norm(raw)
+    if n in ("elapsedminutes", "gecensure", "elapsed"):
+        return "elapsed_minutes"
+    if n in ("laborminutes", "adamdk", "isgucu", "labor"):
+        return "labor_minutes"
+    if n in ("legacyunspecified", "legacy", ""):
+        return "legacy_unspecified"
+    return raw.strip() or "legacy_unspecified"
+
+
+def _parse_reported_time_basis(raw: str) -> str:
+    n = norm(raw)
+    if n in ("laborhours", "isgucu", "laborminutes", "labor"):
+        return "labor_hours"
+    if n in ("elapsedtime", "gecensure", "elapsed"):
+        return "elapsed_time"
+    if n in ("legacyunspecified", "legacy", ""):
+        return "legacy_unspecified"
+    return raw.strip() or "legacy_unspecified"
+
+
+def _apply_production_measurement_fields(pa: ProductionActual, r: dict) -> None:
+    g = _float(r.get("good_qty"), None)
+    s = _float(r.get("scrap_qty"), None)
+    rw = _float(r.get("rework_qty"), None)
+    if g is not None:
+        pa.good_qty = g
+    if s is not None:
+        pa.scrap_qty = s
+    if rw is not None:
+        pa.rework_qty = rw
+    qs = _str(r.get("quality_status"))
+    if qs:
+        pa.quality_status = qs
+    elif g is not None or s is not None or rw is not None:
+        pa.quality_status = "verified"
+    rb = _str(r.get("reported_time_basis"))
+    if rb:
+        pa.reported_time_basis = _parse_reported_time_basis(rb)
+    elif pa.reported_hours is not None and pa.reported_hours > 0:
+        if not pa.reported_time_basis or pa.reported_time_basis == "":
+            pa.reported_time_basis = "legacy_unspecified"
+
+
 def import_production(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
     """Ayni gun/yarimamul[/siparis] satiri varsa uzerine yazar (idempotent).
 
@@ -1027,6 +1082,14 @@ def import_production(db: Session, rows: list[dict]) -> tuple[int, int, list[str
                 )
                 ins += i
                 upd += u
+                qpa = db.query(ProductionActual).filter(
+                    ProductionActual.prod_date == d,
+                    ProductionActual.semi_finished_code == wip_raw,
+                )
+                if order_no.strip():
+                    qpa = qpa.filter(ProductionActual.order_no == order_no)
+                for pa in qpa.all():
+                    _apply_production_measurement_fields(pa, r)
                 continue
             else:
                 wc = wcs.get(_str(r.get("wc_code")).upper())
@@ -1087,6 +1150,7 @@ def import_production(db: Session, rows: list[dict]) -> tuple[int, int, list[str
                 upd += 1
             pa.earned_hours = round(max(earned, 0.0), 4)
             pa.reported_hours = _float(r.get("reported_hours"), None)
+            _apply_production_measurement_fields(pa, r)
         except Exception as e:  # noqa: BLE001
             errs.append(f"Satir {r['_row']}: {e}")
     return ins, upd, errs
@@ -1097,6 +1161,7 @@ def import_downtime(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]
     ins = 0
     errs = []
     wcs = _wc_lookup(db)
+    machines = {m.code.upper(): m for m in db.query(Machine).all()}
     cleared: set[tuple[int, date]] = set()
     for r in rows:
         try:
@@ -1105,12 +1170,38 @@ def import_downtime(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]
             if not wc:
                 raise ValueError(f"Is merkezi bulunamadi: {r.get('wc_code')}")
             minutes = _float(r.get("minutes"))
-            if minutes is None:
+            duration = _float(r.get("duration_minutes"), None)
+            if minutes is None and duration is None:
                 raise ValueError("Sure bos")
+            if minutes is None:
+                minutes = duration
+            if duration is None:
+                duration = minutes
+            tb_raw = _str(r.get("time_basis"))
+            time_basis = _parse_downtime_time_basis(tb_raw) if tb_raw else "legacy_unspecified"
+            hc = _int(r.get("affected_headcount"), None)
+            if time_basis == "elapsed_minutes" and (hc is None or hc <= 0):
+                raise ValueError("Gecen sure icin etkilenen kisi sayisi zorunlu")
+            mc = _str(r.get("machine_code")).upper()
+            machine_id = machines[mc].id if mc and mc in machines else None
+            pl = _str(r.get("planned_loss")).upper() in ("E", "Y", "1", "TRUE", "EVET")
             if (wc.id, d) not in cleared:
                 db.query(Downtime).filter(Downtime.work_center_id == wc.id, Downtime.dt_date == d).delete(synchronize_session=False)
                 cleared.add((wc.id, d))
-            db.add(Downtime(dt_date=d, work_center_id=wc.id, reason_code=_str(r.get("reason_code")), reason_desc=_str(r.get("reason_desc")), minutes=minutes))
+            db.add(
+                Downtime(
+                    dt_date=d,
+                    work_center_id=wc.id,
+                    reason_code=_str(r.get("reason_code")),
+                    reason_desc=_str(r.get("reason_desc")),
+                    minutes=float(minutes or 0),
+                    duration_minutes=float(duration or 0),
+                    affected_headcount=hc,
+                    machine_id=machine_id,
+                    time_basis=time_basis,
+                    planned_loss=pl,
+                )
+            )
             ins += 1
         except Exception as e:  # noqa: BLE001
             errs.append(f"Satir {r['_row']}: {e}")
@@ -1311,10 +1402,51 @@ def build_backup(db: Session) -> bytes:
                   [[o.order_no, o.position_no or "", o.customer, o.order_date, o.due_date, o.revised_due_date, _market_cell(o.market), item_code.get(o.item_id), o.quantity, o.unit_price, o.material_status or "unknown", o.material_ready_date or "", o.material_note or "", o.status] for o in db.query(Order).order_by(Order.due_date, Order.order_no, Order.position_no)])
     _ws_from_rows(wb, "Plan", ["Hafta", "İş Merkezi Kodu", "Sipariş No", "Stok Kodu", "Operasyon Id", "Planlanan Saat", "Planlanan Miktar", "Mod", "Oluşturan"],
                   [[p.week_start, wc_code.get(p.work_center_id), p.order.order_no, item_code.get(p.order.item_id), p.operation_id, p.planned_hours, p.planned_qty, p.mode, p.created_by] for p in db.query(PlanLine).order_by(PlanLine.week_start, PlanLine.work_center_id)])
-    _ws_from_rows(wb, "Günlük Üretim", [c[1] for c in TEMPLATES["production"]["columns"]] + ["Kazanılan Saat"],
-                  [[p.prod_date, p.semi_finished_code or "", p.quantity, wc_code.get(p.work_center_id), item_code.get(p.item_id), p.operation_seq, p.reported_hours, p.order_no or "", p.earned_hours] for p in db.query(ProductionActual).order_by(ProductionActual.prod_date)])
-    _ws_from_rows(wb, "Günlük Duruşlar", [c[1] for c in TEMPLATES["downtime"]["columns"]],
-                  [[d.dt_date, wc_code.get(d.work_center_id), d.reason_code, d.reason_desc, d.minutes] for d in db.query(Downtime).order_by(Downtime.dt_date)])
+    _ws_from_rows(
+        wb,
+        "Günlük Üretim",
+        [c[1] for c in TEMPLATES["production"]["columns"]] + ["Kazanılan Saat"],
+        [
+            [
+                p.prod_date,
+                p.semi_finished_code or "",
+                p.quantity,
+                wc_code.get(p.work_center_id),
+                item_code.get(p.item_id),
+                p.operation_seq,
+                p.reported_hours,
+                p.reported_time_basis,
+                p.good_qty,
+                p.scrap_qty,
+                p.rework_qty,
+                p.quality_status,
+                p.order_no or "",
+                p.earned_hours,
+            ]
+            for p in db.query(ProductionActual).order_by(ProductionActual.prod_date)
+        ],
+    )
+    machine_code = {m.id: m.code for m in db.query(Machine).all()}
+    _ws_from_rows(
+        wb,
+        "Günlük Duruşlar",
+        [c[1] for c in TEMPLATES["downtime"]["columns"]],
+        [
+            [
+                d.dt_date,
+                wc_code.get(d.work_center_id),
+                d.reason_code,
+                d.reason_desc,
+                d.minutes,
+                d.duration_minutes,
+                d.time_basis,
+                d.affected_headcount,
+                machine_code.get(d.machine_id),
+                "E" if d.planned_loss else "H",
+            ]
+            for d in db.query(Downtime).order_by(Downtime.dt_date)
+        ],
+    )
     _ws_from_rows(wb, "Haftalık İş Gücü", [c[1] for c in TEMPLATES["wc_weeks"]["columns"]],
                   [[wc_code.get(w.work_center_id), w.week_start, w.headcount, w.efficient_hours_per_person, w.working_days, w.note] for w in db.query(WorkCenterWeek).order_by(WorkCenterWeek.work_center_id, WorkCenterWeek.week_start)])
     _ws_from_rows(wb, "Senaryo Kuralları", [c[1] for c in TEMPLATES["op_rules"]["columns"]],

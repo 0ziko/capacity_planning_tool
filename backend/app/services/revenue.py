@@ -5,7 +5,7 @@ from datetime import date, timedelta
 
 from sqlalchemy.orm import Session
 
-from app.models import Order
+from app.models import Order, Shipment
 from app.schemas import (
     AutoPlanRequest,
     CompareOrderRow,
@@ -51,6 +51,8 @@ def revenue_report(db: Session, wc_ids: list[int] | None, start: date, weeks: in
     completed_w: dict[date, float] = defaultdict(float)
     completed_n: dict[date, int] = defaultdict(int)
     earned_w: dict[date, float] = defaultdict(float)
+    planned_ship_w: dict[date, float] = defaultdict(float)
+    actual_ship_w: dict[date, float] = defaultdict(float)
     planned_rev = partial_rev = unplanned_rev = 0.0
     no_price = 0
     for s in sched:
@@ -65,6 +67,13 @@ def revenue_report(db: Session, wc_ids: list[int] | None, start: date, weeks: in
             partial_rev += s.revenue
         elif s.plan_status == "unplanned":
             unplanned_rev += s.revenue
+        if s.planned_end and s.revenue > 0:
+            planned_ship_w[cap.week_start(s.planned_end)] += s.revenue
+    order_price = {o.id: (o.unit_price or 0.0) for o in orders}
+    ship_rows = db.query(Shipment).filter(Shipment.ship_date >= start, Shipment.ship_date <= horizon_end).all()
+    for sh in ship_rows:
+        pr = order_price.get(sh.order_id, 0.0)
+        actual_ship_w[cap.week_start(sh.ship_date)] += sh.quantity * pr
     for l in lines:
         s = sched_by_id.get(l.order_id)
         if not s or s.required_hours <= 0 or s.revenue <= 0:
@@ -90,7 +99,21 @@ def revenue_report(db: Session, wc_ids: list[int] | None, start: date, weeks: in
         e = earned_w.get(wk, 0.0)
         cum_c += c
         cum_e += e
-        week_rows.append(PeriodRevenue(period=wk.isoformat(), completed_revenue=round(c, 2), completed_orders=completed_n.get(wk, 0), earned_revenue=round(e, 2), cumulative_completed=round(cum_c, 2), cumulative_earned=round(cum_e, 2)))
+        ps = planned_ship_w.get(wk, 0.0)
+        ash = actual_ship_w.get(wk, 0.0)
+        week_rows.append(
+            PeriodRevenue(
+                period=wk.isoformat(),
+                completed_revenue=round(c, 2),
+                completed_orders=completed_n.get(wk, 0),
+                earned_revenue=round(e, 2),
+                proportional_plan_revenue=round(e, 2),
+                planned_shipment_revenue=round(ps, 2),
+                actual_shipment_revenue=round(ash, 2),
+                cumulative_completed=round(cum_c, 2),
+                cumulative_earned=round(cum_e, 2),
+            )
+        )
         # ay: haftanin Pazartesi'sine gore (tamamlanan icin gercek bitis gunu kullanilir)
         month_e[_month_key(wk)] += e
     for s in sched:
@@ -105,7 +128,19 @@ def revenue_report(db: Session, wc_ids: list[int] | None, start: date, weeks: in
         e = month_e.get(m, 0.0)
         cum_c += c
         cum_e += e
-        month_rows.append(PeriodRevenue(period=m, completed_revenue=round(c, 2), completed_orders=month_n.get(m, 0), earned_revenue=round(e, 2), cumulative_completed=round(cum_c, 2), cumulative_earned=round(cum_e, 2)))
+        month_rows.append(
+            PeriodRevenue(
+                period=m,
+                completed_revenue=round(c, 2),
+                completed_orders=month_n.get(m, 0),
+                earned_revenue=round(e, 2),
+                proportional_plan_revenue=round(e, 2),
+                planned_shipment_revenue=0.0,
+                actual_shipment_revenue=0.0,
+                cumulative_completed=round(cum_c, 2),
+                cumulative_earned=round(cum_e, 2),
+            )
+        )
 
     return RevenueOut(
         start=start,

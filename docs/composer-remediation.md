@@ -477,3 +477,32 @@ Ornekler: 100 siparis + 30 dis rezervasyon → net 70 plan saati; 20 uretim + 20
 | 5 | Legacy saat ayni + eksik tanim uyarisi | ✓ `test_resource_model_faz10::test_legacy_unchanged_and_missing_definition_warning` |
 | 6 | Backend suite | **125 passed**, 2 skipped, 3 failed (bilinen flaky: `test_job_move_revision` x2, `test_wip_multi_route`; ortam/siralama) (~47s) |
 | 7 | Frontend build | Basarili (Vite 5.4.21) |
+
+## FAZ 11 — pilot gunluk cizelgeleme ve parti hazirligi (M4)
+
+| Dosya | Degisiklik |
+|---|---|
+| `backend/app/models/planning.py` | `PlanScheduleVersion`, `PlanOperationSegment` |
+| `backend/app/models/master.py` | `SetupFamilyTransition`, `setup_family` |
+| `backend/app/services/daily_scheduler.py` | Deterministik gunluk motor |
+| `backend/app/services/calendar_capacity.py` | `machine_work_intervals`, `work_center_crew_pool_size` |
+| `backend/app/services/planning.py` | `planning_granularity=daily_detailed` |
+| `backend/app/services/gantt.py` | Segment kaynagi |
+| `backend/app/api/planning.py` | segments + lock |
+| `frontend` | Pilot checkbox |
+| `docs/daily-scheduling-pilot.md` | Politika |
+| `backend/tests/test_daily_schedule_faz11.py` | 8 kabul testi |
+
+### FAZ 11 kabul olcutleri
+
+| # | Olcut | Sonuc |
+|---|---|---|
+| 1 | Makine cakismasi / liste disi yok | ✓ `test_machine_segments_no_overlap` |
+| 2 | Havuz 2 kisi, 2x2 eszamanli yok | ✓ `test_crew_pool_rejects_two_parallel_two_person_ops` |
+| 3 | +14 gun takvim bekleme | ✓ `test_predecessor_wait_14_calendar_days` |
+| 4 | Malzeme/tatil oncesi yok | ✓ `test_material_and_holiday_block` |
+| 5 | Setup/parti politikasi | ✓ `test_setup_once_same_batch_two_shifts` |
+| 6 | Kilit + Gantt eslesmesi | ✓ `test_locked_segment_unchanged_and_gantt_matches` |
+| 7 | Kalan miktar raporu | ✓ `test_capacity_shortfall_reports_remaining` |
+| 8 | Backend suite | **133 passed**, 2 skipped, 3 failed (flaky: job_move x2, wip_multi_route) (~46s) |
+| 9 | Frontend build | Basarili |

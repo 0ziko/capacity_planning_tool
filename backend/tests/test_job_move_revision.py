@@ -2,8 +2,17 @@
 
 from datetime import timedelta
 
+from app.models import Order, Reservation
+from app.models import ProductionActual, Shipment
+from app.services.order_finished_netting import PROVENANCE_EXTERNAL, compute_order_demand_netting
 from tests.test_capacity_flow import _upload
 from tests.test_revenue_modes import WEEK, _setup
+
+
+def _wc_capacity_hours(client, auth, wc_id: int, week_start: str) -> float:
+    load = client.get("/api/plan/load", headers=auth, params={"start": week_start, "weeks": 1, "work_center_ids": [wc_id]}).json()
+    assert load and load[0]["weeks"], "kapasite yuklenemedi"
+    return float(load[0]["weeks"][0]["capacity_hours"])
 
 
 def _two_wcs(client, auth):
@@ -40,8 +49,19 @@ def _two_wcs(client, auth):
             ["MOVE2", 20, "Paket", "MOVE-1", 3600],
         ],
     )
-    wcs = {w["code"]: w["id"] for w in client.get("/api/workcenters", headers=auth).json()}
-    return wcs["MOVE-1"], wcs["MOVE-X"]
+    wcs = {w["code"]: w for w in client.get("/api/workcenters", headers=auth).json()}
+    for code in ("MOVE-1", "MOVE-X"):
+        wc = wcs[code]
+        body = {k: v for k, v in wc.items() if k not in ("shifts", "machines", "employee_count", "machine_employee_count", "capacity_headcount")}
+        body["planning_reserve_pct"] = 0.0
+        client.put(f"/api/workcenters/{wc['id']}", headers=auth, json=body)
+    wcs = {w["code"]: w for w in client.get("/api/workcenters", headers=auth).json()}
+    wc1, wcx = wcs["MOVE-1"]["id"], wcs["MOVE-X"]["id"]
+    week2 = (WEEK + timedelta(weeks=1)).isoformat()
+    assert _wc_capacity_hours(client, auth, wc1, WEEK.isoformat()) == 200.0
+    assert _wc_capacity_hours(client, auth, wc1, week2) == 200.0
+    assert _wc_capacity_hours(client, auth, wcx, WEEK.isoformat()) == 200.0
+    return wc1, wcx
 
 
 def _hours_by_order_week(lines, week):
@@ -52,15 +72,59 @@ def _hours_by_order_week(lines, week):
     return out
 
 
-def test_job_move_free_capacity_keeps_unrelated_and_same_wc(client, auth):
+def _assert_job_move_clean_slate(db, order_nos: tuple[str, ...]):
+    assert db.query(ProductionActual).count() == 0
+    assert db.query(Shipment).count() == 0
+    assert db.query(Reservation).count() == 0
+    if order_nos:
+        ids = [o.id for o in db.query(Order).filter(Order.order_no.in_(order_nos)).all()]
+        if ids:
+            assert db.query(Reservation).filter(Reservation.order_id.in_(ids)).count() == 0
+
+
+def test_order_delete_clears_reservation_no_id_reuse_credit(client, auth, db):
+    wc1, _wcx = _two_wcs(client, auth)
+    r = client.post(
+        "/api/orders",
+        headers=auth,
+        json={"order_no": "JM-RES", "due_date": "2026-09-11", "item_code": "MOVEA", "quantity": 50},
+    )
+    oid = r.json()["id"]
+    order = db.get(Order, oid)
+    db.add(
+        Reservation(
+            item_id=order.item_id,
+            order_id=oid,
+            quantity=30,
+            source="manual",
+            stock_provenance=PROVENANCE_EXTERNAL,
+        )
+    )
+    db.commit()
+    client.delete("/api/orders", headers=auth, params={"status": "open"})
+    db.expire_all()
+    assert db.query(Reservation).filter(Reservation.order_id == oid).count() == 0
+    r2 = client.post(
+        "/api/orders",
+        headers=auth,
+        json={"order_no": "JM-RES2", "due_date": "2026-09-11", "item_code": "MOVEA", "quantity": 50},
+    )
+    order2 = db.get(Order, r2.json()["id"])
+    net = compute_order_demand_netting(db, order2)
+    assert net.net_production_qty == 50.0
+
+
+def test_job_move_free_capacity_keeps_unrelated_and_same_wc(client, auth, db):
     wc1, wcx = _two_wcs(client, auth)
     week2 = (WEEK + timedelta(weeks=1)).isoformat()
+    order_nos = ("JM-A", "JM-B", "JM-C")
     for no, due, item, qty in [
         ("JM-A", "2026-09-11", "MOVEA", 50),
         ("JM-B", "2026-09-18", "MOVEB", 50),
         ("JM-C", "2026-09-11", "MOVEC", 80),
     ]:
         assert client.post("/api/orders", headers=auth, json={"order_no": no, "due_date": due, "item_code": item, "quantity": qty}).status_code == 201
+    _assert_job_move_clean_slate(db, order_nos)
 
     planned = client.post("/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 2, "work_center_ids": [wc1, wcx], "mode": "due_date"}).json()
     assert planned["created"] >= 3
@@ -113,15 +177,17 @@ def test_job_move_free_capacity_keeps_unrelated_and_same_wc(client, auth):
     assert round(w2.get("JM-A", 0), 1) == 0
 
 
-def test_job_move_overflow_bumps_only_same_wc(client, auth):
+def test_job_move_overflow_bumps_only_same_wc(client, auth, db):
     wc1, wcx = _two_wcs(client, auth)
     week2 = (WEEK + timedelta(weeks=1)).isoformat()
+    order_nos = ("JM-A", "JM-B", "JM-C")
     for no, due, item, qty in [
         ("JM-A", "2026-09-11", "MOVEA", 150),
         ("JM-B", "2026-09-18", "MOVEB", 80),
         ("JM-C", "2026-09-11", "MOVEC", 100),
     ]:
         assert client.post("/api/orders", headers=auth, json={"order_no": no, "due_date": due, "item_code": item, "quantity": qty}).status_code == 201
+    _assert_job_move_clean_slate(db, order_nos)
 
     client.post("/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 2, "work_center_ids": [wc1, wcx], "mode": "due_date"})
     orders = {o["order_no"]: o for o in client.get("/api/orders", headers=auth).json()}

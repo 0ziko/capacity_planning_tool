@@ -2,6 +2,7 @@
 
 from datetime import date
 
+from app.models.planning import ProductionActual
 from tests.test_capacity_flow import _upload
 
 WEEK = date(2026, 9, 7)
@@ -45,9 +46,9 @@ def test_production_import_multi_route_wip_fifo(client, auth):
         "orders",
         ["Sipariş No", "Termin", "Stok Kodu", "Miktar"],
         [
-            ["S-LATE", "2026-12-31", "6995984", 50],
-            ["S-MID", "2026-10-15", "6995575", 40],
-            ["S-EARLY", "2026-09-15", "6995510", 30],
+            ["S-LATE30", "2026-12-31", "6995984", 50],
+            ["S-MID40", "2026-10-15", "6995575", 40],
+            ["S-EARLY30", "2026-09-15", "6995510", 30],
         ],
     )
     cols = [
@@ -65,12 +66,12 @@ def test_production_import_multi_route_wip_fifo(client, auth):
     assert r["inserted"] >= 1
 
     prog = {p["order_no"]: p for p in client.get("/api/progress/orders", headers=auth).json()}
-    assert prog["S-EARLY"]["ops"][0]["produced_qty"] == 30
-    assert prog["S-MID"]["ops"][0]["produced_qty"] == 40
-    assert prog["S-LATE"]["ops"][0]["produced_qty"] == 30
+    assert prog["S-EARLY30"]["ops"][0]["produced_qty"] == 30
+    assert prog["S-MID40"]["ops"][0]["produced_qty"] == 40
+    assert prog["S-LATE30"]["ops"][0]["produced_qty"] == 30
 
 
-def test_production_import_excel_serial_date(client, auth):
+def test_production_import_excel_serial_date(client, auth, db):
     _setup_multi_route(client, auth)
     _upload(
         client,
@@ -80,13 +81,21 @@ def test_production_import_excel_serial_date(client, auth):
         [["S-1", "2026-12-01", "6995510", 100]],
     )
     cols = ["Tarih", "Yarımamül Kodu", "Miktar", "Sipariş No (opsiyonel)"]
-    # 46273 = 2026-09-08 (Excel serial)
-    r = _upload(client, auth, "production", cols, [[46273, WIP, 10, ""]])
+    # 46274 = 2026-09-08 (Excel 1900 tarih sistemi; mevcut _excel_serial_date ile)
+    r = _upload(client, auth, "production", cols, [[46274, WIP, 10, "S-1"]])
     assert not r["errors"], r["errors"]
 
-    prog = client.get("/api/progress/orders", headers=auth, params={"as_of": "2026-09-08"}).json()
-    row = next(p for p in prog if p["order_no"] == "S-1")
-    assert row["ops"][0]["produced_qty"] == 10
+    pa = db.query(ProductionActual).filter(ProductionActual.order_no == "S-1").one()
+    assert pa.prod_date == date(2026, 9, 8)
+    assert float(pa.quantity) == 10.0
+
+    prog7 = client.get("/api/progress/orders", headers=auth, params={"as_of": "2026-09-07"}).json()
+    row7 = next(p for p in prog7 if p["order_no"] == "S-1")
+    assert row7["ops"][0]["produced_qty"] == 0
+
+    prog8 = client.get("/api/progress/orders", headers=auth, params={"as_of": "2026-09-08"}).json()
+    row8 = next(p for p in prog8 if p["order_no"] == "S-1")
+    assert row8["ops"][0]["produced_qty"] == 10
 
 
 def test_production_import_multi_route_with_item_hint(client, auth):

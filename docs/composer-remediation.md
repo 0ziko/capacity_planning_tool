@@ -530,7 +530,7 @@ Ornekler: 100 siparis + 30 dis rezervasyon → net 70 plan saati; 20 uretim + 20
 | 3 | `production_as_of` sonrasi uretim plan girdisine girmez | ✓ `test_production_after_as_of_excluded_from_plan_input` |
 | 4 | Sentetik benchmark fabrika performansi degil | ✓ `test_synthetic_benchmark_not_factory_performance` |
 | 5 | Sezgisel vs brute-force referans (test-only) | ✓ `test_heuristic_vs_brute_force_lateness_gap` |
-| 6 | Backend suite | **138 passed**, 2 skipped, **3 failed** (FAZ 12 disi / bilinen: `test_job_move_revision` x2, `test_wip_multi_route::test_production_import_excel_serial_date`; ~54s) |
+| 6 | Backend suite | **142 passed**, 2 skipped (FAZ 12 sonrasi test izolasyonu duzeltmesi ile; bkz. asagi) |
 | 7 | Frontend build | Basarili (Vite 5.4.21, ~2.1s) |
 
 ### Pilot / B1–B7 son durum (kod + test kaniti)
@@ -541,8 +541,8 @@ Ornekler: 100 siparis + 30 dis rezervasyon → net 70 plan saati; 20 uretim + 20
 | Miktar korunumu / oncul / cakisma | FAZ 04–11 testleri suite icinde (133+ gecen cekirdek) |
 | Idempotency / onay-snapshot | `test_revision_snapshot.py`, `test_plan_revisions.py` geciyor |
 | PostgreSQL kritik entegrasyon | Testler **sqlite** izole DB; canli PG icin ayri kosul yok — production `ensure_columns` migration yolu mevcut |
-| Job move revizyon (2 test) | **Basarisiz** — kapasite/yerlestirme beklentisi ile gercek sonuc uyusmuyor (FAZ 12 ile ilgisiz) |
-| WIP coklu rota Excel tarih | **Basarisiz** — uretim import eslestirme (FAZ 12 ile ilgisiz) |
+| Job move revizyon | ✓ `test_job_move_revision.py` (5 test) |
+| WIP coklu rota / Excel seri tarih | ✓ `test_wip_multi_route.py` |
 
 ### Kullanicinin tamamlamasi gereken veri tanimlari
 
@@ -563,4 +563,50 @@ Ornekler: 100 siparis + 30 dis rezervasyon → net 70 plan saati; 20 uretim + 20
 | 11 | Gunluk pilot cizelge (M4) | ✓ |
 | 12 | Plan kalitesi olcumu (M6/M7/T3) | ✓ (bu commit) |
 
-**Kalan urun engelleri (veri/kalite):** daily_detailed alan tanimlari, gercek backtest snapshot zinciri, job_move ve WIP import flaky testlerinin kok nedeni (ayri is).
+**Kalan urun engelleri (veri/kalite):** daily_detailed alan tanimlari, gercek backtest snapshot zinciri (test suite kalitesi ayri duzeltildi).
+
+---
+
+## Test izolasyonu — suite 3 failure duzeltmesi (FAZ 12 sonrasi)
+
+**Once (HEAD `a25ee39`):** `138 passed`, 2 skipped, **3 failed** — `test_job_move_revision` x2, `test_production_import_excel_serial_date`.
+
+**Sonra:** `backend\.venv\Scripts\python.exe -m pytest -p no:cacheprovider tests/ -q` → **142 passed**, 2 skipped (~49s).
+
+### Kok nedenler
+
+| # | Belirti | Kok neden |
+|---|---|---|
+| 1 | `finished_stock_netting` + `integrity` + `job_move` → JM-A 20 saat | `test_orphan_repair_and_tolerance` paylasilan SQLite engine'de `PRAGMA foreign_keys=OFF` birakiyordu; toplu siparis silmede rezervasyonlar kalip **yeniden kullanilan order id** ile yeni siparise 30 adet stok kredisi yansiyordu |
+| 2 | Excel seri tarih suite icinde 0 uretim | FIFO testi bos `Sipariş No` ile uretim yukluyordu; seri tarih testi ayni WIP havuzunda baska siparise eslesiyordu |
+| 3 | (Teshis) | Gecici `engine.dispose()` kalici cozum degil |
+
+### Degisen dosyalar
+
+| Dosya | Degisiklik |
+|---|---|
+| `backend/tests/test_integrity.py` | Yetim senaryo **izole SQLite DB** + `get_db` override; FK OFF yalniz o engine; paylasilan engine FK=1 regresyonu |
+| `backend/tests/conftest.py` | Autouse: `Reservation`, `Shipment`, `OrderMaterialLog`, tum `Order` temizligi |
+| `backend/tests/test_job_move_revision.py` | `planning_reserve_pct=0`, 200 saat onkosul, temiz slate assert, rezervasyon cascade regresyonu |
+| `backend/tests/test_wip_multi_route.py` | FIFO ayri siparis no'lari; seri tarihte `S-1` + `ProductionActual` + `as_of` 07/08; Excel seri **46274** (2026-09-08, mevcut parser) |
+| `backend/app/api/master.py` | Toplu/tekil siparis silmede `Reservation`/`Shipment`/`PlanLine` temizligi |
+
+### Kabul komutlari (hepsi gecti)
+
+- `tests/test_job_move_revision.py` — 5 passed  
+- `tests/test_wip_multi_route.py` — 3 passed  
+- `tests/test_finished_stock_netting.py` + `test_integrity.py` + `test_job_move_revision.py` — 15 passed  
+- `tests/` tam suite — 142 passed, 2 skipped  
+
+### Bilinen 2 skip (degismedi)
+
+| Test | Neden |
+|---|---|
+| `test_backup_faz09.py` | `TEST_PG_URL` yok — PostgreSQL pg_dump/restore dongusu |
+| `test_revision_pg_race.py` | `TEST_PG_URL` yok — gecici PG race |
+| `test_production_bom.py` | `BOM.xlsx` masaustunde yok (3. skip kosullu) |
+
+### Hâlâ acik (bu gorev kapsami disi)
+
+- `daily_detailed` master veri tanimlari  
+- Tarihsel backtest snapshot verisi  

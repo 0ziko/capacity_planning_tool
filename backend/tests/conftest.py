@@ -42,15 +42,18 @@ def db():
 
 @pytest.fixture(autouse=True)
 def _isolate_planning_artifacts(db):
-    """Testler arasi uretim/plan kalintisi otomatik planlamayi etkilemesin."""
-    from app.models import Downtime, PlanLine, ProductionActual
+    """Testler arasi plan/uretim/siparis kalintisi otomatik planlamayi etkilemesin."""
+    from app.models import Downtime, Order, PlanLine, ProductionActual
     from app.models.planning import (
+        OrderMaterialLog,
         PlanRevision,
         PlanRevisionChange,
         PlanRevisionEvent,
         PlanRevisionSnapshot,
         ProductionBatch,
         ProductionBatchOrder,
+        Reservation,
+        Shipment,
     )
 
     db.query(PlanRevisionEvent).delete()
@@ -62,6 +65,11 @@ def _isolate_planning_artifacts(db):
     db.query(ProductionActual).delete()
     db.query(ProductionBatchOrder).delete()
     db.query(ProductionBatch).delete()
+    db.query(Shipment).delete()
+    db.query(Reservation).delete()
+    db.query(OrderMaterialLog).delete()
+    db.query(Order).filter(Order.merged_into_id.isnot(None)).update({Order.merged_into_id: None}, synchronize_session=False)
+    db.query(Order).delete()
     db.commit()
     yield
 

@@ -16,6 +16,8 @@ from app.models import (
     Order,
     PlanLine,
     ProductionActual,
+    Reservation,
+    Shipment,
     ResourceCalendarException,
     RoutingOperation,
     RoutingOperationStation,
@@ -502,6 +504,9 @@ def delete_order(order_id: int, db: Session = Depends(get_db), _=Depends(require
         raise HTTPException(404, "Siparis bulunamadi")
     if db.query(Order).filter(Order.merged_into_id == order_id).first():
         raise HTTPException(400, "Bu birlesik siparisi silmek icin once birlestirmeyi geri alin")
+    db.query(PlanLine).filter(PlanLine.order_id == order_id).delete(synchronize_session=False)
+    db.query(Reservation).filter(Reservation.order_id == order_id).delete(synchronize_session=False)
+    db.query(Shipment).filter(Shipment.order_id == order_id).delete(synchronize_session=False)
     db.delete(o)
     db.commit()
 
@@ -524,8 +529,10 @@ def set_order_status(order_id: int, status: str, db: Session = Depends(get_db), 
 def delete_orders(status: str = "closed", db: Session = Depends(get_db), _=Depends(require_poweruser)):
     ids = [i for (i,) in db.query(Order.id).filter(Order.status == status).all()]
     if ids:
-        # toplu silmede ORM cascade calismaz; plan satirlarini ve birlestirme referanslarini elle temizle
+        # toplu silmede ORM cascade calismaz; bagli kayitlari elle temizle
         db.query(PlanLine).filter(PlanLine.order_id.in_(ids)).delete(synchronize_session=False)
+        db.query(Reservation).filter(Reservation.order_id.in_(ids)).delete(synchronize_session=False)
+        db.query(Shipment).filter(Shipment.order_id.in_(ids)).delete(synchronize_session=False)
         db.query(Order).filter(Order.merged_into_id.in_(ids)).update({Order.merged_into_id: None}, synchronize_session=False)
         db.query(Order).filter(Order.id.in_(ids)).delete(synchronize_session=False)
     db.commit()

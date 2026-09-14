@@ -140,6 +140,20 @@ export interface WorkCenter {
 }
 export interface Employee { id: number; code: string; name: string; work_center_id: number | null; machine_id: number | null; is_active: boolean; machine_code?: string }
 export interface Item { id: number; code: string; name: string; main_group: string; sub_group: string; product_group: string; unit: string }
+export type TimeBasis = "labor_seconds_per_unit" | "machine_seconds_per_cycle" | "legacy_unspecified";
+export interface OperationOut {
+  id: number; seq: number; operation_name: string; work_center_id: number;
+  cycle_time_sec: number; setup_time_min: number;
+  time_basis: TimeBasis; crew_size: number | null; machine_cycle_time_sec: number | null;
+  setup_labor_minutes: number | null; setup_machine_minutes: number | null; units_per_cycle: number;
+  missing_resource_definition: boolean;
+  semi_finished_code: string; wip_code?: string; primary_machine_code?: string;
+  stations?: { machine_code: string; machine_name?: string; is_primary: boolean }[];
+}
+export interface ResourceModelStats {
+  total_operations: number; legacy_unspecified: number; labor_seconds_per_unit: number;
+  machine_seconds_per_cycle: number; missing_detailed_schedule_definition: number;
+}
 export interface BomLineOut {
   id: number;
   component_code: string;
@@ -152,10 +166,7 @@ export interface BomLineOut {
 }
 export interface ItemDetail extends Item {
   bom_lines: BomLineOut[];
-  operations: {
-    id: number; seq: number; operation_name: string; work_center_id: number; cycle_time_sec: number; setup_time_min: number;
-    semi_finished_code: string; wip_code?: string; primary_machine_code?: string; stations?: { machine_code: string; machine_name?: string; is_primary: boolean }[];
-  }[];
+  operations: OperationOut[];
   child_wips?: { code: string; name: string; operation_count: number }[];
 }
 export interface Order {

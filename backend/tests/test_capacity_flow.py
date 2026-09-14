@@ -40,9 +40,10 @@ def test_full_flow(client, auth):
     wc_id = wc["id"]
 
     cap = client.get("/api/capacity", headers=auth, params={"start": WEEK.isoformat()}).json()
-    assert cap[0]["capacity_hours"] == 200
-    assert cap[0]["capacity_units"] == 20
-    assert len(cap[0]["days"]) == 5
+    cap_a = next(c for c in cap if c["work_center_code"] == "TZG-A")
+    assert cap_a["capacity_hours"] == 200
+    assert cap_a["capacity_units"] == 20
+    assert len(cap_a["days"]) == 5
 
     # stok + rota (50 sn/adet) + siparis (10000 adet => 138.9 saat)
     _upload(client, auth, "items", ["Stok Kodu", "Stok Adı", "Ürün Grubu"], [["MAM-1", "Ocak", "OCAK"]])

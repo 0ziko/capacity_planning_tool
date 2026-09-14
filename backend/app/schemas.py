@@ -122,6 +122,9 @@ class OperationStationOut(ORM):
     is_primary: bool = False
 
 
+TimeBasisLiteral = Literal["labor_seconds_per_unit", "machine_seconds_per_cycle", "legacy_unspecified"]
+
+
 class OperationOut(ORM):
     id: int
     seq: int
@@ -129,10 +132,50 @@ class OperationOut(ORM):
     work_center_id: int
     cycle_time_sec: float
     setup_time_min: float
+    time_basis: TimeBasisLiteral = "legacy_unspecified"
+    crew_size: int | None = None
+    machine_cycle_time_sec: float | None = None
+    setup_labor_minutes: float | None = None
+    setup_machine_minutes: float | None = None
+    units_per_cycle: int = 1
+    missing_resource_definition: bool = False
     semi_finished_code: str = ""
     wip_code: str = ""
     primary_machine_code: str = ""
     stations: list[OperationStationOut] = []
+
+
+class OperationPatchIn(BaseModel):
+    time_basis: TimeBasisLiteral | None = None
+    crew_size: int | None = None
+    machine_cycle_time_sec: float | None = None
+    setup_labor_minutes: float | None = None
+    setup_machine_minutes: float | None = None
+    units_per_cycle: int | None = None
+    cycle_time_sec: float | None = None
+    setup_time_min: float | None = None
+
+
+class ResourceModelStatsOut(BaseModel):
+    total_operations: int
+    legacy_unspecified: int
+    labor_seconds_per_unit: int
+    machine_seconds_per_cycle: int
+    missing_detailed_schedule_definition: int
+
+
+class CalendarExceptionIn(BaseModel):
+    resource_type: Literal["work_center", "machine"]
+    resource_id: int
+    cal_date: date
+    start_time: time | None = None
+    end_time: time | None = None
+    exception_kind: Literal["holiday", "maintenance", "closed"] = "holiday"
+    note: str = ""
+
+
+class CalendarExceptionOut(CalendarExceptionIn, ORM):
+    id: int
 
 
 class ChildWipOut(BaseModel):

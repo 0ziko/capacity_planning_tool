@@ -92,6 +92,18 @@ def build_fingerprint_payload(db: Session, req: AutoPlanRequest) -> dict:
                 "work_center_id": op.work_center_id,
                 "cycle_time_sec": round(float(op.cycle_time_sec or 0), 6),
                 "setup_time_min": round(float(op.setup_time_min or 0), 6),
+                "time_basis": getattr(op, "time_basis", None) or "legacy_unspecified",
+                "crew_size": op.crew_size if getattr(op, "crew_size", None) is not None else None,
+                "machine_cycle_time_sec": round(float(op.machine_cycle_time_sec), 6)
+                if getattr(op, "machine_cycle_time_sec", None) is not None
+                else None,
+                "setup_labor_minutes": round(float(op.setup_labor_minutes), 6)
+                if getattr(op, "setup_labor_minutes", None) is not None
+                else None,
+                "setup_machine_minutes": round(float(op.setup_machine_minutes), 6)
+                if getattr(op, "setup_machine_minutes", None) is not None
+                else None,
+                "units_per_cycle": int(getattr(op, "units_per_cycle", None) or 1),
             }
             for op in ops
             if not wc_set or op.work_center_id in wc_set

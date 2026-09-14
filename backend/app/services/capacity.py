@@ -185,6 +185,8 @@ def first_shift_start(wc: WorkCenter, day: date, ov: WorkCenterWeek | None = Non
 
 
 def capacity_for_range(db: Session, wc: WorkCenter, start: date, end: date) -> CapacityOut:
+    from app.services.calendar_capacity import daily_labor_capacity_hours
+
     emp = employee_count(db, wc)
     ovl = Overrides(db, wc.id)
     ovl.preload(start, end)
@@ -192,7 +194,7 @@ def capacity_for_range(db: Session, wc: WorkCenter, start: date, end: date) -> C
     total = 0.0
     d = start
     while d <= end:
-        h = daily_capacity_hours(wc, d, emp, ovl.get(d))
+        h = daily_labor_capacity_hours(db, wc, d, emp, ovl)
         if h > 0:
             days.append(CapacityDay(day=d, hours=round(h, 2)))
             total += h

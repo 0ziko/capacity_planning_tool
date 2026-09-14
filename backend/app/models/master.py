@@ -175,6 +175,13 @@ class RoutingOperation(Base):
     work_center_id: Mapped[int] = mapped_column(ForeignKey("work_centers.id"), index=True)
     cycle_time_sec: Mapped[float] = mapped_column(Float, default=0.0)
     setup_time_min: Mapped[float] = mapped_column(Float, default=0.0)
+    # FAZ 10: insan–makine ayrimi (legacy veri otomatik donusmez)
+    time_basis: Mapped[str] = mapped_column(String(32), default="legacy_unspecified")
+    crew_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    machine_cycle_time_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    setup_labor_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
+    setup_machine_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
+    units_per_cycle: Mapped[int] = mapped_column(Integer, default=1)
     semi_finished_code: Mapped[str] = mapped_column(String(64), default="", index=True)  # operasyon sonu yarımamül
     primary_machine_id: Mapped[int | None] = mapped_column(
         ForeignKey("machines.id", ondelete="SET NULL"), nullable=True, index=True
@@ -188,7 +195,39 @@ class RoutingOperation(Base):
     )
 
     def hours_for(self, quantity: float) -> float:
-        return quantity * self.cycle_time_sec / 3600.0 + self.setup_time_min / 60.0
+        from app.services.routing_resource import planning_load_hours
+
+        return planning_load_hours(self, quantity, setup_required=True)
+
+
+class MachineCalendarEntry(Base):
+    """Makinenin belirli bir gundeki calisma veya bakim araligi."""
+
+    __tablename__ = "machine_calendar_entries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id", ondelete="CASCADE"), index=True)
+    cal_date: Mapped[date] = mapped_column(Date, index=True)
+    start_time: Mapped[time] = mapped_column(Time)
+    end_time: Mapped[time] = mapped_column(Time)
+    entry_kind: Mapped[str] = mapped_column(String(16), default="work")  # work | maintenance
+
+    machine: Mapped["Machine"] = relationship()
+
+
+class ResourceCalendarException(Base):
+    """Gunluk takvim istisnasi (tatil, bakim); haftalik WorkCenterWeek uzerinde onceliklidir."""
+
+    __tablename__ = "resource_calendar_exceptions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    resource_type: Mapped[str] = mapped_column(String(16), index=True)  # work_center | machine
+    resource_id: Mapped[int] = mapped_column(Integer, index=True)
+    cal_date: Mapped[date] = mapped_column(Date, index=True)
+    start_time: Mapped[time | None] = mapped_column(Time, nullable=True)
+    end_time: Mapped[time | None] = mapped_column(Time, nullable=True)
+    exception_kind: Mapped[str] = mapped_column(String(16), default="holiday")  # holiday | maintenance | closed
+    note: Mapped[str] = mapped_column(String(256), default="")
 
 
 class RoutingOperationStation(Base):

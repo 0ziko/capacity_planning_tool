@@ -165,8 +165,14 @@ TEMPLATES: dict[str, dict] = {
             ("setup_time_min", "Setup (dk)", ["setup", "hazirlik", "setupsuresi"]),
             ("semi_finished_code", "Yarımamül Kodu", ["yarimamul", "yarimamulkodu", "wip", "wipkodu", "semifinished"]),
             ("primary_machine_code", "Birincil Makine Kodu", ["birincilmakine", "primarymachine"]),
+            ("time_basis", "Süre Türü", ["timebasis", "sureturu"]),
+            ("crew_size", "Ekip (kişi)", ["crewsize", "ekip"]),
+            ("machine_cycle_time_sec", "Makine Çevrim (sn)", ["machinecycletime"]),
+            ("setup_labor_minutes", "Setup İşgücü (dk)", ["setuplabor"]),
+            ("setup_machine_minutes", "Setup Makine (dk)", ["setupmachine"]),
+            ("units_per_cycle", "Çevrim Başına Adet", ["unitspercycle"]),
         ],
-        "example": ["MAM-0001", 10, "Kesim", "TZG-A", 50, 15, "MAM-0001-K10", ""],
+        "example": ["MAM-0001", 10, "Kesim", "TZG-A", 50, 15, "MAM-0001-K10", "", "legacy_unspecified", "", "", "", "", 1],
         "required": ["item_code", "seq", "wc_code", "cycle_time_sec"],
     },
     "orders": {
@@ -755,6 +761,30 @@ def import_routing(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
                 if not m:
                     raise ValueError(f"Makine bulunamadi: {r.get('primary_machine_code')}")
                 op.primary_machine_id = m.id
+            tb = _str(r.get("time_basis"))
+            if tb:
+                from app.services.routing_resource import TIME_BASIS_VALUES
+
+                if tb not in TIME_BASIS_VALUES:
+                    raise ValueError(f"Gecersiz time_basis: {tb}")
+                op.time_basis = tb
+            cs = _int(r.get("crew_size"), None)
+            if cs is not None:
+                op.crew_size = cs
+            mct = r.get("machine_cycle_time_sec")
+            if mct not in (None, ""):
+                op.machine_cycle_time_sec = _float(mct, 0.0)
+            sl = r.get("setup_labor_minutes")
+            if sl not in (None, ""):
+                op.setup_labor_minutes = _float(sl, 0.0)
+            sm = r.get("setup_machine_minutes")
+            if sm not in (None, ""):
+                op.setup_machine_minutes = _float(sm, 0.0)
+            upc = _int(r.get("units_per_cycle"), None)
+            if upc is not None:
+                if upc < 1:
+                    raise ValueError("units_per_cycle pozitif olmali")
+                op.units_per_cycle = upc
         except Exception as e:  # noqa: BLE001
             errs.append(f"Satir {r['_row']}: {e}")
     return ins, upd, errs
@@ -1490,6 +1520,12 @@ def build_backup(db: Session) -> bytes:
                 o.setup_time_min,
                 o.semi_finished_code,
                 machine_code.get(o.primary_machine_id) if o.primary_machine_id else "",
+                getattr(o, "time_basis", None) or "legacy_unspecified",
+                getattr(o, "crew_size", None) or "",
+                getattr(o, "machine_cycle_time_sec", None) or "",
+                getattr(o, "setup_labor_minutes", None) or "",
+                getattr(o, "setup_machine_minutes", None) or "",
+                getattr(o, "units_per_cycle", None) or 1,
             ]
             for o in db.query(RoutingOperation).order_by(RoutingOperation.item_id, RoutingOperation.seq)
         ],

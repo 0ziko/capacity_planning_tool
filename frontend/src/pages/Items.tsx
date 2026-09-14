@@ -1,12 +1,21 @@
 import { useEffect, useState } from "react";
-import { api, fmt, qs, type Item, type ItemDetail } from "../api";
+import { api, fmt, qs, type Item, type ItemDetail, type OperationOut, type ResourceModelStats, type TimeBasis } from "../api";
+import { useAuth } from "../auth";
 import { ErrorText, StringMultiSelect, useAsync, useWorkCenters } from "../components";
 import BomTreeView from "../components/BomTreeView";
 
 interface ItemHours { item_code: string; item_name?: string; quantity: number; total_hours: number; operations: { seq: number; operation_name: string; work_center_code: string; cycle_time_sec: number; setup_time_min: number; hours: number }[] }
 interface ItemGroups { main_groups: string[]; sub_groups: string[] }
 
+const TIME_BASIS_OPTS: { v: TimeBasis; l: string }[] = [
+  { v: "legacy_unspecified", l: "Legacy (belirsiz)" },
+  { v: "labor_seconds_per_unit", l: "İşgücü sn/adet" },
+  { v: "machine_seconds_per_cycle", l: "Makine sn/çevrim" },
+];
+
 export default function Items() {
+  const { can } = useAuth();
+  const canEdit = can("poweruser");
   const { wcs } = useWorkCenters();
   const [q, setQ] = useState("");
   const [mainGroups, setMainGroups] = useState<string[]>([]);
@@ -21,7 +30,11 @@ export default function Items() {
 
   const listParams = { q: q || undefined, main_group: mainGroups.length ? mainGroups : undefined, sub_group: subGroups.length ? subGroups : undefined, limit: 300 };
   const list = useAsync(() => api.get<Item[]>(`/api/items${qs(listParams)}`), [q, mainGroups.join(","), subGroups.join(",")]);
-  const detail = useAsync(() => (sel ? api.get<ItemDetail>(`/api/items/${sel.id}`) : Promise.resolve(null)), [sel?.id]);
+  const [detailRev, setDetailRev] = useState(0);
+  const detail = useAsync(() => (sel ? api.get<ItemDetail>(`/api/items/${sel.id}`) : Promise.resolve(null)), [sel?.id, detailRev]);
+  const resStats = useAsync(() => api.get<ResourceModelStats>("/api/resource-model/stats"), []);
+  const [editOp, setEditOp] = useState<OperationOut | null>(null);
+  const [saveMsg, setSaveMsg] = useState("");
   const hours = useAsync(() => (sel ? api.get<ItemHours>(`/api/requirements/item${qs({ item_code: sel.code, quantity: qty })}`) : Promise.resolve(null)), [sel?.code, qty]);
   const wcCode = (id: number) => wcs.find((w) => w.id === id)?.code ?? id;
 
@@ -36,6 +49,11 @@ export default function Items() {
           <button className="secondary" onClick={() => { setMainGroups([]); setSubGroups([]); }}>Grup filtrelerini temizle</button>
         )}
         <span className="muted">BOM ve rota verileri Excel import ile yüklenir.</span>
+        {resStats.data && (
+          <span className="muted" title="Ayrıntılı günlük çizelge için tanım eksikleri">
+            Kaynak modeli: {resStats.data.legacy_unspecified} legacy · {resStats.data.missing_detailed_schedule_definition} ayrıntılı çizelge eksik
+          </span>
+        )}
       </div>
       <ErrorText err={list.err || detail.err} />
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 14 }}>
@@ -72,16 +90,49 @@ export default function Items() {
                     Alt yarı mamuller: {detail.data.child_wips!.map((w) => `${w.code} (${w.operation_count} op.)`).join(" · ")}
                   </p>
                 )}
+                {saveMsg && <p className="muted">{saveMsg}</p>}
+                {canEdit && editOp && (
+                  <div className="panel row" style={{ marginBottom: 10 }}>
+                    <b>Op {editOp.seq} kaynak tanımı</b>
+                    <label>Süre türü
+                      <select value={editOp.time_basis} onChange={(e) => setEditOp({ ...editOp, time_basis: e.target.value as TimeBasis })}>
+                        {TIME_BASIS_OPTS.map((o) => <option key={o.v} value={o.v}>{o.l}</option>)}
+                      </select>
+                    </label>
+                    <label>Ekip (kişi)<input type="number" min={1} value={editOp.crew_size ?? ""} onChange={(e) => setEditOp({ ...editOp, crew_size: e.target.value ? Number(e.target.value) : null })} /></label>
+                    <label>Çevrim/adet<input type="number" min={1} value={editOp.units_per_cycle} onChange={(e) => setEditOp({ ...editOp, units_per_cycle: Number(e.target.value) || 1 })} /></label>
+                    <label>Makine çevrim (sn)<input type="number" min={0} value={editOp.machine_cycle_time_sec ?? ""} onChange={(e) => setEditOp({ ...editOp, machine_cycle_time_sec: e.target.value === "" ? null : Number(e.target.value) })} /></label>
+                    <button onClick={async () => {
+                      setSaveMsg("");
+                      try {
+                        await api.patch(`/api/routing-operations/${editOp.id}`, {
+                          time_basis: editOp.time_basis,
+                          crew_size: editOp.crew_size,
+                          units_per_cycle: editOp.units_per_cycle,
+                          machine_cycle_time_sec: editOp.machine_cycle_time_sec,
+                        });
+                        setSaveMsg("Kaydedildi.");
+                        setEditOp(null);
+                        setDetailRev((x) => x + 1);
+                        resStats.reload?.();
+                      } catch (e) {
+                        setSaveMsg(String(e));
+                      }
+                    }}>Kaydet</button>
+                    <button className="secondary" onClick={() => setEditOp(null)}>İptal</button>
+                  </div>
+                )}
                 <table>
-                  <thead><tr><th>Sıra</th><th>Operasyon</th><th>Dal</th><th>Yarımamül</th><th>İş Merkezi</th><th>Birincil istasyon</th><th>Alternatif istasyonlar</th><th className="num">Çevrim (sn)</th><th className="num">Setup (dk)</th><th className="num">Saat ({qty} adet)</th></tr></thead>
+                  <thead><tr><th>Sıra</th><th>Operasyon</th><th>Süre türü</th><th>Dal</th><th>Yarımamül</th><th>İş Merkezi</th><th>Birincil istasyon</th><th>Alternatif istasyonlar</th><th className="num">Çevrim (sn)</th><th className="num">Setup (dk)</th><th className="num">Saat ({qty} adet)</th>{canEdit && <th />}</tr></thead>
                   <tbody>
                     {detail.data.operations.map((op) => {
                       const h = hours.data?.operations.find((o) => o.seq === op.seq)?.hours;
                       const alts = (op.stations ?? []).filter((s) => !s.is_primary).map((s) => s.machine_code).join(", ");
                       return (
-                        <tr key={`${op.seq}-${op.id}-${op.wip_code ?? ""}`}>
+                        <tr key={`${op.seq}-${op.id}-${op.wip_code ?? ""}`} className={op.missing_resource_definition ? "attention" : undefined}>
                           <td>{op.seq}</td>
-                          <td>{op.operation_name}</td>
+                          <td>{op.operation_name}{op.missing_resource_definition && <span className="muted" title="Ayrıntılı çizelge için tanım eksik"> ⚠</span>}</td>
+                          <td className="muted">{op.time_basis}</td>
                           <td><code>{op.wip_code || "—"}</code></td>
                           <td><code>{op.semi_finished_code || "—"}</code></td>
                           <td>{wcCode(op.work_center_id)}</td>
@@ -90,10 +141,11 @@ export default function Items() {
                           <td className="num">{fmt(op.cycle_time_sec)}</td>
                           <td className="num">{fmt(op.setup_time_min)}</td>
                           <td className="num">{fmt(h, 2)}</td>
+                          {canEdit && <td><button className="secondary" onClick={() => setEditOp(op)}>Kaynak</button></td>}
                         </tr>
                       );
                     })}
-                    {detail.data.operations.length === 0 && <tr><td colSpan={10} className="muted">Rota tanımı yok</td></tr>}
+                    {detail.data.operations.length === 0 && <tr><td colSpan={canEdit ? 12 : 11} className="muted">Rota tanımı yok</td></tr>}
                   </tbody>
                 </table>
               </div>

@@ -45,10 +45,9 @@ class OperationRemainingWork:
 
 
 def operation_run_hours(op: RoutingOperation, quantity: float, *, setup_required: bool) -> float:
-    run = quantity * op.cycle_time_sec / 3600.0
-    if setup_required and quantity > 1e-9:
-        run += op.setup_time_min / 60.0
-    return run
+    from app.services.routing_resource import planning_load_hours
+
+    return planning_load_hours(op, quantity, setup_required=setup_required)
 
 
 def _open_orders_for_production(db: Session) -> list[Order]:

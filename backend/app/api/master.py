@@ -8,7 +8,22 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.deps import require_poweruser, require_user
 from app.db.session import get_db
-from app.models import Downtime, Employee, Item, Machine, Order, PlanLine, ProductionActual, RoutingOperation, RoutingOperationStation, User, WorkCenter, WorkCenterShift, WorkCenterWeek
+from app.models import (
+    Downtime,
+    Employee,
+    Item,
+    Machine,
+    Order,
+    PlanLine,
+    ProductionActual,
+    ResourceCalendarException,
+    RoutingOperation,
+    RoutingOperationStation,
+    User,
+    WorkCenter,
+    WorkCenterShift,
+    WorkCenterWeek,
+)
 from app.services.bom_tree import flatten_fg_operations, is_wip_asm_link, sort_bom_lines_for_display
 
 from app.schemas import (
@@ -17,8 +32,12 @@ from app.schemas import (
     EmployeeOut,
     ItemDetail,
     ItemOut,
+    CalendarExceptionIn,
+    CalendarExceptionOut,
     OperationOut,
+    OperationPatchIn,
     OperationStationOut,
+    ResourceModelStatsOut,
     MachineIn,
     MachineOut,
     OrderIn,
@@ -347,6 +366,8 @@ def list_items(
 
 
 def _operation_out(op: RoutingOperation, seq: int, wip_code: str = "") -> OperationOut:
+    from app.services.routing_resource import missing_resource_definition, normalize_time_basis
+
     stations = [
         OperationStationOut(
             machine_code=s.machine.code if s.machine else "",
@@ -363,6 +384,13 @@ def _operation_out(op: RoutingOperation, seq: int, wip_code: str = "") -> Operat
         work_center_id=op.work_center_id,
         cycle_time_sec=op.cycle_time_sec,
         setup_time_min=op.setup_time_min,
+        time_basis=normalize_time_basis(getattr(op, "time_basis", None)),
+        crew_size=getattr(op, "crew_size", None),
+        machine_cycle_time_sec=getattr(op, "machine_cycle_time_sec", None),
+        setup_labor_minutes=getattr(op, "setup_labor_minutes", None),
+        setup_machine_minutes=getattr(op, "setup_machine_minutes", None),
+        units_per_cycle=int(getattr(op, "units_per_cycle", None) or 1),
+        missing_resource_definition=missing_resource_definition(op),
         semi_finished_code=op.semi_finished_code or "",
         wip_code=wip_code,
         primary_machine_code=primary_code,
@@ -500,4 +528,86 @@ def delete_orders(status: str = "closed", db: Session = Depends(get_db), _=Depen
         db.query(PlanLine).filter(PlanLine.order_id.in_(ids)).delete(synchronize_session=False)
         db.query(Order).filter(Order.merged_into_id.in_(ids)).update({Order.merged_into_id: None}, synchronize_session=False)
         db.query(Order).filter(Order.id.in_(ids)).delete(synchronize_session=False)
+    db.commit()
+
+
+@router.get("/resource-model/stats", response_model=ResourceModelStatsOut)
+def resource_model_stats(db: Session = Depends(get_db), _=Depends(require_user)):
+    from app.services.routing_resource import resource_definition_stats
+
+    return ResourceModelStatsOut(**resource_definition_stats(db))
+
+
+@router.patch("/routing-operations/{op_id}", response_model=OperationOut)
+def patch_routing_operation(
+    op_id: int,
+    data: OperationPatchIn,
+    db: Session = Depends(get_db),
+    _=Depends(require_poweruser),
+):
+    from app.services.routing_resource import TIME_BASIS_VALUES
+
+    op = (
+        db.query(RoutingOperation)
+        .options(
+            joinedload(RoutingOperation.primary_machine),
+            joinedload(RoutingOperation.alt_stations).joinedload(RoutingOperationStation.machine),
+        )
+        .filter(RoutingOperation.id == op_id)
+        .first()
+    )
+    if not op:
+        raise HTTPException(404, "Operasyon bulunamadi")
+    payload = data.model_dump(exclude_unset=True)
+    if "time_basis" in payload and payload["time_basis"] not in TIME_BASIS_VALUES:
+        raise HTTPException(400, "Gecersiz time_basis")
+    if "units_per_cycle" in payload and payload["units_per_cycle"] is not None and payload["units_per_cycle"] < 1:
+        raise HTTPException(400, "units_per_cycle pozitif olmali")
+    for k, v in payload.items():
+        setattr(op, k, v)
+    db.commit()
+    db.refresh(op)
+    return _operation_out(op, op.seq)
+
+
+@router.get("/calendar-exceptions", response_model=list[CalendarExceptionOut])
+def list_calendar_exceptions(
+    resource_type: str | None = None,
+    resource_id: int | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    db: Session = Depends(get_db),
+    _=Depends(require_user),
+):
+    q = db.query(ResourceCalendarException)
+    if resource_type:
+        q = q.filter(ResourceCalendarException.resource_type == resource_type)
+    if resource_id is not None:
+        q = q.filter(ResourceCalendarException.resource_id == resource_id)
+    if from_date:
+        q = q.filter(ResourceCalendarException.cal_date >= from_date)
+    if to_date:
+        q = q.filter(ResourceCalendarException.cal_date <= to_date)
+    return q.order_by(ResourceCalendarException.cal_date, ResourceCalendarException.id).all()
+
+
+@router.post("/calendar-exceptions", response_model=CalendarExceptionOut)
+def create_calendar_exception(
+    data: CalendarExceptionIn,
+    db: Session = Depends(get_db),
+    _=Depends(require_poweruser),
+):
+    row = ResourceCalendarException(**data.model_dump())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@router.delete("/calendar-exceptions/{exc_id}", status_code=204)
+def delete_calendar_exception(exc_id: int, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    row = db.get(ResourceCalendarException, exc_id)
+    if not row:
+        raise HTTPException(404, "Istisna bulunamadi")
+    db.delete(row)
     db.commit()

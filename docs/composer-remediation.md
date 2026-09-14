@@ -450,3 +450,30 @@ Ornekler: 100 siparis + 30 dis rezervasyon → net 70 plan saati; 20 uretim + 20
 | 7 | Frontend build | Basarili |
 
 **Not:** Rol/GRANT pg_dump disinda; `docs/BACKUP.md`. Excel partiler/revizyonlar referans — otomatik geri yukleme yok.
+
+## FAZ 10 — insan–makine ayrimi ve gunluk takvim altyapisi (M1/M3)
+
+| Dosya | Degisiklik |
+|---|---|
+| `backend/app/models/master.py` | `RoutingOperation` kaynak alanlari; `MachineCalendarEntry`, `ResourceCalendarException` |
+| `backend/app/services/routing_resource.py` | Tek birim donusum + legacy plan yuku |
+| `backend/app/services/calendar_capacity.py` | Makine/is gucu gunluk kapasite, gece vardiyasi araliklari |
+| `backend/app/services/capacity.py` | Tatil istisnasi ile is gucu kapasitesi |
+| `backend/app/api/master.py` | `PATCH /routing-operations`, takvim CRUD, `GET /resource-model/stats` |
+| `backend/app/schemas.py` | OperationOut/Patch, takvim DTO |
+| `backend/app/services/excel.py` + `plan_input_fingerprint.py` | Yeni rota alanlari |
+| `frontend/src/pages/Items.tsx`, `api.ts` | Kaynak duzenleme + eksik tanim ozeti |
+| `docs/resource-model.md` | Pilot model ve legacy gecis |
+| `backend/tests/test_resource_model_faz10.py` | 5 kabul testi |
+
+### FAZ 10 kabul olcutleri
+
+| # | Olcut | Sonuc |
+|---|---|---|
+| 1 | 2 kisi, 1 makine-saat | ✓ `test_resource_model_faz10::test_two_crew_one_machine_hour` |
+| 2 | Pres 8h, personel x2 → 8 makine-saat | ✓ `test_resource_model_faz10::test_machine_capacity_not_from_headcount` |
+| 3 | Carsamba tatil → sadece o gun 0 | ✓ `test_resource_model_faz10::test_wednesday_holiday_only_that_day` |
+| 4 | 22:00–06:00 → 8h, iki tarih araligi | ✓ `test_resource_model_faz10::test_night_shift_two_date_ranges` |
+| 5 | Legacy saat ayni + eksik tanim uyarisi | ✓ `test_resource_model_faz10::test_legacy_unchanged_and_missing_definition_warning` |
+| 6 | Backend suite | **125 passed**, 2 skipped, 3 failed (bilinen flaky: `test_job_move_revision` x2, `test_wip_multi_route`; ortam/siralama) (~47s) |
+| 7 | Frontend build | Basarili (Vite 5.4.21) |

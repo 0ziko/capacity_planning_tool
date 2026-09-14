@@ -173,8 +173,11 @@ TEMPLATES: dict[str, dict] = {
             ("item_code", "Stok Kodu", ["stokkodu", "malzeme"]),
             ("quantity", "Miktar", ["adet"]),
             ("unit_price", "Birim Fiyat", ["fiyat", "birimfiyat", "satisfiyati", "birimsatisfiyati"]),
+            ("material_status", "Malzeme Durumu", ["malzemedurumu", "malzeme"]),
+            ("material_ready_date", "Malzeme Hazır Tarihi", ["malzemehazirtarihi", "malzemetarihi"]),
+            ("material_note", "Malzeme Notu", ["malzemenotu"]),
         ],
-        "example": ["SIP-2026-001", "10", "ABC Otel", "2026-09-01", "2026-10-15", "", "Yerli", "MAM-0001", 40, 1250],
+        "example": ["SIP-2026-001", "10", "ABC Otel", "2026-09-01", "2026-10-15", "", "Yerli", "MAM-0001", 40, 1250, "", "", ""],
         "required": ["order_no", "due_date", "item_code", "quantity"],
     },
     "production": {
@@ -946,6 +949,18 @@ def import_orders(db: Session, rows: list[dict], remove_missing: bool = False) -
             if price is not None:
                 o.unit_price = price
             o.status = "open"
+            ms = _str(r.get("material_status"))
+            if ms:
+                from app.services.orders import normalize_material_status, validate_material_fields
+
+                st = normalize_material_status(ms)
+                mrd = _date(r.get("material_ready_date")) if r.get("material_ready_date") not in (None, "") else None
+                validate_material_fields(st, mrd)
+                o.material_status = st
+                o.material_ready_date = mrd if st == "expected" else (mrd if st == "ready" else None)
+            mn = _str(r.get("material_note"))
+            if mn:
+                o.material_note = mn[:256]
         except Exception as e:  # noqa: BLE001
             errs.append(f"Satir {r['_row']}: {e}")
 
@@ -1293,7 +1308,7 @@ def build_backup(db: Session) -> bytes:
     _ws_from_rows(wb, "Rota", [c[1] for c in TEMPLATES["routing"]["columns"]],
                   [[item_code.get(o.item_id), o.seq, o.operation_name, wc_code.get(o.work_center_id), o.cycle_time_sec, o.setup_time_min, o.semi_finished_code] for o in db.query(RoutingOperation).order_by(RoutingOperation.item_id, RoutingOperation.seq)])
     _ws_from_rows(wb, "Siparişler", [c[1] for c in TEMPLATES["orders"]["columns"]] + ["Durum"],
-                  [[o.order_no, o.position_no or "", o.customer, o.order_date, o.due_date, o.revised_due_date, _market_cell(o.market), item_code.get(o.item_id), o.quantity, o.unit_price, o.status] for o in db.query(Order).order_by(Order.due_date, Order.order_no, Order.position_no)])
+                  [[o.order_no, o.position_no or "", o.customer, o.order_date, o.due_date, o.revised_due_date, _market_cell(o.market), item_code.get(o.item_id), o.quantity, o.unit_price, o.material_status or "unknown", o.material_ready_date or "", o.material_note or "", o.status] for o in db.query(Order).order_by(Order.due_date, Order.order_no, Order.position_no)])
     _ws_from_rows(wb, "Plan", ["Hafta", "İş Merkezi Kodu", "Sipariş No", "Stok Kodu", "Operasyon Id", "Planlanan Saat", "Planlanan Miktar", "Mod", "Oluşturan"],
                   [[p.week_start, wc_code.get(p.work_center_id), p.order.order_no, item_code.get(p.order.item_id), p.operation_id, p.planned_hours, p.planned_qty, p.mode, p.created_by] for p in db.query(PlanLine).order_by(PlanLine.week_start, PlanLine.work_center_id)])
     _ws_from_rows(wb, "Günlük Üretim", [c[1] for c in TEMPLATES["production"]["columns"]] + ["Kazanılan Saat"],

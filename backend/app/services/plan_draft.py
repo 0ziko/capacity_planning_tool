@@ -21,3 +21,4 @@ class DraftLine:
     production_batch_id: int | None = None
     label: str = ""
     semi_finished_code: str = ""
+    material_unverified: bool = False

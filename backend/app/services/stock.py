@@ -377,7 +377,15 @@ def reserve_manual(db: Session, item_id: int | None, item_code: str | None, orde
         free += freed
         if quantity > free + 1e-9:
             raise ValueError(f"Serbest stok yetersiz (serbest {free:g}, istenen {quantity:g}); manuel rezervasyonlar cozulmez")
-    r = Reservation(item_id=item_id, order_id=order_id, quantity=round(quantity, 3), source="manual", note=note or "", created_by=username)
+    r = Reservation(
+        item_id=item_id,
+        order_id=order_id,
+        quantity=round(quantity, 3),
+        source="manual",
+        stock_provenance="external_finished_stock",
+        note=note or "",
+        created_by=username,
+    )
     db.add(r)
     db.flush()
     return r

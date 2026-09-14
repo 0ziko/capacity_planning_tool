@@ -158,6 +158,10 @@ class ItemDetail(ItemOut):
 
 
 # ---- Orders ----
+MaterialStatus = Literal["ready", "expected", "unknown"]
+MaterialPolicy = Literal["conditional", "strict"]
+
+
 class OrderIn(BaseModel):
     order_no: str = Field(min_length=1, max_length=64)
     position_no: str = ""
@@ -170,6 +174,9 @@ class OrderIn(BaseModel):
     quantity: float = Field(gt=0)
     unit_price: float = Field(default=0.0, ge=0)
     note: str = ""
+    material_status: MaterialStatus = "unknown"
+    material_ready_date: date | None = None
+    material_note: str = ""
 
 
 class OrderOut(ORM):
@@ -195,6 +202,11 @@ class OrderOut(ORM):
     plan_status: str = ""  # unplanned / partial / late / on_time / no_ops / closed
     reservation_status: str = ""  # none / partial / full
     reserved_qty: float = 0.0
+    material_status: str = "unknown"
+    material_ready_date: date | None = None
+    material_note: str = ""
+    material_updated_by: str = ""
+    material_updated_at: datetime | None = None
 
 
 class OrderAnalysisRow(BaseModel):
@@ -465,6 +477,7 @@ class AutoPlanRequest(BaseModel):
     work_center_ids: list[int] | None = None  # None => is_planned olanlar
     replace_existing: bool = True
     mode: PlanMode = "due_date"  # due_date: termine gore; revenue: ufuk icinde maksimum ciro
+    material_policy: MaterialPolicy = "conditional"
     co_shipment: CoShipmentOptions | None = None  # null / enabled=false => mevcut akis
 
 

@@ -352,4 +352,41 @@ Siralı JSON (`sort_keys`, `,` ayirici) uzerinden SHA-256: acik `orders` (miktar
 | 7 | Backend suite | **104 passed**, 1 skipped (`TEST_PG_URL`), 1 flaky (`test_wip_multi_route::test_production_import_excel_serial_date`, FAZ 06 oncesi de goruldu) (~35s) |
 | 8 | Frontend build | Basarili (Vite 5.4.21) |
 
-**Sonraki:** FAZ 07 — (prompt sirasi; bu commit FAZ 06 ile sinirlidir).
+## FAZ 07 — bitmis stok netlemesi ve malzeme hazir tarihi (M2)
+
+| Dosya | Degisiklik |
+|---|---|
+| `backend/app/services/order_finished_netting.py` | **yeni** — talep bakiyesi, stok/rezervasyon kredisi, provenance |
+| `backend/app/services/material_schedule.py` | **yeni** — ready/expected/unknown, hafta basi yuvarlama, strict/conditional |
+| `backend/app/services/remaining_work.py` | `required_qty_*` net fabrika talebi olcegi |
+| `backend/app/services/planning.py` | `material_policy`, malzeme min hafta, `material_unverified` cikti |
+| `backend/app/models/planning.py` | Order malzeme alanlari; `Reservation.stock_provenance`; `OrderMaterialLog` |
+| `backend/app/services/orders.py` | malzeme dogrulama, audit log, fingerprint girdisi |
+| `backend/app/services/excel.py` | siparis import/export malzeme kolonlari |
+| `backend/app/services/stock.py` | manuel rezervasyon `external_finished_stock` |
+| `frontend` | `Orders.tsx`, `Planning.tsx`, `api.ts` malzeme alanlari/politikasi |
+| `backend/tests/test_finished_stock_netting.py` | M2 kabul testleri (8) |
+
+### Netlestirme formulu (ozet)
+
+- `demand_balance = siparis_miktari - sevk`
+- Stok kredisi: `external_finished_stock` + `legacy_unspecified` (uyari ile) + uretimle cakismayan `completed_production` rezervasyonu
+- `net_fabrika_talebi = demand_balance - stok_kredisi` → operasyon `required_qty` olcegi
+- Operasyon uretim gerceklesmesi ayrica `produced_qty_map` ile dusulur (cift sayim yok)
+
+Ornekler: 100 siparis + 30 dis rezervasyon → net 70 plan saati; 20 uretim + 20 ayni kaynak rezervasyon → planlanacak 80 (60 degil).
+
+### FAZ 07 kabul olcutleri
+
+| # | Olcut | Sonuc |
+|---|---|---|
+| 1 | 100 / 30 dis rezervasyon → uretim 70 | ✓ |
+| 2 | 20 uretim + 20 rezervasyon → 80 plan | ✓ |
+| 3 | Sevk + uretim cift dusum yok | ✓ |
+| 4 | Malzeme 21.09 → 14 Eylul haftasi yok | ✓ |
+| 5 | unknown conditional vs strict | ✓ |
+| 6 | Import/export + legacy unknown | ✓ |
+| 7 | Backend suite | **111 passed**, 1 skipped, 2 flaky (`job_move` suite siralamasinda, `wip_multi_route`) (~40s) |
+| 8 | Frontend build | Basarili |
+
+**Sonraki:** FAZ 08 — (prompt sirasi; bu commit FAZ 07 ile sinirlidir).

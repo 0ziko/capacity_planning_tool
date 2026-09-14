@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.deps import require_poweruser, require_user
 from app.db.session import get_db
-from app.models import Downtime, Employee, Item, Machine, Order, PlanLine, ProductionActual, RoutingOperation, RoutingOperationStation, WorkCenter, WorkCenterShift, WorkCenterWeek
+from app.models import Downtime, Employee, Item, Machine, Order, PlanLine, ProductionActual, RoutingOperation, RoutingOperationStation, User, WorkCenter, WorkCenterShift, WorkCenterWeek
 from app.services.bom_tree import flatten_fg_operations, is_wip_asm_link, sort_bom_lines_for_display
 
 from app.schemas import (
@@ -454,14 +454,14 @@ def create_order(data: OrderIn, db: Session = Depends(get_db), _=Depends(require
 
 
 @router.put("/orders/{order_id}", response_model=OrderOut)
-def update_order(order_id: int, data: OrderIn, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+def update_order(order_id: int, data: OrderIn, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
     o = db.query(Order).options(joinedload(Order.item)).filter(Order.id == order_id).first()
     if not o:
         raise HTTPException(404, "Siparis bulunamadi")
     if o.status == "merged":
         raise HTTPException(400, "Birlestirilmis siparis duzenlenemez; once birlestirmeyi geri alin")
     try:
-        o = orders_svc.update_order(db, o, data)
+        o = orders_svc.update_order(db, o, data, username=user.username)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return orders_svc.enrich_orders(db, [db.query(Order).options(joinedload(Order.item)).filter(Order.id == o.id).one()])[0]

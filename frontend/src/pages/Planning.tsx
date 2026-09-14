@@ -1,5 +1,5 @@
 import { Fragment, useState } from "react";
-import { addDays, api, fmt, mondayOf, qs, shortDate, weekLabel, weekLong, type AutoPlanRequest, type CoShipmentOptions, type CoShipmentException, type CoShipmentResult, type ForecastSummary, type ItemDetail, type LoadDetail, type LeadTime, type Order, type OrderSchedule, type PlanLine, type PlanMode, type WcWeek, type WorkCenterLoad } from "../api";
+import { addDays, api, fmt, mondayOf, qs, shortDate, weekLabel, weekLong, type AutoPlanRequest, type CoShipmentOptions, type CoShipmentException, type CoShipmentResult, type ForecastSummary, type ItemDetail, type LoadDetail, type LeadTime, type MaterialPolicy, type Order, type OrderSchedule, type PlanLine, type PlanMode, type WcWeek, type WorkCenterLoad } from "../api";
 import { useAuth } from "../auth";
 import { Bar, ErrorText, PlanStackBar, UtilBadge, WeekInput, WcMultiSelect, useAsync, useWorkCenters } from "../components";
 import WcWeeksPanel from "./WcWeeksPanel";
@@ -23,6 +23,8 @@ interface AutoResult {
   skipped: { order_no?: string; batch_no?: string; kind?: string; item_code: string; revenue: number; hours: number }[];
   co_shipment_results?: CoShipmentResult[];
   co_shipment_exceptions?: CoShipmentException[];
+  material_unverified?: boolean;
+  material_unverified_order_ids?: number[];
 }
 
 type Tab = "load" | "labor" | "gantt" | "orders" | "wc" | "revenue" | "compare" | "progress" | "merge" | "leadtime" | "output" | "revision";
@@ -49,6 +51,7 @@ export default function Planning() {
   const [weeks, setWeeks] = useState(8);
   const [wcIds, setWcIds] = useState<number[]>([]);
   const [mode, setMode] = useState<PlanMode>("due_date");
+  const [materialPolicy, setMaterialPolicy] = useState<MaterialPolicy>("conditional");
   const [result, setResult] = useState<AutoResult | null>(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -70,6 +73,7 @@ export default function Planning() {
     work_center_ids: wcIds.length ? wcIds : null,
     replace_existing: true,
     mode,
+    material_policy: materialPolicy,
     ...(coShipment.enabled && coShipment.selections.length
       ? { co_shipment: coShipment }
       : {}),
@@ -127,6 +131,12 @@ export default function Planning() {
                     <option value="revenue">💰 Ciro öncelikli (sezgisel)</option>
                   </select>
                 </label>
+                <label title="Malzeme bilinmiyorsa: koşullu planda işaretlenir; strict planda planlanmaz.">Malzeme politikası
+                  <select value={materialPolicy} onChange={(e) => setMaterialPolicy(e.target.value as MaterialPolicy)}>
+                    <option value="conditional">Koşullu (unknown işaretle)</option>
+                    <option value="strict">Strict (unknown engelle)</option>
+                  </select>
+                </label>
                 <button onClick={() => runAuto()} disabled={busy} title="Onay kaydı olmadan canlı plana yazar">▶ Otomatik planla (revizyonsuz)</button>
                 <button className="secondary" onClick={() => setTab("revision")}>Plan revizyonu</button>
                 <button className="secondary" onClick={() => setTab("compare")} title="İki modu kaydetmeden hesaplayıp karşılaştır">⚖ Karşılaştır</button>
@@ -149,6 +159,9 @@ export default function Planning() {
                 <button className="secondary small" style={{ marginLeft: 8 }} onClick={() => setTab("orders")}>Sipariş bitiş tarihleri →</button>{" "}
                 <button className="secondary small" onClick={() => setTab("revenue")}>Ciro →</button>
               </div>
+              {result.material_unverified && (
+                <p className="muted" style={{ marginTop: 8 }}>Malzeme doğrulanmadı: plan koşulludur ({result.material_unverified_order_ids?.length ?? 0} sipariş).</p>
+              )}
               {result.skipped?.length > 0 && (
                 <>
                   <div className="error">Ciro öncelikli plan {result.skipped.length} adayı tamamen dışarıda bıraktı (ufka sığmadı, kalan kapasite de yetmedi):</div>

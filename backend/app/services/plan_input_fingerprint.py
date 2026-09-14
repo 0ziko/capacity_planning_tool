@@ -48,6 +48,8 @@ def build_fingerprint_payload(db: Session, req: AutoPlanRequest) -> dict:
             "due_date": _iso(o.due_date),
             "revised_due_date": _iso(o.revised_due_date),
             "status": o.status,
+            "material_status": getattr(o, "material_status", None) or "unknown",
+            "material_ready_date": _iso(getattr(o, "material_ready_date", None)),
         }
         for o in orders
     ]
@@ -157,6 +159,7 @@ def build_fingerprint_payload(db: Session, req: AutoPlanRequest) -> dict:
                 "item_id": r.item_id,
                 "quantity": round(float(r.quantity or 0), 6),
                 "source": r.source,
+                "stock_provenance": getattr(r, "stock_provenance", None) or "legacy_unspecified",
             }
             for r in db.query(Reservation).order_by(Reservation.id).all()
         ],

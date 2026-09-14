@@ -2,12 +2,14 @@
 siparis bazli ilerleme ve ayni stok kodlu siparisleri birlestirme."""
 
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from math import ceil
 
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import Item, Order, PlanLine, ProductionActual, Reservation, RoutingOperation, Shipment, WorkCenter
+from app.models.planning import OrderMaterialLog
+from app.services.material_schedule import MATERIAL_EXPECTED, MATERIAL_READY, MATERIAL_UNKNOWN
 from app.schemas import (
     MergeGroup,
     MergeRequest,
@@ -42,6 +44,60 @@ def plan_line_priority_key(p: PlanLine) -> tuple:
         op_seq,
         getattr(p, "id", 0) or 0,
     )
+
+
+def normalize_material_status(v: str | None) -> str:
+    s = (v or "").strip().lower()
+    if s in ("ready", "hazir", "hazır"):
+        return MATERIAL_READY
+    if s in ("expected", "bekleniyor", "beklenen"):
+        return MATERIAL_EXPECTED
+    if s in ("unknown", "bilinmiyor", ""):
+        return MATERIAL_UNKNOWN
+    return MATERIAL_UNKNOWN
+
+
+def validate_material_fields(status: str, ready_date: date | None) -> None:
+    st = normalize_material_status(status)
+    if st == MATERIAL_EXPECTED and not ready_date:
+        raise ValueError("Malzeme durumu 'expected' icin hazir tarih zorunlu")
+    if st == MATERIAL_READY and ready_date:
+        pass  # tarih opsiyonel
+
+
+def _log_material_change(db: Session, order_id: int, field: str, old: str, new: str, username: str) -> None:
+    if old == new:
+        return
+    db.add(
+        OrderMaterialLog(
+            order_id=order_id,
+            field=field,
+            old_value=old[:256],
+            new_value=new[:256],
+            username=username,
+        )
+    )
+
+
+def apply_material_fields(order: Order, data: OrderIn, username: str, db: Session) -> None:
+    st = normalize_material_status(getattr(data, "material_status", None) or order.material_status)
+    rd = getattr(data, "material_ready_date", None)
+    note = (getattr(data, "material_note", None) or order.material_note or "").strip()
+    validate_material_fields(st, rd)
+    if st != MATERIAL_EXPECTED:
+        rd = rd if st == MATERIAL_READY else None
+    old_st = order.material_status or MATERIAL_UNKNOWN
+    old_rd = order.material_ready_date.isoformat() if order.material_ready_date else ""
+    old_note = order.material_note or ""
+    order.material_status = st
+    order.material_ready_date = rd
+    order.material_note = note[:256]
+    if st != old_st or (rd and old_rd != rd.isoformat()) or note != old_note:
+        order.material_updated_by = username
+        order.material_updated_at = datetime.now()
+        _log_material_change(db, order.id, "material_status", old_st, st, username)
+        _log_material_change(db, order.id, "material_ready_date", old_rd, rd.isoformat() if rd else "", username)
+        _log_material_change(db, order.id, "material_note", old_note, note, username)
 
 
 def normalize_market(v: str | None) -> str:
@@ -312,6 +368,9 @@ def create_order(db: Session, data: OrderIn) -> Order:
         dup = idx[key]
         label = f"{data.order_no} / poz {pos}" if pos else f"{data.order_no} / {item.code}"
         raise ValueError(f"{label} siparisi zaten var (id={dup.id}); duzenlemek icin mevcut satiri kullanin")
+    st = normalize_material_status(getattr(data, "material_status", None))
+    rd = getattr(data, "material_ready_date", None)
+    validate_material_fields(st, rd)
     o = Order(
         order_no=data.order_no.strip(),
         position_no=pos,
@@ -325,6 +384,9 @@ def create_order(db: Session, data: OrderIn) -> Order:
         unit_price=data.unit_price,
         status="open",
         note=data.note.strip(),
+        material_status=st,
+        material_ready_date=rd if st == MATERIAL_EXPECTED else (rd if st == MATERIAL_READY else None),
+        material_note=(getattr(data, "material_note", "") or "")[:256],
     )
     db.add(o)
     db.commit()
@@ -332,7 +394,7 @@ def create_order(db: Session, data: OrderIn) -> Order:
     return o
 
 
-def update_order(db: Session, o: Order, data: OrderIn) -> Order:
+def update_order(db: Session, o: Order, data: OrderIn, *, username: str = "api") -> Order:
     item = db.query(Item).filter(Item.code.ilike(data.item_code.strip())).first()
     if not item:
         raise ValueError(f"Stok kodu bulunamadi: {data.item_code}")
@@ -348,6 +410,7 @@ def update_order(db: Session, o: Order, data: OrderIn) -> Order:
     o.quantity = data.quantity
     o.unit_price = data.unit_price
     o.note = data.note.strip()
+    apply_material_fields(o, data, username, db)
     if item_changed:
         # rota degisti; eski plan satirlari gecersiz
         db.query(PlanLine).filter(PlanLine.order_id == o.id).delete(synchronize_session=False)

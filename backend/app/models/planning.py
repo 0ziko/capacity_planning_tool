@@ -27,6 +27,11 @@ class Order(Base):
     # Legacy: birlestirilmis siparis (migrate edildi); yeni akista kullanilmaz
     merged_into_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id", ondelete="SET NULL"), nullable=True)
     note: Mapped[str] = mapped_column(String(256), default="")
+    material_status: Mapped[str] = mapped_column(String(16), default="unknown")  # ready / expected / unknown
+    material_ready_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    material_note: Mapped[str] = mapped_column(String(256), default="")
+    material_updated_by: Mapped[str] = mapped_column(String(64), default="")
+    material_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     item = relationship("Item")
@@ -162,12 +167,27 @@ class Reservation(Base):
     order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), index=True)
     quantity: Mapped[float] = mapped_column(Float)
     source: Mapped[str] = mapped_column(String(8), default="auto")  # auto / manual
+    stock_provenance: Mapped[str] = mapped_column(String(32), default="legacy_unspecified")
     note: Mapped[str] = mapped_column(String(256), default="")
     created_by: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     item = relationship("Item")
     order = relationship("Order")
+
+
+class OrderMaterialLog(Base):
+    """Malzeme hazir bilgisi degisiklik kaydi."""
+
+    __tablename__ = "order_material_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), index=True)
+    field: Mapped[str] = mapped_column(String(32))
+    old_value: Mapped[str] = mapped_column(String(256), default="")
+    new_value: Mapped[str] = mapped_column(String(256), default="")
+    username: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 class Shipment(Base):

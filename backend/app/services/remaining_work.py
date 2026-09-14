@@ -137,39 +137,56 @@ def produced_qty_map(db: Session, *, as_of: date | None = None) -> tuple[dict[Wo
     return dict(out), warnings
 
 
-def required_qty_by_operation(db: Session, order: Order) -> dict[int, float]:
-    """Operasyon id -> BOM/yari mamul katsayili gerekli miktar."""
+def required_qty_by_operation(
+    db: Session,
+    order: Order,
+    *,
+    produced: dict[WorkKey, float] | None = None,
+    netting_cache: dict[int, "OrderDemandNetting"] | None = None,
+) -> dict[int, float]:
+    """Operasyon id -> BOM/yari mamul katsayili gerekli miktar (bitmis stok netlemesi uygulanir)."""
+    from app.services.order_finished_netting import compute_order_demand_netting, net_production_scale
+
     if not order.item:
         return {}
+    netting = None
+    if netting_cache is not None and order.id in netting_cache:
+        netting = netting_cache[order.id]
+    else:
+        netting = compute_order_demand_netting(db, order, produced_map=produced)
+        if netting_cache is not None:
+            netting_cache[order.id] = netting
+    scale = net_production_scale(order, netting)
+    base_qty = float(netting.net_production_qty if netting else order.quantity or 0)
     if has_wip_structure(order):
         jobs = explode_order(db, order)
         req: dict[int, float] = {}
-        for job in jobs.wip_jobs:
-            for op in job.item.operations or []:
-                req[op.id] = job.quantity
-        if jobs.finish_job:
-            for op in jobs.finish_job.item.operations or []:
-                req[op.id] = jobs.finish_job.quantity
-        return req
-    return {op.id: float(order.quantity or 0) for op in order.item.operations or []}
-
-
-def required_qty_for_batch(db: Session, batch: ProductionBatch, anchor: Order) -> dict[int, float]:
-    if not batch.item:
-        return {}
-    if has_wip_structure(anchor):
-        jobs = explode_order(db, anchor)
-        ratio = float(batch.quantity or 0) / float(anchor.quantity or 1) if anchor.quantity else 1.0
-        req: dict[int, float] = {}
+        ratio = scale if order.quantity else 0.0
         for job in jobs.wip_jobs:
             jq = job.quantity * ratio
             for op in job.item.operations or []:
                 req[op.id] = jq
         if jobs.finish_job:
+            fq = base_qty if order.quantity else 0.0
             for op in jobs.finish_job.item.operations or []:
-                req[op.id] = float(batch.quantity or 0)
+                req[op.id] = fq
         return req
-    return {op.id: float(batch.quantity or 0) for op in batch.item.operations or []}
+    return {op.id: base_qty for op in order.item.operations or []}
+
+
+def required_qty_for_batch(
+    db: Session,
+    batch: ProductionBatch,
+    anchor: Order,
+    *,
+    produced: dict[WorkKey, float] | None = None,
+    netting_cache: dict | None = None,
+) -> dict[int, float]:
+    if not batch.item or not anchor.quantity:
+        return {}
+    ord_req = required_qty_by_operation(db, anchor, produced=produced, netting_cache=netting_cache)
+    ratio = float(batch.quantity or 0) / float(anchor.quantity)
+    return {op_id: q * ratio for op_id, q in ord_req.items()}
 
 
 def _line_is_preserved(pl: PlanLine, ctx: SchedulingContext) -> bool:
@@ -250,13 +267,20 @@ def build_work_map_for_order(
     if produced is None:
         produced, prod_warnings = produced_qty_map(db)
         global_warnings = (global_warnings or []) + prod_warnings
-    req = required_qty_by_operation(db, order)
+    cache: dict[int, object] = {}
+    req = required_qty_by_operation(db, order, produced=produced, netting_cache=cache)
     all_lines = db.query(PlanLine).filter(PlanLine.order_id == order.id, PlanLine.mode.in_(["auto", "manual"])).all()
     by_op: dict[int, list[PlanLine]] = defaultdict(list)
     for pl in all_lines:
         if pl.production_batch_id is None:
             by_op[pl.operation_id].append(pl)
     out: dict[int, OperationRemainingWork] = {}
+    from app.services.order_finished_netting import compute_order_demand_netting
+
+    netting = cache.get(order.id) if cache else compute_order_demand_netting(db, order, produced_map=produced)
+    op_warnings = list(global_warnings or [])
+    if isinstance(netting, object) and getattr(netting, "warnings", None):
+        op_warnings.extend(netting.warnings)
     for op_id, rq in req.items():
         out[op_id] = operation_remaining(
             db,
@@ -267,7 +291,7 @@ def build_work_map_for_order(
             production_batch_id=None,
             produced=produced,
             plan_lines=by_op.get(op_id, []),
-            warnings=global_warnings,
+            warnings=op_warnings,
         )
     return out
 
@@ -282,7 +306,7 @@ def build_work_map_for_batch(
 ) -> dict[int, OperationRemainingWork]:
     if produced is None:
         produced, _ = produced_qty_map(db)
-    req = required_qty_for_batch(db, batch, anchor)
+    req = required_qty_for_batch(db, batch, anchor, produced=produced, netting_cache={})
     all_lines = db.query(PlanLine).filter(
         PlanLine.production_batch_id == batch.id,
         PlanLine.mode.in_(["auto", "manual"]),

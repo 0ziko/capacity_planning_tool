@@ -158,8 +158,54 @@ export interface ItemDetail extends Item {
   }[];
   child_wips?: { code: string; name: string; operation_count: number }[];
 }
-export interface Order { id: number; order_no: string; position_no: string; customer: string; order_date: string | null; due_date: string; revised_due_date: string | null; effective_due_date: string; planned_end: string | null; market: string; item_id: number; item_code: string; item_name: string; quantity: number; unit_price: number; revenue: number; status: string; merged_into_id: number | null; note: string; plan_status: string; reservation_status: string; reserved_qty: number }
-export interface OrderIn { order_no: string; position_no: string; customer: string; order_date?: string | null; due_date: string; revised_due_date?: string | null; market?: string; item_code: string; quantity: number; unit_price: number; note: string }
+export interface Order {
+  id: number;
+  order_no: string;
+  position_no: string;
+  customer: string;
+  order_date: string | null;
+  due_date: string;
+  revised_due_date: string | null;
+  effective_due_date: string;
+  planned_end: string | null;
+  market: string;
+  item_id: number;
+  item_code: string;
+  item_name: string;
+  quantity: number;
+  unit_price: number;
+  revenue: number;
+  status: string;
+  merged_into_id: number | null;
+  note: string;
+  plan_status: string;
+  reservation_status: string;
+  reserved_qty: number;
+  material_status: MaterialStatus;
+  material_ready_date: string | null;
+  material_note: string;
+  material_updated_by?: string;
+  material_updated_at?: string | null;
+}
+export type MaterialStatus = "ready" | "expected" | "unknown";
+export type MaterialPolicy = "conditional" | "strict";
+
+export interface OrderIn {
+  order_no: string;
+  position_no: string;
+  customer: string;
+  order_date?: string | null;
+  due_date: string;
+  revised_due_date?: string | null;
+  market?: string;
+  item_code: string;
+  quantity: number;
+  unit_price: number;
+  note: string;
+  material_status?: MaterialStatus;
+  material_ready_date?: string | null;
+  material_note?: string;
+}
 export interface OrderAnalysisRow { customer: string; market: string; due_date: string; order_count: number; revenue: number }
 export interface OrderAnalysisParetoRow { customer: string; revenue: number; pct: number; cum_pct: number; order_count: number }
 export interface OrderAnalysis { rows: OrderAnalysisRow[]; total_revenue: number; domestic_revenue: number; export_revenue: number; by_customer: { customer: string; domestic: number; export: number; total: number }[]; pareto: OrderAnalysisParetoRow[]; period: string | null; due_from: string | null; due_to: string | null }
@@ -170,7 +216,15 @@ export interface CoShipmentOptions { enabled: boolean; ready_before_delivery_day
 export interface CoShipmentException { code: string; order_no: string; position_nos: string[]; target_ready_date: string; planned_ready_date: string | null; deviation_days: number | null; reason: string; suggestion: string | null }
 export interface CoShipmentResult { order_no: string; position_nos: string[]; due_date: string; target_ready_date: string; planned_ready_date: string | null; completion_week: string | null; same_week_ok: boolean; on_target: boolean }
 
-export interface AutoPlanRequest { start_week: string; weeks: number; work_center_ids: number[] | null; replace_existing?: boolean; mode?: PlanMode; co_shipment?: CoShipmentOptions | null }
+export interface AutoPlanRequest {
+  start_week: string;
+  weeks: number;
+  work_center_ids: number[] | null;
+  replace_existing?: boolean;
+  mode?: PlanMode;
+  material_policy?: MaterialPolicy;
+  co_shipment?: CoShipmentOptions | null;
+}
 export interface PreflightNoRouting { item_code: string; item_name: string; order_count: number; order_nos: string[] }
 export interface PreflightNoCapacity { work_center_id: number; work_center_code: string; work_center_name: string; needed_hours: number; capacity_hours: number; headcount: number; detail: string }
 export interface PreflightWipIssue { kind: string; item_code: string; operation_seq: number | null; operation_name: string; wip_code: string; detail: string }

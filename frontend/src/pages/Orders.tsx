@@ -251,6 +251,9 @@ function OrderForm({ initial, onSaved, onCancel }: { initial: Order | null; onSa
     quantity: initial?.quantity ?? 0,
     unit_price: initial?.unit_price ?? 0,
     note: initial?.note ?? "",
+    material_status: initial?.material_status ?? "unknown",
+    material_ready_date: initial?.material_ready_date ?? "",
+    material_note: initial?.material_note ?? "",
   });
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -274,6 +277,9 @@ function OrderForm({ initial, onSaved, onCancel }: { initial: Order | null; onSa
         order_date: form.order_date || null,
         revised_due_date: form.revised_due_date || null,
         market: form.market || "domestic",
+        material_status: form.material_status || "unknown",
+        material_ready_date: form.material_ready_date || null,
+        material_note: form.material_note || "",
       };
       const o = initial ? await api.put<Order>(`/api/orders/${initial.id}`, body) : await api.post<Order>("/api/orders", body);
       onSaved(o, !initial);
@@ -299,6 +305,15 @@ function OrderForm({ initial, onSaved, onCancel }: { initial: Order | null; onSa
         <label>Termin *<input type="date" value={form.due_date} onChange={(e) => set("due_date", e.target.value)} /></label>
         <label title="Dolu ise planlama bu tarihi kullanır">Revize termin<input type="date" value={form.revised_due_date || ""} onChange={(e) => set("revised_due_date", e.target.value || null)} /></label>
         <label style={{ minWidth: 220 }}>Not<input value={form.note} onChange={(e) => set("note", e.target.value)} /></label>
+        <label>Malzeme durumu
+          <select value={form.material_status ?? "unknown"} onChange={(e) => set("material_status", e.target.value)}>
+            <option value="unknown">Bilinmiyor</option>
+            <option value="ready">Hazır</option>
+            <option value="expected">Bekleniyor</option>
+          </select>
+        </label>
+        <label title="expected için zorunlu">Malzeme hazır tarihi<input type="date" value={form.material_ready_date || ""} onChange={(e) => set("material_ready_date", e.target.value || null)} /></label>
+        <label>Malzeme notu<input value={form.material_note || ""} onChange={(e) => set("material_note", e.target.value)} /></label>
         <button onClick={submit} disabled={!valid || busy}>{initial ? "Kaydet" : "Ekle"}</button>
         <button className="secondary" onClick={onCancel}>Vazgeç</button>
       </div>

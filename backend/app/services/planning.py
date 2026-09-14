@@ -83,6 +83,8 @@ class Simulation:
     orders: list[Order]
     co_shipment_results: list[dict] | None = None
     co_shipment_exceptions: list[dict] | None = None
+    material_unverified: bool = False
+    material_unverified_order_ids: list[int] | None = None
 
     @property
     def planned_hours(self) -> float:
@@ -181,6 +183,7 @@ def _place_quantity(
     assembly_outputs: dict[str, float] | None = None,
     assembly_wip_req: list[tuple[str, float]] | None = None,
     max_week_idx: int | None = None,
+    material_unverified: bool = False,
 ) -> tuple[list[DraftLine], list[dict], int]:
     """Siparis veya uretim partisi miktari icin operasyonlari yerlestirir. Son hafta indeksini dondurur."""
     route_item = item or anchor.item
@@ -334,6 +337,7 @@ def _place_quantity(
                     production_batch_id=production_batch_id,
                     label=label or anchor.order_no,
                     semi_finished_code=semi_finished_code or op.semi_finished_code or "",
+                    material_unverified=material_unverified,
                 )
             )
             remaining[(op.work_center_id, wk)] = avail - take
@@ -387,6 +391,8 @@ def _place_order(
     sched_ctx: SchedulingContext | None = None,
     work_map: dict | None = None,
     produced_map: dict | None = None,
+    material_min_idx: int = 0,
+    material_unverified: bool = False,
 ) -> tuple[list[DraftLine], list[dict]]:
     if sched_ctx is None:
         sched_ctx = SchedulingContext(horizon_start=weeks[0], horizon_end_exclusive=weeks[-1] + timedelta(days=7))
@@ -428,11 +434,12 @@ def _place_order(
                 rules,
                 item=job.item,
                 semi_finished_code=job.semi_finished_code,
-                min_start_idx=0,
+                min_start_idx=material_min_idx,
                 ops=rem_ops,
                 qty_by_op=qty_by_op,
                 setup_by_op=setup_by_op,
                 completed_by_op=completed,
+                material_unverified=material_unverified,
             )
             all_lines.extend(ls)
             all_unplanned.extend(un)
@@ -464,13 +471,14 @@ def _place_order(
                         rules,
                         item=jobs.finish_job.item,
                         semi_finished_code="",
-                        min_start_idx=wip_end,
+                        min_start_idx=max(wip_end, material_min_idx),
                         ops=rem_ops,
                         qty_by_op=qty_by_op,
                         setup_by_op=setup_by_op,
                         completed_by_op=completed,
                         assembly_outputs=assembly_outputs,
                         assembly_wip_req=wip_req,
+                        material_unverified=material_unverified,
                     )
                     all_lines.extend(ls)
                     all_unplanned.extend(un)
@@ -494,6 +502,8 @@ def _place_order(
         qty_by_op=qty_by_op,
         setup_by_op=setup_by_op,
         completed_by_op=completed,
+        min_start_idx=material_min_idx,
+        material_unverified=material_unverified,
     )
     return ls, un
 
@@ -520,6 +530,9 @@ def _place_batch(
     rules: scen.RuleLookup | None,
     sched_ctx: SchedulingContext,
     produced_map: dict,
+    *,
+    material_min_idx: int = 0,
+    material_unverified: bool = False,
 ) -> tuple[list[DraftLine], list[dict], int]:
     if not batch.item:
         return [], [], 0
@@ -562,11 +575,12 @@ def _place_batch(
                 rules,
                 item=job.item,
                 semi_finished_code=job.semi_finished_code,
-                min_start_idx=0,
+                min_start_idx=material_min_idx,
                 ops=rem_ops,
                 qty_by_op=qty_by_op,
                 setup_by_op=setup_by_op,
                 completed_by_op=completed,
+                material_unverified=material_unverified,
             )
             all_lines.extend(ls)
             all_unplanned.extend(un)
@@ -598,13 +612,14 @@ def _place_batch(
                         rules,
                         item=jobs.finish_job.item,
                         semi_finished_code="",
-                        min_start_idx=wip_end,
+                        min_start_idx=max(wip_end, material_min_idx),
                         ops=rem_ops,
                         qty_by_op=qty_by_op,
                         setup_by_op=setup_by_op,
                         completed_by_op=completed,
                         assembly_outputs=assembly_outputs,
                         assembly_wip_req=wip_req,
+                        material_unverified=material_unverified,
                     )
                     all_lines.extend(ls)
                     all_unplanned.extend(un)
@@ -631,6 +646,8 @@ def _place_batch(
         qty_by_op=qty_by_op,
         setup_by_op=setup_by_op,
         completed_by_op=completed,
+        min_start_idx=material_min_idx,
+        material_unverified=material_unverified,
     )
 
 
@@ -639,6 +656,35 @@ def _batch_hours(batch: ProductionBatch, wc_by_id: dict[int, WorkCenter]) -> flo
         return 0.0
     item = batch.item
     return sum(op.hours_for(batch.quantity) for op in item.operations if op.work_center_id in wc_by_id)
+
+
+def _material_context(
+    candidate: PlanningCandidate,
+    weeks: list[date],
+    policy: str,
+) -> tuple[int, bool, dict | None]:
+    from app.services.material_schedule import material_gate_for_batch, material_gate_for_order, week_index
+
+    if candidate.kind == "order" and candidate.order:
+        gate = material_gate_for_order(candidate.order, policy=policy)
+    elif candidate.batch:
+        gate = material_gate_for_batch(candidate.batch, policy=policy)
+    else:
+        return 0, False, None
+    if gate.blocks_planning:
+        item_code = candidate.route_item.code if candidate.route_item else ""
+        return (
+            0,
+            False,
+            {
+                "order_no": candidate.display_code,
+                "item_code": item_code,
+                "reason": "malzeme_unknown_strict",
+                "detail": "Malzeme durumu bilinmiyor; strict modda planlanmaz.",
+            },
+        )
+    idx = week_index(weeks, gate.earliest_week) if gate.earliest_week else 0
+    return idx, gate.material_unverified, None
 
 
 def _place_candidate(
@@ -650,7 +696,12 @@ def _place_candidate(
     rules: scen.RuleLookup | None,
     sched_ctx: SchedulingContext,
     produced_map: dict,
+    *,
+    material_policy: str = "conditional",
 ) -> tuple[list[DraftLine], list[dict]]:
+    min_idx, m_unv, blocked = _material_context(candidate, weeks, material_policy)
+    if blocked:
+        return [], [blocked]
     if candidate.kind == "order" and candidate.order:
         wm = build_work_map_for_order(db, candidate.order, sched_ctx, produced=produced_map)
         return _place_order(
@@ -663,6 +714,8 @@ def _place_candidate(
             sched_ctx=sched_ctx,
             work_map=wm,
             produced_map=produced_map,
+            material_min_idx=min_idx,
+            material_unverified=m_unv,
         )
     if candidate.batch and candidate.anchor_order:
         ls, un, _ = _place_batch(
@@ -675,6 +728,8 @@ def _place_candidate(
             rules,
             sched_ctx,
             produced_map,
+            material_min_idx=min_idx,
+            material_unverified=m_unv,
         )
         return ls, un
     return [], []
@@ -689,9 +744,13 @@ def _try_place_candidate(
     rules: scen.RuleLookup | None,
     sched_ctx: SchedulingContext,
     produced_map: dict,
+    *,
+    material_policy: str = "conditional",
 ) -> tuple[bool, list[DraftLine], list[dict], dict[tuple[int, date], float]]:
     trial = dict(remaining)
-    ls, un = _place_candidate(db, candidate, wc_by_id, weeks, trial, rules, sched_ctx, produced_map)
+    ls, un = _place_candidate(
+        db, candidate, wc_by_id, weeks, trial, rules, sched_ctx, produced_map, material_policy=material_policy
+    )
     return not un, ls, un, trial
 
 
@@ -765,33 +824,59 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
         orders = [o for o in orders if o.id not in co_handled]
 
     candidates = build_planning_candidates(db, orders, batches, wc_by_id, sched_ctx, produced_map)
+    mat_policy = req.material_policy or "conditional"
+    mat_unverified_ids: set[int] = set()
+
+    def _collect_lines(new_lines: list[DraftLine]) -> None:
+        for ln in new_lines:
+            if ln.material_unverified:
+                mat_unverified_ids.add(ln.order_id)
 
     if req.mode == "revenue":
         ranked = sort_candidates(candidates, "revenue")
         leftover: list[PlanningCandidate] = []
         for c in ranked:
             fits, ls, _, trial = _try_place_candidate(
-                db, c, wc_by_id, weeks, remaining, rules, sched_ctx, produced_map
+                db, c, wc_by_id, weeks, remaining, rules, sched_ctx, produced_map, material_policy=mat_policy
             )
             if fits:
                 remaining = trial
                 lines.extend(ls)
+                _collect_lines(ls)
             else:
                 leftover.append(c)
         for c in sort_candidates(leftover, "due_date"):
-            ls, un = _place_candidate(db, c, wc_by_id, weeks, remaining, rules, sched_ctx, produced_map)
+            ls, un = _place_candidate(
+                db, c, wc_by_id, weeks, remaining, rules, sched_ctx, produced_map, material_policy=mat_policy
+            )
             lines.extend(ls)
             unplanned.extend(un)
+            _collect_lines(ls)
             if not ls:
                 skipped.append(candidate_skipped_record(c))
     else:
         for c in sort_candidates(candidates, "due_date"):
-            ls, un = _place_candidate(db, c, wc_by_id, weeks, remaining, rules, sched_ctx, produced_map)
+            ls, un = _place_candidate(
+                db, c, wc_by_id, weeks, remaining, rules, sched_ctx, produced_map, material_policy=mat_policy
+            )
             lines.extend(ls)
             unplanned.extend(un)
+            _collect_lines(ls)
 
     return Simulation(
-        req.mode, start, weeks, wcs, lines, unplanned, skipped, capacity_total, all_orders, co_results, co_exceptions
+        req.mode,
+        start,
+        weeks,
+        wcs,
+        lines,
+        unplanned,
+        skipped,
+        capacity_total,
+        all_orders,
+        co_results,
+        co_exceptions,
+        material_unverified=bool(mat_unverified_ids),
+        material_unverified_order_ids=sorted(mat_unverified_ids),
     )
 
 
@@ -921,7 +1006,7 @@ def write_simulation(
     msg = f"{len(sim.lines)} plan satiri olusturuldu ({label}, {tag})."
     if sim.co_shipment_results:
         msg += f" Birlikte sevk modu: {len(sim.co_shipment_results)} siparis grubu."
-    return {
+    out = {
         "created": len(sim.lines),
         "unplanned": sim.unplanned,
         "skipped": sim.skipped,
@@ -929,7 +1014,12 @@ def write_simulation(
         "message": msg,
         "co_shipment_results": sim.co_shipment_results or [],
         "co_shipment_exceptions": sim.co_shipment_exceptions or [],
+        "material_unverified": bool(sim.material_unverified),
+        "material_unverified_order_ids": sim.material_unverified_order_ids or [],
     }
+    if sim.material_unverified:
+        out["message"] += " Malzeme dogrulanmadi (kosullu plan)."
+    return out
 
 
 def auto_plan(

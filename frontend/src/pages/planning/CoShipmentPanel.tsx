@@ -1,5 +1,10 @@
 import { Fragment, useMemo, useState } from "react";
 import { type CoShipmentOptions, type CoShipmentSelection, type Order } from "../../api";
+import { ErrorText, StringMultiSelect } from "../../components";
+import { emptyFilters, filterFields, filterShipmentOrders, filterValue, selectShipmentPositions } from "./coShipmentSelection";
+
+const FILTER_LABELS = { order_no: "Sipariş", position_no: "Poz", customer: "Müşteri", item_code: "Stok kodu" };
+const PAGE_SIZE = 50;
 
 function fmtDate(iso: string) {
   return new Date(iso + "T12:00:00").toLocaleDateString("tr-TR");
@@ -22,7 +27,7 @@ export function groupOpenOrders(orders: Order[]): OrderGroup[] {
       due_date: o.effective_due_date || o.due_date,
       positions: [],
     };
-    g.positions.push({ position_no: o.position_no || "—", order_id: o.id, item_code: o.item_code });
+    g.positions.push({ position_no: o.position_no || "", order_id: o.id, item_code: o.item_code });
     map.set(o.order_no, g);
   }
   return Array.from(map.values()).sort((a, b) => a.due_date.localeCompare(b.due_date) || a.order_no.localeCompare(b.order_no));
@@ -32,17 +37,38 @@ export default function CoShipmentPanel({
   orders,
   value,
   onChange,
+  loading = false,
+  error = "",
+  onReload,
 }: {
   orders: Order[];
   value: CoShipmentOptions;
   onChange: (v: CoShipmentOptions) => void;
+  loading?: boolean;
+  error?: string;
+  onReload?: () => void;
 }) {
-  const [open, setOpen] = useState(value.enabled);
+  const open = value.enabled;
   const [expanded, setExpanded] = useState<string | null>(null);
-  const groups = useMemo(() => groupOpenOrders(orders), [orders]);
+  const [collapsed, setCollapsed] = useState<string[]>([]);
+  const [filters, setFilters] = useState(emptyFilters);
+  const [page, setPage] = useState(0);
+  const eligible = useMemo(() => orders.filter((o) => !!o.item_code), [orders]);
+  const groups = useMemo(() => groupOpenOrders(eligible), [eligible]);
+  const filtered = useMemo(() => filterShipmentOrders(eligible, filters), [eligible, filters]);
+  const shownGroups = useMemo(() => groupOpenOrders(filtered), [filtered]);
+  const fullGroups = useMemo(() => new Map(groups.map((g) => [g.order_no, g])), [groups]);
+  const options = useMemo(() => Object.fromEntries(filterFields.map((field) => [field,
+    [...new Set(eligible.map((o) => filterValue(o, field)))].sort((a, b) => a.localeCompare(b, "tr", { numeric: true })),
+  ])) as Record<typeof filterFields[number], string[]>, [eligible]);
+  const hasFilters = filterFields.some((field) => filters[field].length > 0);
+  const pages = Math.max(1, Math.ceil(shownGroups.length / PAGE_SIZE));
+  const currentPage = Math.min(page, pages - 1);
 
-  const selectedOrders = new Set(value.selections.map((s) => s.order_no));
   const selMap = new Map<string, CoShipmentSelection>(value.selections.map((s) => [s.order_no, s]));
+  const select = (rows: Order[], checked: boolean) => onChange({ ...value,
+    selections: selectShipmentPositions(value.selections, eligible, rows, checked),
+  });
 
   const targetFor = (due: string) => {
     if (!value.enabled) return "—";
@@ -52,37 +78,15 @@ export default function CoShipmentPanel({
   };
 
   const toggleEnabled = (on: boolean) => {
-    setOpen(on);
     onChange({ ...value, enabled: on, selections: on ? value.selections : [] });
   };
 
   const toggleOrder = (orderNo: string, on: boolean) => {
-    const next = value.selections.filter((s) => s.order_no !== orderNo);
-    if (on) next.push({ order_no: orderNo, position_nos: null });
-    onChange({ ...value, enabled: true, selections: next });
+    select(filtered.filter((o) => o.order_no === orderNo), on);
   };
 
   const togglePosition = (orderNo: string, pos: string, on: boolean) => {
-    const cur = selMap.get(orderNo);
-    const group = groups.find((g) => g.order_no === orderNo);
-    if (!group) return;
-    const allPos = group.positions.map((p) => p.position_no).filter((p) => p !== "—");
-    let posList: string[] | null;
-    if (!cur) {
-      posList = on ? [pos] : [];
-    } else if (cur.position_nos === null) {
-      posList = on ? null : allPos.filter((p) => p !== pos);
-    } else {
-      posList = on ? [...new Set([...cur.position_nos, pos])] : cur.position_nos.filter((p) => p !== pos);
-    }
-    if (posList && posList.length === 0) {
-      onChange({ ...value, selections: value.selections.filter((s) => s.order_no !== orderNo) });
-      return;
-    }
-    if (posList && posList.length === allPos.length) posList = null;
-    const next = value.selections.filter((s) => s.order_no !== orderNo);
-    next.push({ order_no: orderNo, position_nos: posList });
-    onChange({ ...value, enabled: true, selections: next });
+    select(eligible.filter((o) => o.order_no === orderNo && (o.position_no || "") === pos), on);
   };
 
   const isPosOn = (orderNo: string, pos: string) => {
@@ -92,11 +96,7 @@ export default function CoShipmentPanel({
     return s.position_nos.includes(pos);
   };
 
-  const selectAll = () => onChange({
-    ...value,
-    enabled: true,
-    selections: groups.map((g) => ({ order_no: g.order_no, position_nos: null })),
-  });
+  const selectAll = () => select(filtered, true);
   const clearAll = () => onChange({ ...value, selections: [] });
 
   return (
@@ -117,17 +117,28 @@ export default function CoShipmentPanel({
                 min={0}
                 max={365}
                 value={value.ready_before_delivery_days}
-                onChange={(e) => onChange({ ...value, ready_before_delivery_days: Math.max(0, Number(e.target.value) || 0) })}
+                onChange={(e) => onChange({ ...value, ready_before_delivery_days: Math.min(365, Math.max(0, Number(e.target.value) || 0)) })}
                 style={{ width: 72, marginLeft: 8 }}
               />
             </label>
-            <button type="button" className="secondary small" onClick={selectAll}>Tüm siparişleri seç</button>
-            <button type="button" className="secondary small" onClick={clearAll}>Seçimi kaldır</button>
+            <button type="button" className="secondary small" disabled={!filtered.length || loading || !!error} onClick={selectAll}>Listelenen pozları seç</button>
+            <button type="button" className="secondary small" disabled={!filtered.length} onClick={() => select(filtered, false)}>Listelenenlerin seçimini kaldır</button>
+            <button type="button" className="secondary small" disabled={!value.selections.length} onClick={clearAll}>Tüm sevk seçimini kaldır</button>
             <span className="muted">{value.selections.length} sipariş seçili</span>
           </div>
 
-          {groups.length === 0 ? (
-            <p className="muted">Açık sipariş yok.</p>
+          <div className="row" style={{ flexWrap: "wrap", gap: 12, marginBottom: 10 }}>
+            {filterFields.map((field) => <StringMultiSelect key={field} label={FILTER_LABELS[field]} options={options[field]} value={filters[field]}
+              onChange={(selected) => { setFilters({ ...filters, [field]: selected }); setPage(0); setCollapsed([]); }} />)}
+            <button type="button" className="secondary small" disabled={!hasFilters} onClick={() => { setFilters(emptyFilters()); setPage(0); }}>Filtreleri temizle</button>
+          </div>
+          <p className="muted">Aynı alandaki seçimler alternatif, farklı alanlar birlikte uygulanır. Filtreleme sevk seçimini değiştirmez.</p>
+          <ErrorText err={error} />
+          {error && onReload && <button type="button" className="secondary small" onClick={onReload}>Siparişleri yeniden yükle</button>}
+          {loading && <p role="status">Siparişler yükleniyor…</p>}
+          <p className="muted" role="status">{shownGroups.length} / {groups.length} sipariş · {filtered.length} / {eligible.length} poz listeleniyor</p>
+          {shownGroups.length === 0 ? (
+            !loading && !error && <p className="muted">{hasFilters ? "Filtrelere uygun sipariş veya poz yok." : "Açık sipariş yok."}</p>
           ) : (
             <div className="table-wrap" style={{ maxHeight: 280 }}>
               <table>
@@ -137,28 +148,34 @@ export default function CoShipmentPanel({
                     <th>Sipariş</th>
                     <th>Müşteri</th>
                     <th>Termin</th>
-                    <th className="num">Poz</th>
+                    <th className="num">Poz (görünen / toplam)</th>
                     <th>Hedef hazır</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {groups.map((g) => {
-                    const on = selectedOrders.has(g.order_no);
-                    const isExp = expanded === g.order_no;
+                  {shownGroups.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE).map((g) => {
+                    const selected = g.positions.filter((p) => isPosOn(g.order_no, p.position_no)).length;
+                    const on = selected > 0;
+                    const allOn = selected === g.positions.length;
+                    const isExp = hasFilters ? !collapsed.includes(g.order_no) : expanded === g.order_no;
                     return (
                       <Fragment key={g.order_no}>
                         <tr key={g.order_no} className={on ? "on" : ""}>
                           <td>
-                            <input type="checkbox" checked={on} onChange={(e) => toggleOrder(g.order_no, e.target.checked)} />
+                            <input type="checkbox" aria-label={`${g.order_no} listelenen pozları seç`} checked={allOn}
+                              ref={(el) => { if (el) el.indeterminate = on && !allOn; }} onChange={(e) => toggleOrder(g.order_no, e.target.checked)} />
                           </td>
                           <td>
-                            <button type="button" className="linkish" onClick={() => setExpanded(isExp ? null : g.order_no)}>
+                            <button type="button" className="linkish" aria-expanded={isExp} onClick={() => {
+                              if (hasFilters) setCollapsed(isExp ? [...collapsed, g.order_no] : collapsed.filter((n) => n !== g.order_no));
+                              else setExpanded(isExp ? null : g.order_no);
+                            }}>
                               {g.order_no} {isExp ? "▾" : "▸"}
                             </button>
                           </td>
                           <td>{g.customer}</td>
                           <td>{fmtDate(g.due_date)}</td>
-                          <td className="num">{g.positions.length}</td>
+                          <td className="num">{g.positions.length} / {fullGroups.get(g.order_no)?.positions.length}</td>
                           <td>{on ? targetFor(g.due_date) : "—"}</td>
                         </tr>
                         {isExp && (
@@ -169,10 +186,9 @@ export default function CoShipmentPanel({
                                   <input
                                     type="checkbox"
                                     checked={isPosOn(g.order_no, p.position_no)}
-                                    disabled={!on}
                                     onChange={(e) => togglePosition(g.order_no, p.position_no, e.target.checked)}
                                   />
-                                  Poz {p.position_no} · {p.item_code}
+                                  Poz {p.position_no || "—"} · {p.item_code}
                                 </label>
                               ))}
                             </td>
@@ -185,8 +201,13 @@ export default function CoShipmentPanel({
               </table>
             </div>
           )}
+          {pages > 1 && <div className="row" style={{ gap: 12, marginTop: 8 }}>
+            <button type="button" className="secondary small" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>Önceki</button>
+            <span>Sayfa {currentPage + 1} / {pages}</span>
+            <button type="button" className="secondary small" disabled={currentPage + 1 >= pages} onClick={() => setPage(currentPage + 1)}>Sonraki</button>
+          </div>}
           <p className="muted" style={{ margin: "8px 0 0", fontSize: "0.92em" }}>
-            Mod kapalıyken veya sipariş seçilmezken planlama mevcut algoritma ile çalışır.
+            Mod kapalıyken veya sipariş seçilmezken planlama mevcut algoritma ile çalışır. Toplu seçim tüm sayfalardaki filtreye uygun pozları kapsar.
           </p>
         </>
       )}

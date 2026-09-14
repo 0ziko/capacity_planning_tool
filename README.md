@@ -54,6 +54,8 @@ cd backend
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
+Frontend filtre ve seçim regresyonları: `frontend/` içinde `npm test`; tip kontrolü ve üretim derlemesi: `npm run build`.
+
 ## Kullanım akışı
 1. **Excel Import**: İş merkezleri → Vardiyalar → Personel → Stok → BOM → Rota → Siparişler (her biri için şablon indirilebilir).
 2. **İş Merkezleri**: kişi başı verimli saat, vardiya, “1 birim = N saat”, pilot için **Planlanıyor** işareti.

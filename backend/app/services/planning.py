@@ -32,7 +32,7 @@ from app.services import capacity as cap
 from app.services import scenarios as scen
 from app.services.bom_tree import explode_order, has_wip_structure
 from app.services.gantt import actual_hours_by_week
-from app.services.kpi_units import week_plan_and_output_kpis
+from app.services.kpi_units import plan_and_output_kpis_for_range
 from app.services.plan_draft import DraftLine
 from app.services import operation_constraints as opcon
 from app.services.planning_candidates import (
@@ -1168,18 +1168,24 @@ def load(db: Session, wc_ids: list[int] | None, start: date, weeks: int) -> list
             )
         )
     actual = actual_hours_by_week(db, [w.id for w in wcs], start, wk_list[-1])
+    weekly_kpis = plan_and_output_kpis_for_range(db, [w.id for w in wcs], start, wk_list[-1])
     result = []
     for w in wcs:
         rows = []
         unit = w.capacity_unit_hours or 1.0
-        ovl = cap.Overrides(db, w.id)
+        calendar = cap.LaborCapacityCalendar(db, w, start, wk_list[-1] + timedelta(days=6))
+        ovl = calendar.overrides
         for wk in wk_list:
-            c_raw = cap.week_capacity_hours(db, w, wk)
-            c_plan = cap.planning_capacity_hours(db, w, wk)
+            c_raw = calendar.capacity(wk, wk + timedelta(days=6)).capacity_hours
+            c_plan = cap.apply_planning_reserve(w, c_raw)
             p = planned.get((w.id, wk), 0.0)
             fc = forecast.get((w.id, wk), 0.0)
             a = actual.get((w.id, wk), 0.0)
-            kpis = week_plan_and_output_kpis(db, w.id, wk)
+            kpis = weekly_kpis.get((w.id, wk), {
+                "standard_hour_equivalent_output": 0.0,
+                "plan_adherence_remaining_hours": 0.0,
+                "plan_matched_output_hours": 0.0,
+            })
             std_out = kpis["standard_hour_equivalent_output"]
             plan_rem = kpis["plan_adherence_remaining_hours"]
             idle = max(c_plan - p, 0.0)

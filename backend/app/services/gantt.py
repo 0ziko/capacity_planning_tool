@@ -77,7 +77,9 @@ def _production_map(db: Session, wc_id: int, orders_by_id: dict[int, Order], as_
         return {}
     item_ids = {o.item_id for o in orders_by_id.values()}
     items_by_id = {o.item_id: o.item for o in orders_by_id.values()}
-    wip_idx = wip_index(db)
+    # Most rows resolve directly by operation sequence. Do not load every route
+    # in the database for an empty production set (or a sequence-only set).
+    wip_idx = None
     actuals = (
         db.query(ProductionActual)
         .filter(
@@ -91,11 +93,14 @@ def _production_map(db: Session, wc_id: int, orders_by_id: dict[int, Order], as_
     orders_by_no: dict[tuple[str, int], Order] = {(o.order_no.upper(), o.item_id): o for o in orders_by_id.values()}
 
     def op_id_for(item: Item, seq: int | None, wc: int, wip: str, order_no_hint: str = "") -> int | None:
+        nonlocal wip_idx
         if seq is not None:
             op = next((x for x in item.operations if x.seq == seq), None)
             if op:
                 return op.id
         if wip:
+            if wip_idx is None:
+                wip_idx = wip_index(db)
             try:
                 return resolve_wip(db, wip, item.code, wip_idx, order_no=order_no_hint or None).id
             except ValueError:

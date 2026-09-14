@@ -153,7 +153,8 @@ export default function Planning() {
             <button className="secondary" onClick={() => api.download(`/api/plan/export.xlsx${qs({ start, weeks, work_center_ids: wcIds })}`)}>⬇ Excel</button>
           </div>
           {can("poweruser") && mode === "due_date" && (
-            <CoShipmentPanel orders={openOrders.data ?? []} value={coShipment} onChange={setCoShipment} />
+            <CoShipmentPanel orders={openOrders.data ?? []} value={coShipment} onChange={setCoShipment}
+              loading={openOrders.loading} error={openOrders.err} onReload={openOrders.reload} />
           )}
           {can("poweruser") && mode === "revenue" && coShipment.enabled && (
             <p className="muted">Birlikte sevk modu yalnızca “Termine göre” planlamada kullanılabilir.</p>

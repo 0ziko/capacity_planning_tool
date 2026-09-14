@@ -3,20 +3,41 @@
 #            .\start_backend.ps1 -Stop      -> durdur
 # Loglar: backend\logs\backend.err.log (uvicorn + hata izleri), backend\logs\backend.out.log
 param([switch]$Stop)
+$ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 $pidFile = "logs\backend.pid"
 New-Item -ItemType Directory -Force logs | Out-Null
 
+function Get-BackendProcessTree([int]$RootId, $Processes) {
+    # Windows venv launcher -> Python reloader -> multiprocessing worker.
+    # Stop descendants first; stopping just one level leaves the worker alive.
+    foreach ($child in @($Processes | Where-Object { $_.ParentProcessId -eq $RootId })) {
+        Get-BackendProcessTree -RootId $child.ProcessId -Processes $Processes
+    }
+    $RootId
+}
+
 if (Test-Path $pidFile) {
     $old = Get-Content $pidFile -ErrorAction SilentlyContinue
     if ($old) {
-        # reloader + alt surecleri
-        Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq [int]$old } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-        Stop-Process -Id ([int]$old) -Force -ErrorAction SilentlyContinue
+        $processes = @(Get-CimInstance Win32_Process)
+        $rootProcess = $processes | Where-Object { $_.ProcessId -eq [int]$old }
+        if ($rootProcess) {
+            if ($rootProcess.ExecutablePath -ne (Join-Path $PSScriptRoot ".venv\Scripts\python.exe") -or $rootProcess.CommandLine -notmatch "-m uvicorn app\.main:app") {
+                throw "Kayitli PID bu backend'e ait degil; guvenlik icin durdurulmadi: $old"
+            }
+            Get-BackendProcessTree -RootId ([int]$old) -Processes $processes | ForEach-Object {
+                Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
     Remove-Item $pidFile -ErrorAction SilentlyContinue
 }
 if ($Stop) { Write-Host "Backend durduruldu."; exit 0 }
+
+if (Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue) {
+    throw "8000 portu hala kullanimda. Eski veya baska bir sunucu kapatilmadan backend baslatilmadi."
+}
 
 if (-not (Test-Path ".venv")) { python -m venv .venv; .\.venv\Scripts\python.exe -m pip install -q -r requirements.txt }
 if (-not (Test-Path ".env")) { Copy-Item .env.example .env }
@@ -29,7 +50,8 @@ $p.Id | Set-Content $pidFile
 Start-Sleep -Seconds 4
 try {
     $h = Invoke-RestMethod http://localhost:8000/api/health -TimeoutSec 10
+    if ($p.HasExited -or -not $h.db_ok) { throw "Yeni backend veya veritabani hazir degil." }
     Write-Host "Backend calisiyor (pid $($p.Id)): $($h.app) -> http://localhost:8000/docs"
 } catch {
-    Write-Host "Backend yanit vermedi; logs\backend.err.log dosyasina bakin." -ForegroundColor Red
+    throw "Backend dogrulanamadi; logs\backend.err.log dosyasina bakin. $($_.Exception.Message)"
 }

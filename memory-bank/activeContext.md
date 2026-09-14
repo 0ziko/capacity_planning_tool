@@ -1,6 +1,13 @@
 # Aktif Bağlam
 
 ## Şu Anki Odak
+2026-09-14: Planlama sayfasindaki zaman asimi ve birlikte sevk filtreleri duzeltildi.
+- Kutuyu acmak API hesabi baslatmiyordu; sayfa acilisindaki `/api/plan/load` eszamanli isteklerde 28.7–28.9 saniye surup 20 saniyelik istemci sinirini asiyordu. 20 merkez × 8 hafta icin 3718 sorgu; bos uretimde bile tum WIP indeksi tekrar kuruluyordu.
+- Haftalik KPI aralik sorgulari, istek omurlu personel/haftalik istisna/tatil takvimi ve yalnizca gerekli oldugunda WIP indeksi: ayni veri 99 sorgu / 0.21 saniye servis hesabi; eszamanli HTTP kontrolunde 1.29–1.36 saniye. Onceki ve sonraki yuk raporu JSON olarak ayni. Timeout siniri degismedi.
+- Birlikte sevk: Siparis/Poz/Musteri/Stok kodu aranabilir coklu filtreleri; alan icinde VEYA, alanlar arasinda VE. Filtre poz satirinda uygulanir; listelenenleri sec/kaldir gizli secimleri korur, bos poz numarasi API'ye bos string gider. 50 siparis/sayfa; toplu secim tum filtreli sayfalari kapsar.
+- Windows baslatma: venv launcher → reloader → worker zincirinin tamami kapatilir; eski sunucu portu tutuyorsa basarili baslatma mesaji verilmez.
+- Dogrulama: backend 146 passed / 2 PostgreSQL skip; frontend 5 secim/filtre testi ve build; tarayicida coklu musteri + stok, bos sonuc, secim koruma. Canli plan hesaplatilmadi veya degistirilmedi.
+
 2026-09-10: İş taşıma revizyonu uygulamaya alındı. Kullanıcı otomatik planı çalıştırıp kapasite yerleşimini yaptıktan sonra farklı senaryolarla algoritmayı doğrulayacak.
 
 Hüküm: hedef haftada yer varsa iş öncelikli yerleşir; kaydırılacak olan yalnızca o işin tükettiği iş merkezlerinde, o haftadan sonra çakışan işlerdir. Tüm kapasitenin dolu olduğu varsayımıyla tüm işleri ötelemek yok.

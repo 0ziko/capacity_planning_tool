@@ -10,7 +10,7 @@ from datetime import date, time, timedelta
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models import Employee, Machine, WorkCenter, WorkCenterShift, WorkCenterWeek
+from app.models import Employee, Machine, ResourceCalendarException, WorkCenter, WorkCenterShift, WorkCenterWeek
 from app.schemas import CapacityDay, CapacityOut
 
 
@@ -184,32 +184,53 @@ def first_shift_start(wc: WorkCenter, day: date, ov: WorkCenterWeek | None = Non
     return min(starts) if starts else time(8, 0)
 
 
-def capacity_for_range(db: Session, wc: WorkCenter, start: date, end: date) -> CapacityOut:
-    from app.services.calendar_capacity import daily_labor_capacity_hours
+class LaborCapacityCalendar:
+    """Request-local capacity inputs; one fetch per input over the whole horizon.
 
-    emp = employee_count(db, wc)
-    ovl = Overrides(db, wc.id)
-    ovl.preload(start, end)
-    days: list[CapacityDay] = []
-    total = 0.0
-    d = start
-    while d <= end:
-        h = daily_labor_capacity_hours(db, wc, d, emp, ovl)
-        if h > 0:
-            days.append(CapacityDay(day=d, hours=round(h, 2)))
-            total += h
-        d += timedelta(days=1)
-    unit = wc.capacity_unit_hours or 1.0
-    return CapacityOut(
-        work_center_id=wc.id,
-        work_center_code=wc.code,
-        start=start,
-        end=end,
-        capacity_hours=round(total, 2),
-        capacity_units=round(total / unit, 2),
-        unit_hours=unit,
-        days=days,
-    )
+    Never retained across requests, so edits to staffing/calendars are immediately
+    visible. Daily whole-day holidays still override weekly staffing exceptions.
+    """
+
+    def __init__(self, db: Session, wc: WorkCenter, start: date, end: date):
+        self.wc = wc
+        self.start, self.end = start, end
+        self.emp = employee_count(db, wc)
+        self.overrides = Overrides(db, wc.id)
+        self.overrides.preload(start, end)
+        self.holidays = {
+            row[0] for row in db.query(ResourceCalendarException.cal_date).filter(
+                ResourceCalendarException.resource_type == "work_center",
+                ResourceCalendarException.resource_id == wc.id,
+                ResourceCalendarException.cal_date >= start,
+                ResourceCalendarException.cal_date <= end,
+                ResourceCalendarException.exception_kind == "holiday",
+                ResourceCalendarException.start_time.is_(None),
+                ResourceCalendarException.end_time.is_(None),
+            ).all()
+        }
+
+    def capacity(self, start: date, end: date) -> CapacityOut:
+        if start < self.start or end > self.end:
+            raise ValueError("Capacity range is outside the loaded calendar")
+        days: list[CapacityDay] = []
+        total = 0.0
+        d = start
+        while d <= end:
+            h = 0.0 if d in self.holidays else daily_capacity_hours(self.wc, d, self.emp, self.overrides.get(d))
+            if h > 0:
+                days.append(CapacityDay(day=d, hours=round(h, 2)))
+                total += h
+            d += timedelta(days=1)
+        unit = self.wc.capacity_unit_hours or 1.0
+        return CapacityOut(
+            work_center_id=self.wc.id, work_center_code=self.wc.code,
+            start=start, end=end, capacity_hours=round(total, 2),
+            capacity_units=round(total / unit, 2), unit_hours=unit, days=days,
+        )
+
+
+def capacity_for_range(db: Session, wc: WorkCenter, start: date, end: date) -> CapacityOut:
+    return LaborCapacityCalendar(db, wc, start, end).capacity(start, end)
 
 
 def week_capacity_hours(db: Session, wc: WorkCenter, wk: date) -> float:
@@ -220,6 +241,10 @@ def week_capacity_hours(db: Session, wc: WorkCenter, wk: date) -> float:
 def planning_capacity_hours(db: Session, wc: WorkCenter, wk: date) -> float:
     """Planlama/terminleme icin kullanilabilir kapasite (atil rezerv dusulmus)."""
     raw = week_capacity_hours(db, wc, wk)
+    return apply_planning_reserve(wc, raw)
+
+
+def apply_planning_reserve(wc: WorkCenter, raw: float) -> float:
     pct = max(0.0, min(float(getattr(wc, "planning_reserve_pct", 0.0) or 0.0), 99.0))
     return raw * (1.0 - pct / 100.0)
 

@@ -91,6 +91,41 @@ def week_plan_and_output_kpis(
     }
 
 
+def plan_and_output_kpis_for_range(
+    db: Session, wc_ids: list[int], start: date, end: date, *, as_of: date | None = None,
+) -> dict[tuple[int, date], dict[str, float]]:
+    """Bulk weekly report, retaining the per-week production matching scope.
+
+    Empty work-center/week cells require no queries. Matching remains scoped to
+    the orders planned in each cell; pooling weeks would change FIFO allocation.
+    """
+    as_of = as_of or date.today()
+    grouped: dict[tuple[int, date], list[PlanLine]] = defaultdict(list)
+    lines = db.query(PlanLine).filter(
+        PlanLine.work_center_id.in_(wc_ids), PlanLine.week_start >= start, PlanLine.week_start <= end,
+    ).all()
+    for line in lines:
+        grouped[(line.work_center_id, line.week_start)].append(line)
+    output: dict[tuple[int, date], float] = defaultdict(float)
+    actuals = db.query(ProductionActual.work_center_id, ProductionActual.prod_date, func.sum(ProductionActual.earned_hours)).filter(
+        ProductionActual.work_center_id.in_(wc_ids), ProductionActual.prod_date >= start,
+        ProductionActual.prod_date <= min(end + timedelta(days=6), as_of),
+    ).group_by(ProductionActual.work_center_id, ProductionActual.prod_date).all()
+    for wc_id, day, hours in actuals:
+        output[(wc_id, cap.week_start(day))] += float(hours or 0)
+    result = {}
+    for key in grouped.keys() | output.keys():
+        cell_lines = grouped.get(key, [])
+        matched = production_hours_by_plan_line(db, key[0], key[1], as_of) if cell_lines else {}
+        result[key] = {
+            "planned_hours": round(sum(float(p.planned_hours or 0) for p in cell_lines), 4),
+            "standard_hour_equivalent_output": round(output.get(key, 0.0), 4),
+            "plan_matched_output_hours": round(sum(min(float(p.planned_hours or 0), matched.get(p.id, 0.0)) for p in cell_lines), 4),
+            "plan_adherence_remaining_hours": round(sum(max(float(p.planned_hours or 0) - matched.get(p.id, 0.0), 0.0) for p in cell_lines), 4),
+        }
+    return result
+
+
 def downtime_labor_minutes(row: Downtime) -> tuple[float | None, str]:
     """Olculmus adam-dakika; legacy icin None."""
     basis = getattr(row, "time_basis", None) or "legacy_unspecified"

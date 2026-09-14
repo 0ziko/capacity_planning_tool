@@ -795,6 +795,73 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
     )
 
 
+def draft_line_to_dict(line: DraftLine) -> dict:
+    return {
+        "order_id": line.order_id,
+        "production_batch_id": line.production_batch_id,
+        "operation_id": line.operation_id,
+        "work_center_id": line.work_center_id,
+        "week_start": line.week_start.isoformat(),
+        "planned_hours": round(float(line.planned_hours or 0), 6),
+        "planned_qty": round(float(line.planned_qty or 0), 6),
+        "mode": line.mode or "auto",
+        "semi_finished_code": line.semi_finished_code or "",
+    }
+
+
+def apply_plan_snapshot(
+    db: Session,
+    req: AutoPlanRequest,
+    plan_lines: list[dict],
+    username: str,
+    *,
+    revision_id: int | None,
+    replace_manual: bool,
+    keep_line_mode: bool = False,
+    message_tag: str = "revizyon snapshot",
+) -> dict:
+    """Onayda kayitli plan satirlarini aynen yazar (yeniden simulate etmez).
+
+    Cagiran, plan_input_write_lock altinda olmalidir (revizyon onay / auto_plan).
+    """
+    scope = plan_horizon_scope(req.start_week, req.weeks)
+    wc_ids = sorted({int(r["work_center_id"]) for r in plan_lines}) if plan_lines else list(req.work_center_ids or [])
+    if not wc_ids:
+        return {"created": 0, "message": "Plan satiri yok", "unplanned": [], "skipped": [], "mode": req.mode}
+    modes = replace_scope_modes(replace_manual=replace_manual)
+    delete_lines_in_replace_scope(db, wc_ids, scope, modes)
+    db.flush()
+    for row in plan_lines:
+        mode = row.get("mode") or "auto"
+        if not keep_line_mode:
+            mode = "auto"
+        db.add(
+            PlanLine(
+                order_id=int(row["order_id"]),
+                production_batch_id=row.get("production_batch_id"),
+                operation_id=int(row["operation_id"]),
+                work_center_id=int(row["work_center_id"]),
+                week_start=date.fromisoformat(str(row["week_start"])[:10]),
+                planned_hours=float(row["planned_hours"]),
+                planned_qty=float(row.get("planned_qty") or 0),
+                semi_finished_code=row.get("semi_finished_code") or "",
+                mode=mode if mode in ("auto", "manual") else "auto",
+                strategy=req.mode,
+                revision_id=revision_id,
+                created_by=username,
+            )
+        )
+    db.flush()
+    label = REVENUE_MODE_LABEL if req.mode == "revenue" else "termine gore"
+    return {
+        "created": len(plan_lines),
+        "unplanned": [],
+        "skipped": [],
+        "mode": req.mode,
+        "message": f"{len(plan_lines)} plan satiri uygulandi ({label}, {message_tag}).",
+    }
+
+
 def write_simulation(
     db: Session,
     req: AutoPlanRequest,
@@ -808,6 +875,8 @@ def write_simulation(
     keep_line_mode: bool = False,
 ) -> dict:
     """Simulasyon sonucunu plan satiri olarak yazar."""
+    from app.services.plan_input_lock import plan_input_write_lock
+
     if not sim.work_centers:
         return {
             "created": 0,
@@ -819,32 +888,34 @@ def write_simulation(
             "co_shipment_exceptions": [],
         }
     wc_ids = [w.id for w in sim.work_centers]
-    if req.replace_existing:
-        scope = plan_horizon_scope(sim.start, len(sim.weeks))
-        modes = replace_scope_modes(replace_manual=replace_manual)
-        delete_lines_in_replace_scope(db, wc_ids, scope, modes)
-        db.flush()
-    for l in sim.lines:
-        db.add(
-            PlanLine(
-                order_id=l.order_id,
-                production_batch_id=l.production_batch_id,
-                operation_id=l.operation_id,
-                work_center_id=l.work_center_id,
-                week_start=l.week_start,
-                planned_hours=l.planned_hours,
-                planned_qty=l.planned_qty,
-                semi_finished_code=l.semi_finished_code or "",
-                mode=l.mode if keep_line_mode and l.mode in ("auto", "manual") else "auto",
-                strategy=req.mode,
-                revision_id=revision_id,
-                created_by=username,
+    hk = f"{sim.start.isoformat()}|{len(sim.weeks)}|{','.join(str(i) for i in sorted(wc_ids))}"
+    with plan_input_write_lock(db, hk):
+        if req.replace_existing:
+            scope = plan_horizon_scope(sim.start, len(sim.weeks))
+            modes = replace_scope_modes(replace_manual=replace_manual)
+            delete_lines_in_replace_scope(db, wc_ids, scope, modes)
+            db.flush()
+        for l in sim.lines:
+            db.add(
+                PlanLine(
+                    order_id=l.order_id,
+                    production_batch_id=l.production_batch_id,
+                    operation_id=l.operation_id,
+                    work_center_id=l.work_center_id,
+                    week_start=l.week_start,
+                    planned_hours=l.planned_hours,
+                    planned_qty=l.planned_qty,
+                    semi_finished_code=l.semi_finished_code or "",
+                    mode=l.mode if keep_line_mode and l.mode in ("auto", "manual") else "auto",
+                    strategy=req.mode,
+                    revision_id=revision_id,
+                    created_by=username,
+                )
             )
-        )
-    if commit:
-        db.commit()
-    else:
-        db.flush()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
     label = REVENUE_MODE_LABEL if req.mode == "revenue" else "termine gore"
     tag = message_tag if message_tag is not None else ("revizyon" if revision_id else "revizyonsuz")
     msg = f"{len(sim.lines)} plan satiri olusturuldu ({label}, {tag})."

@@ -272,6 +272,7 @@ export interface PlanRevision {
   applied_at: string | null;
   rejected_by: string;
   reject_note: string;
+  input_fingerprint: string;
   changes: PlanRevisionChange[];
   events: PlanRevisionEvent[];
   compare: { baseline: PlanRevisionKpis; proposed: PlanRevisionKpis; schedule_rows: Record<string, unknown>[]; bumped_orders?: string[]; insert_notes?: string[]; unplanned?: { order_no?: string; work_center_code?: string; hours?: number }[] } | null;

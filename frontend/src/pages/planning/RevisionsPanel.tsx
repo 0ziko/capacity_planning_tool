@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   api,
+  ApiError,
   fmt,
   REVISION_REASONS,
   type JobMovePreview,
@@ -65,6 +66,7 @@ export default function RevisionsPanel({
   const list = useAsync(() => api.get<PlanRevision[]>("/api/plan/revisions"), []);
   const [selId, setSelId] = useState<number | null>(null);
   const [err, setErr] = useState("");
+  const [conflict, setConflict] = useState("");
   const [busy, setBusy] = useState(false);
   const [reasons, setReasons] = useState<string[]>(["other"]);
   const [note, setNote] = useState("");
@@ -115,13 +117,18 @@ export default function RevisionsPanel({
   const run = async (fn: () => Promise<PlanRevision>) => {
     setBusy(true);
     setErr("");
+    setConflict("");
     try {
       const r = await fn();
       setSelId(r.id);
       await list.reload();
       if (r.status === "applied") onApplied();
     } catch (e) {
-      setErr((e as Error).message);
+      if (e instanceof ApiError && e.status === 409) {
+        setConflict(e.message);
+      } else {
+        setErr((e as Error).message);
+      }
     } finally {
       setBusy(false);
     }
@@ -288,7 +295,21 @@ export default function RevisionsPanel({
             )}
           </div>
           <p>{selected.note || <span className="muted">Açıklama yok</span>}</p>
-          {selected.apply_message && <div className="success">{selected.apply_message}</div>}
+          {conflict && (
+            <div className="panel" style={{ padding: "8px 12px", marginBottom: 10, background: "#fff3e0", borderColor: "#ffb74d" }}>
+              <b>Onay uygulanamadı</b>
+              <p style={{ margin: "6px 0 8px" }}>{conflict}</p>
+              {selected.status === "calculated" && (
+                <button className="secondary" onClick={() => void run(() => api.post(`/api/plan/revisions/${selected.id}/calculate`))} disabled={busy}>
+                  Yeniden hesapla
+                </button>
+              )}
+            </div>
+          )}
+          {selected.apply_message && !conflict && <div className="success">{selected.apply_message}</div>}
+          {selected.input_fingerprint && selected.status === "calculated" && (
+            <p className="muted" style={{ fontSize: 11 }}>Veri sürümü: <code>{selected.input_fingerprint.slice(0, 12)}…</code> — onayda güncel veri ile eşleşmeli.</p>
+          )}
 
           {canEdit && editable && (
             <>

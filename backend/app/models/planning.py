@@ -238,6 +238,7 @@ class PlanRevision(Base):
     applied_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     rejected_by: Mapped[str] = mapped_column(String(64), default="")
     reject_note: Mapped[str] = mapped_column(String(512), default="")
+    input_fingerprint: Mapped[str] = mapped_column(String(64), default="")
 
     changes: Mapped[list["PlanRevisionChange"]] = relationship(back_populates="revision", cascade="all, delete-orphan")
     snapshots: Mapped[list["PlanRevisionSnapshot"]] = relationship(back_populates="revision", cascade="all, delete-orphan")
@@ -264,7 +265,7 @@ class PlanRevisionSnapshot(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     revision_id: Mapped[int] = mapped_column(ForeignKey("plan_revisions.id", ondelete="CASCADE"), index=True)
-    kind: Mapped[str] = mapped_column(String(16))  # baseline | proposed
+    kind: Mapped[str] = mapped_column(String(16))  # baseline | proposed | apply
     payload_json: Mapped[str] = mapped_column(Text, default="{}")
 
     revision: Mapped[PlanRevision] = relationship(back_populates="snapshots")

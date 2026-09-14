@@ -24,9 +24,15 @@ from app.services import capacity as cap
 from app.services import job_moves as job_moves_svc
 from app.services import orders as orders_svc
 from app.services import planning
+from app.services.plan_input_fingerprint import compute_plan_input_fingerprint
+from app.services.plan_input_lock import plan_input_write_lock
 from app.services.plan_preflight import plan_preflight
 
 OPEN_STATUSES = ("draft", "calculated")
+
+
+class RevisionConflictError(Exception):
+    """HTTP 409 — veri surumu veya durum uyumsuz."""
 MUTABLE_STATUSES = ("draft", "calculated")
 
 
@@ -224,6 +230,7 @@ def to_out(rev: PlanRevision, *, apply_message: str = "") -> PlanRevisionOut:
         applied_at=rev.applied_at,
         rejected_by=rev.rejected_by or "",
         reject_note=rev.reject_note or "",
+        input_fingerprint=rev.input_fingerprint or "",
         changes=[
             PlanRevisionChangeOut(
                 id=c.id,
@@ -336,6 +343,7 @@ def add_change(db: Session, revision_id: int, body: PlanRevisionChangeIn, userna
     _append_change(db, rev, body)
     rev.status = "draft"
     rev.calculated_at = None
+    rev.input_fingerprint = ""
     db.query(PlanRevisionSnapshot).filter(PlanRevisionSnapshot.revision_id == rev.id).delete()
     _add_event(db, rev, "change", username, f"{body.entity_type}.{body.field}")
     db.commit()
@@ -353,6 +361,7 @@ def add_changes_bulk(db: Session, revision_id: int, bodies: list[PlanRevisionCha
         _append_change(db, rev, body)
     rev.status = "draft"
     rev.calculated_at = None
+    rev.input_fingerprint = ""
     db.query(PlanRevisionSnapshot).filter(PlanRevisionSnapshot.revision_id == rev.id).delete()
     detail = f"toplu {len(bodies)} girdi"
     kinds = sorted({f"{b.entity_type}.{b.field}" for b in bodies})
@@ -374,11 +383,37 @@ def delete_change(db: Session, revision_id: int, change_id: int, username: str) 
     db.delete(ch)
     rev.status = "draft"
     rev.calculated_at = None
+    rev.input_fingerprint = ""
     db.query(PlanRevisionSnapshot).filter(PlanRevisionSnapshot.revision_id == rev.id).delete()
     _add_event(db, rev, "change", username, f"silindi {change_id}")
     db.commit()
     db.expire_all()
     return to_out(_get(db, rev.id))
+
+
+def _simulate_revision_preview(db: Session, rev: PlanRevision, req: AutoPlanRequest):
+    """Taslak etkisini savepoint icinde uygular; canli veri degismez."""
+    nested = db.begin_nested()
+    try:
+        _apply_changes(db, rev, revert=False)
+        check = plan_preflight(db, req)
+        if not check.can_plan:
+            codes = ", ".join(r.item_code for r in check.no_routing[:8])
+            raise ValueError(f"Rotasi olmayan stok var; hesaplanamaz: {codes}")
+        moves = job_moves_svc.job_moves_from_revision(rev)
+        if moves:
+            sim = job_moves_svc.simulate_priority_insert(db, req, moves, replace_manual=bool(rev.replace_manual))
+            extra = job_moves_svc.extra_from_sim(sim)
+            apply_path = "job_moves"
+            keep_line_mode = True
+        else:
+            sim = planning.simulate(db, req)
+            extra = {"unplanned": sim.unplanned, "skipped": sim.skipped}
+            apply_path = "auto"
+            keep_line_mode = False
+        return sim, extra, apply_path, keep_line_mode
+    finally:
+        nested.rollback()
 
 
 def calculate(db: Session, revision_id: int, username: str) -> PlanRevisionOut:
@@ -387,6 +422,8 @@ def calculate(db: Session, revision_id: int, username: str) -> PlanRevisionOut:
         raise ValueError("Bu revizyon hesaplanamaz")
     req = _req(rev)
     wc_ids = req.work_center_ids
+    input_fp = compute_plan_input_fingerprint(db, req)
+
     baseline_sched = orders_svc.order_schedule(db, wc_ids)
     baseline_kpis = _kpis_from_schedule(baseline_sched)
     live_lines = (
@@ -399,27 +436,24 @@ def calculate(db: Session, revision_id: int, username: str) -> PlanRevisionOut:
     baseline_kpis.line_count = len(live_lines)
     baseline_kpis.planned_hours = round(sum(p.planned_hours or 0 for p in live_lines), 2)
 
-    _apply_changes(db, rev, revert=False)
-    check = plan_preflight(db, req)
-    if not check.can_plan:
-        _apply_changes(db, rev, revert=True)
-        db.commit()
-        codes = ", ".join(r.item_code for r in check.no_routing[:8])
-        raise ValueError(f"Rotasi olmayan stok var; hesaplanamaz: {codes}")
-
-    moves = job_moves_svc.job_moves_from_revision(rev)
-    if moves:
-        sim = job_moves_svc.simulate_priority_insert(db, req, moves, replace_manual=bool(rev.replace_manual))
-        extra = job_moves_svc.extra_from_sim(sim)
-    else:
-        sim = planning.simulate(db, req)
-        extra = {"unplanned": sim.unplanned, "skipped": sim.skipped}
+    sim, extra, apply_path, keep_line_mode = _simulate_revision_preview(db, rev, req)
     proposed_sched = orders_svc.order_schedule(db, wc_ids, lines=sim.lines, orders=sim.orders)
     proposed_kpis = _kpis_from_schedule(proposed_sched)
     proposed_kpis.line_count = len(sim.lines)
     proposed_kpis.planned_hours = round(sim.planned_hours, 2)
 
-    _apply_changes(db, rev, revert=True)
+    plan_lines = [planning.draft_line_to_dict(l) for l in sim.lines]
+    apply_payload = {
+        "plan_lines": plan_lines,
+        "apply_path": apply_path,
+        "keep_line_mode": keep_line_mode,
+        "replace_manual": bool(rev.replace_manual),
+        "mode": req.mode,
+        "start_week": req.start_week.isoformat(),
+        "weeks": req.weeks,
+        "work_center_ids": wc_ids or [],
+        "input_fingerprint": input_fp,
+    }
 
     db.query(PlanRevisionSnapshot).filter(PlanRevisionSnapshot.revision_id == rev.id).delete()
     db.add(
@@ -446,9 +480,17 @@ def calculate(db: Session, revision_id: int, username: str) -> PlanRevisionOut:
             ),
         )
     )
+    db.add(
+        PlanRevisionSnapshot(
+            revision_id=rev.id,
+            kind="apply",
+            payload_json=json.dumps(apply_payload, default=str),
+        )
+    )
     rev.status = "calculated"
     rev.calculated_at = datetime.now()
-    _add_event(db, rev, "calculate", username, f"{proposed_kpis.line_count} satir")
+    rev.input_fingerprint = input_fp
+    _add_event(db, rev, "calculate", username, f"{proposed_kpis.line_count} satir, fp={input_fp[:12]}")
     db.commit()
     db.expire_all()
     return to_out(_get(db, rev.id))
@@ -456,64 +498,59 @@ def calculate(db: Session, revision_id: int, username: str) -> PlanRevisionOut:
 
 def approve_and_apply(db: Session, revision_id: int, username: str) -> PlanRevisionOut:
     rev = _get(db, revision_id)
+    if rev.status == "applied":
+        raise RevisionConflictError("Revizyon zaten uygulandi")
     if rev.status != "calculated":
         raise ValueError("Once yeniden hesaplayin")
+
+    apply_snap = next((s for s in rev.snapshots if s.kind == "apply"), None)
+    if not apply_snap or not rev.input_fingerprint:
+        raise ValueError("Once yeniden hesaplayin")
+    apply_payload = json.loads(apply_snap.payload_json or "{}")
+    plan_lines = apply_payload.get("plan_lines") or []
     req = _req(rev)
-    _apply_changes(db, rev, revert=False)
-    check = plan_preflight(db, req)
-    if not check.can_plan:
-        _apply_changes(db, rev, revert=True)
+
+    with plan_input_write_lock(db, rev.horizon_key):
+        current_fp = compute_plan_input_fingerprint(db, req)
+        if current_fp != rev.input_fingerprint:
+            raise RevisionConflictError("Veri degisti; yeniden hesaplayin")
+
+        check = plan_preflight(db, req)
+        if not check.can_plan:
+            raise ValueError("Rotasi olmayan stok var; uygulanamaz")
+
+        others = (
+            db.query(PlanRevision)
+            .filter(
+                PlanRevision.horizon_key == rev.horizon_key,
+                PlanRevision.status == "applied",
+                PlanRevision.id != rev.id,
+            )
+            .all()
+        )
+        for other in others:
+            other.status = "superseded"
+
+        _apply_changes(db, rev, revert=False)
+        result = planning.apply_plan_snapshot(
+            db,
+            req,
+            plan_lines,
+            username,
+            revision_id=rev.id,
+            replace_manual=bool(rev.replace_manual),
+            keep_line_mode=bool(apply_payload.get("keep_line_mode")),
+            message_tag="revizyon onay snapshot",
+        )
+        now = datetime.now()
+        rev.status = "applied"
+        rev.approved_by = username
+        rev.approved_at = now
+        rev.applied_at = now
+        _add_event(db, rev, "approve", username, "onayla ve devreye al")
+        _add_event(db, rev, "apply", username, result.get("message") or "")
         db.commit()
-        raise ValueError("Rotasi olmayan stok var; uygulanamaz")
-
-    others = (
-        db.query(PlanRevision)
-        .filter(
-            PlanRevision.horizon_key == rev.horizon_key,
-            PlanRevision.status == "applied",
-            PlanRevision.id != rev.id,
-        )
-        .all()
-    )
-    for other in others:
-        other.status = "superseded"
-
-    moves = job_moves_svc.job_moves_from_revision(rev)
-    if moves:
-        sim = job_moves_svc.simulate_priority_insert(db, req, moves, replace_manual=bool(rev.replace_manual))
-        if not rev.replace_manual:
-            sim.lines = [l for l in sim.lines if l.mode != "manual"]
-        result = planning.write_simulation(
-            db,
-            req,
-            sim,
-            username,
-            revision_id=rev.id,
-            commit=False,
-            replace_manual=bool(rev.replace_manual),
-            message_tag="revizyon, is tasima",
-            keep_line_mode=True,
-        )
-        bumped = getattr(sim, "bumped_orders", None) or []
-        if bumped:
-            result["message"] = f"{result.get('message') or ''} Kaydirilan: {', '.join(bumped)}.".strip()
-    else:
-        result = planning.auto_plan(
-            db,
-            req,
-            username,
-            revision_id=rev.id,
-            commit=False,
-            replace_manual=bool(rev.replace_manual),
-        )
-    now = datetime.now()
-    rev.status = "applied"
-    rev.approved_by = username
-    rev.approved_at = now
-    rev.applied_at = now
-    _add_event(db, rev, "approve", username, "onayla ve devreye al")
-    _add_event(db, rev, "apply", username, result.get("message") or "")
-    db.commit()
+    db.expire_all()
     return to_out(_get(db, rev.id), apply_message=result.get("message") or "")
 
 

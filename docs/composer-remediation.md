@@ -302,4 +302,54 @@ setup_required        = completed_good_qty <= 0
 | 7 | Backend suite | **99 passed**, 1 flaky (`test_wip_multi_route`) (~28s) |
 | 8 | Frontend build | Basarili (Vite 5.4.21) |
 
-**Sonraki:** FAZ 06 — revizyon onay = hesaplanan plan (T1).
+## FAZ 06 — revizyon onay = hesaplanan plan + veri surumu (T1)
+
+| Dosya | Degisiklik |
+|---|---|
+| `backend/app/services/plan_input_fingerprint.py` | **yeni** — plan girdisi SHA-256 (`orders`, ufuk icindeki `plan_lines`, `routing`, `wc_weeks`, `production`, `reservations`, `op_rules`; `created_at` haric) |
+| `backend/app/services/plan_input_lock.py` | **yeni** — `pg_advisory_xact_lock` (ufuk anahtari); SQLite test tek thread |
+| `backend/app/services/plan_revisions.py` | savepoint onizleme; `apply` snapshot; onayda fingerprint + `apply_plan_snapshot` (simulate yok); 409 cakismalar |
+| `backend/app/services/planning.py` | `draft_line_to_dict`, `apply_plan_snapshot`; `write_simulation` kilidi |
+| `backend/app/models/planning.py` | `PlanRevision.input_fingerprint`; snapshot `kind=apply` |
+| `backend/app/api/planning.py` | `RevisionConflictError` → HTTP 409 |
+| `frontend/src/pages/planning/RevisionsPanel.tsx` | 409 uyari + yeniden hesapla; fingerprint ozeti |
+| `frontend/src/api.ts` | `input_fingerprint` |
+| `backend/tests/test_revision_snapshot.py` | T1 kabul (409, snapshot eslesmesi, basarisiz hesap) |
+| `backend/tests/test_revision_pg_race.py` | `TEST_PG_URL` ile PG yarisi (varsayilan skip) |
+| `backend/tests/conftest.py` | PID bazli test DB; revizyon/plan izolasyonu |
+
+### Fingerprint kapsami
+
+Siralı JSON (`sort_keys`, `,` ayirici) uzerinden SHA-256: acik `orders` (miktar, termin, revize termin, durum); secili ufuk/WC icindeki mevcut `plan_lines`; ilgili `routing_operations`; ufuk `work_center_weeks`; WC+stok `production_actuals`; tum `reservations`; tum `op_transition_rules`. Revizyon taslagi fingerprinte dahil degildir — onay aninda canli veri ile karsilastirilir.
+
+### `apply` snapshot JSON
+
+```json
+{
+  "plan_lines": [{ "order_id", "production_batch_id", "operation_id", "work_center_id", "week_start", "planned_hours", "planned_qty", "mode", "semi_finished_code" }],
+  "apply_path": "auto|job_moves",
+  "keep_line_mode": true|false,
+  "replace_manual", "mode", "start_week", "weeks", "work_center_ids", "input_fingerprint"
+}
+```
+
+### Transaction kilidi (`plan_input_write_lock`)
+
+- **PostgreSQL:** `pg_advisory_xact_lock(751903, crc32(horizon_key))` — islem bitince otomatik birakilir.
+- **Kullanim:** `approve_and_apply` (fingerprint + yazma ayni transaction); `planning.write_simulation` (otomatik plan yazimi).
+- **Onay akisi:** kilidi al → fingerprint kontrol → taslak alanlari uygula → `apply_plan_snapshot` → commit.
+
+### FAZ 06 kabul olcutleri
+
+| # | Olcut | Sonuc |
+|---|---|---|
+| 1 | Onizleme sonrasi kapasite degisir → 409, plan ayni | ✓ `test_wc_week_change_after_calculate_409` |
+| 2 | Siparis miktari / girdi degisir → 409 | ✓ `test_stale_fingerprint_409` |
+| 3 | Veri degismez → uygulanan satirlar = snapshot | ✓ `test_approve_uses_snapshot_not_resimulate` |
+| 4 | Cift onay mukerrer satir yok | ✓ `test_double_approve_409` |
+| 5 | Basarisiz hesap / reddedilen onay ana veriyi degistirmez | ✓ `test_calculate_failure_does_not_mutate_live` |
+| 6 | Iki oturum PG yarisi | ⏭ `test_revision_pg_race` (`TEST_PG_URL` yoksa skip) |
+| 7 | Backend suite | **104 passed**, 1 skipped (`TEST_PG_URL`), 1 flaky (`test_wip_multi_route::test_production_import_excel_serial_date`, FAZ 06 oncesi de goruldu) (~35s) |
+| 8 | Frontend build | Basarili (Vite 5.4.21) |
+
+**Sonraki:** FAZ 07 — (prompt sirasi; bu commit FAZ 06 ile sinirlidir).

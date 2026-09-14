@@ -2,7 +2,8 @@ import os
 import sys
 from pathlib import Path
 
-os.environ["DATABASE_URL"] = "sqlite:///./test_kapasite.db"
+_test_db = Path(__file__).resolve().parent / f"test_kapasite_{os.getpid()}.db"
+os.environ["DATABASE_URL"] = f"sqlite:///{_test_db.as_posix()}"
 os.environ["SECRET_KEY"] = "test-secret"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -15,12 +16,17 @@ from app.main import app  # noqa: E402
 
 @pytest.fixture(scope="session", autouse=True)
 def _db():
-    Base.metadata.drop_all(bind=engine)
+    engine.dispose()
+    if _test_db.exists():
+        try:
+            _test_db.unlink()
+        except OSError:
+            pass
     Base.metadata.create_all(bind=engine)
     yield
     engine.dispose()
     try:
-        os.remove("test_kapasite.db")
+        _test_db.unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -38,8 +44,19 @@ def db():
 def _isolate_planning_artifacts(db):
     """Testler arasi uretim/plan kalintisi otomatik planlamayi etkilemesin."""
     from app.models import PlanLine, ProductionActual
-    from app.models.planning import ProductionBatch, ProductionBatchOrder
+    from app.models.planning import (
+        PlanRevision,
+        PlanRevisionChange,
+        PlanRevisionEvent,
+        PlanRevisionSnapshot,
+        ProductionBatch,
+        ProductionBatchOrder,
+    )
 
+    db.query(PlanRevisionEvent).delete()
+    db.query(PlanRevisionSnapshot).delete()
+    db.query(PlanRevisionChange).delete()
+    db.query(PlanRevision).delete()
     db.query(PlanLine).delete()
     db.query(ProductionActual).delete()
     db.query(ProductionBatchOrder).delete()

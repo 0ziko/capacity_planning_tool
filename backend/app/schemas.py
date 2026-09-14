@@ -1205,6 +1205,7 @@ class PlanRevisionOut(BaseModel):
     applied_at: datetime | None = None
     rejected_by: str = ""
     reject_note: str = ""
+    input_fingerprint: str = ""
     changes: list[PlanRevisionChangeOut] = []
     events: list[PlanRevisionEventOut] = []
     compare: PlanRevisionCompareOut | None = None

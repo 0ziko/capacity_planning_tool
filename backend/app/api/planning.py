@@ -110,7 +110,11 @@ def run_auto_plan(req: AutoPlanRequest, db: Session = Depends(get_db), user: Use
     return planning.auto_plan(db, req, user.username)
 
 
-def _revision_error(exc: ValueError):
+def _revision_error(exc: Exception):
+    from app.services.plan_revisions import RevisionConflictError
+
+    if isinstance(exc, RevisionConflictError):
+        raise HTTPException(409, str(exc))
     msg = str(exc)
     if "acik taslak" in msg:
         raise HTTPException(409, msg)
@@ -198,7 +202,7 @@ def delete_plan_revision_change(
 def calculate_plan_revision(revision_id: int, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
     try:
         return revisions_svc.calculate(db, revision_id, user.username)
-    except ValueError as e:
+    except (ValueError, revisions_svc.RevisionConflictError) as e:
         _revision_error(e)
 
 
@@ -206,7 +210,7 @@ def calculate_plan_revision(revision_id: int, db: Session = Depends(get_db), use
 def approve_plan_revision(revision_id: int, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
     try:
         return revisions_svc.approve_and_apply(db, revision_id, user.username)
-    except ValueError as e:
+    except (ValueError, revisions_svc.RevisionConflictError) as e:
         _revision_error(e)
 
 

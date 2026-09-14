@@ -37,6 +37,17 @@ def test_preflight_blocks_no_routing(client, auth):
     assert pf["can_plan"] is False
     assert any(r["item_code"] == "PF-NOROTA" for r in pf["no_routing"])
 
+    from io import BytesIO
+    from openpyxl import load_workbook
+    exported = client.post("/api/plan/auto/preflight/no-routing.xlsx", headers=auth, json=body)
+    assert exported.status_code == 200, exported.text
+    assert "attachment" in exported.headers["content-disposition"]
+    wb = load_workbook(BytesIO(exported.content))
+    ws = wb["Eksik Rotalar"]
+    assert list(ws.values)[1:] == [(r["item_code"], r["item_name"], r["order_count"], ", ".join(r["order_nos"])) for r in pf["no_routing"]]
+    assert ws.freeze_panes == "A2" and ws.auto_filter.ref == ws.dimensions
+    assert "Kontrol Kapsamı" in wb.sheetnames
+
     r = client.post("/api/plan/auto", headers=auth, json=body)
     assert r.status_code == 400
 

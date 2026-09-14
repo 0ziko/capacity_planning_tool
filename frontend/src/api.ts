@@ -110,8 +110,10 @@ export const api = {
     const data = await handle<{ access_token: string }>(res);
     return data.access_token;
   },
-  async download(url: string, fallbackName = "rapor.xlsx") {
-    const res = await fetch(url, { headers: headers() });
+  async download(url: string, fallbackName = "rapor.xlsx", body?: unknown) {
+    const res = await fetch(url, body === undefined ? { headers: headers() } : {
+      method: "POST", headers: headers({ "Content-Type": "application/json" }), body: JSON.stringify(body),
+    });
     if (!res.ok) throw new ApiError(res.status, await res.text());
     const cd = res.headers.get("Content-Disposition") || "";
     const m = /filename="?([^";]+)"?/.exec(cd);

@@ -24,6 +24,13 @@ export default function PlanPreflightModal({
   const [busy, setBusy] = useState(true);
   const [capAck, setCapAck] = useState(false);
   const [dailyAck, setDailyAck] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const exportRoutes = async () => {
+    setExporting(true); setErr("");
+    try { await api.download("/api/plan/auto/preflight/no-routing.xlsx", "eksik_rotalar.xlsx", req); }
+    catch (e) { setErr((e as Error).message); }
+    finally { setExporting(false); }
+  };
 
   useEffect(() => {
     setBusy(true);
@@ -92,6 +99,7 @@ export default function PlanPreflightModal({
                     Yalnızca açık sipariş / parti havuzu kontrol edilir; sistemde rotası olmayan ama talebi bulunmayan stok kodları bu listeye girmez.
                   </p>
                   <div className="table-wrap" style={{ maxHeight: 160 }}>
+                    <button className="secondary small" onClick={exportRoutes} disabled={exporting}>{exporting ? "Excel hazırlanıyor…" : "Eksik rotaları Excel’e aktar"}</button>
                     <table>
                       <thead><tr><th>Stok kodu</th><th>Ad</th><th className="num">Sipariş / parti</th><th>Örnek</th></tr></thead>
                       <tbody>

@@ -1434,6 +1434,32 @@ def run_import(db: Session, kind: str, content: bytes, filename: str, username: 
 
 # ---- Export ----
 
+def build_missing_routing_xlsx(check) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Eksik Rotalar"
+    ws.append(["Stok kodu", "Stok adı", "Sipariş / parti sayısı", "Sipariş / parti numaraları"])
+    for r in check.no_routing:
+        ws.append([r.item_code, r.item_name, r.order_count, ", ".join(r.order_nos)])
+        for cell in ws[ws.max_row]:
+            if isinstance(cell.value, str):
+                cell.data_type = "s"
+    _style_header(ws)
+    for col, width in zip("ABCD", [22, 65, 24, 80]):
+        ws.column_dimensions[col].width = width
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    info = wb.create_sheet("Kontrol Kapsamı")
+    for row in [["Kontrol günü", check.today], ["Başlangıç", check.replace_scope.horizon_start],
+                ["Bitiş", check.replace_scope.horizon_end_inclusive],
+                ["İş merkezleri", ", ".join(check.replace_scope.work_center_codes)],
+                ["Açık sipariş / parti", check.order_count],
+                ["Açıklama", "Açık sipariş / parti havuzundaki eksik rotalar. Talebi olmayan stoklar dahil değildir."]]:
+        info.append(row)
+    info.column_dimensions["A"].width = 25
+    info.column_dimensions["B"].width = 100
+    return workbook_bytes(wb)
+
 def build_wc_weeks_xlsx(db: Session, start: date, weeks: int, work_center_ids: list[int] | None = None) -> bytes:
     from openpyxl.comments import Comment
     from openpyxl.styles import Protection

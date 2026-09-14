@@ -103,6 +103,12 @@ def auto_plan_preflight(req: AutoPlanRequest, db: Session = Depends(get_db), _=D
     return preflight_svc.plan_preflight(db, req)
 
 
+@router.post("/plan/auto/preflight/no-routing.xlsx")
+def missing_routing_xlsx(req: AutoPlanRequest, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    check = preflight_svc.plan_preflight(db, req)
+    return _xlsx(excel.build_missing_routing_xlsx(check), "eksik_rotalar.xlsx")
+
+
 @router.post("/plan/auto", response_model=dict)
 def run_auto_plan(req: AutoPlanRequest, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
     check = preflight_svc.plan_preflight(db, req)

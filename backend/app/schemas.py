@@ -1175,6 +1175,24 @@ class AutoReserveRequest(BaseModel):
     item_ids: list[int] | None = None  # bos = tum urunler
 
 
+class AutoReserveConfirm(BaseModel):
+    preview_token: str = Field(min_length=1)
+
+
+class AutoReserveLine(OrderStockRow):
+    allocate: float
+    remaining_after: float
+    free_before: float
+    free_after: float
+
+
+class AutoReservePreview(BaseModel):
+    preview_token: str
+    rows: list[AutoReserveLine]
+    reserved_qty: float
+    items: int
+
+
 class AutoReserveResult(BaseModel):
     created: int
     reserved_qty: float

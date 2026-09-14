@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api, fmt, qs, type AutoReserveResult, type Item, type OrderStockRow, type Receipt, type Reservation, type Shipment, type StockRow } from "../api";
 import { useAuth } from "../auth";
 import { ErrorText, useAsync } from "../components";
+import AutoReserveDialog from "./stock/AutoReserveDialog";
 
 type Tab = "free" | "reservations" | "orders" | "receipts" | "shipments";
 const TABS: { id: Tab; label: string; hint: string }[] = [
@@ -23,6 +24,7 @@ export default function Stock() {
   const [position, setPosition] = useState("");
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
+  const [autoScope, setAutoScope] = useState<number[] | null | undefined>(undefined);
   const summary = useAsync(() => api.get<StockRow[]>("/api/stock/summary"), []);
   const posQ = position.trim() || undefined;
   const reservations = useAsync(() => api.get<Reservation[]>(`/api/stock/reservations${qs({ position: posQ })}`), [position]);
@@ -39,8 +41,8 @@ export default function Stock() {
       return true;
     } catch (e) { setErr((e as Error).message); return false; }
   };
-  const autoAll = () => run(() => api.post<AutoReserveResult>("/api/stock/reservations/auto", {}));
-  const autoItem = (id: number) => run(() => api.post<AutoReserveResult>("/api/stock/reservations/auto", { item_ids: [id] }));
+  const autoAll = () => setAutoScope(null);
+  const autoItem = (id: number) => setAutoScope([id]);
 
   const rows = summary.data ?? [];
   const totFree = rows.reduce((s, r) => s + r.free, 0);
@@ -61,7 +63,7 @@ export default function Stock() {
       <div className="panel row" style={{ alignItems: "center" }}>
         <label>Poz no<input value={position} onChange={(e) => setPosition(e.target.value)} placeholder="filtre" style={{ width: 100 }} /></label>
         <span><b>{fmt(totFree, 0)}</b> serbest · <b>{fmt(totRes, 0)}</b> rezerve ({manualCount} manuel) · <b>{fmt(totDemand, 0)}</b> açık talep · {rows.filter((r) => r.free > 0).length} üründe serbest stok var</span>
-        {canEdit && <button onClick={autoAll} disabled={totFree <= 0} title="Tüm ürünlerde serbest stoğu açık siparişlere termin sırasıyla rezerve et">⚡ Tümünü otomatik rezerve et</button>}
+        {canEdit && <button onClick={autoAll} disabled={!summary.data} title="Tüm ürünlerde termin sırasına göre stok dağıtımını önizle; onayından sonra rezerve et">⚡ Tümünü otomatik rezerve et</button>}
         {canEdit && <ReceiptForm onAdded={() => run(async () => null, "Depo girişi kaydedildi.")} onError={setErr} />}
       </div>
       <ErrorText err={err || summary.err || reservations.err || orders.err} />
@@ -82,9 +84,12 @@ export default function Stock() {
         onShip={(id, qty, date, note) => run(() => api.post(`/api/stock/reservations/${id}/ship`, { quantity: qty, ship_date: date, note }), "Sevk kaydedildi; stoktan düşüldü.")}
         onRelease={(id) => run(() => api.del(`/api/stock/reservations/${id}`), "Rezervasyon kaldırıldı (serbest stoğa döndü).")}
         onMove={(id, orderId) => run(() => api.patch(`/api/stock/reservations/${id}/move${qs({ order_id: orderId })}`), "Rezervasyon taşındı.")} />}
-      {tab === "orders" && <OrdersTab rows={orders.data ?? []} summary={rows} canEdit={canEdit} onReserve={(orderId, itemId, qty) => run(() => api.post("/api/stock/reservations", { item_id: itemId, order_id: orderId, quantity: qty }), "Rezervasyon yapıldı.")} />}
+      {tab === "orders" && <OrdersTab rows={orders.data ?? []} summary={rows} position={posQ} canEdit={canEdit} onReserve={(orderId, itemId, qty) => run(() => api.post("/api/stock/reservations", { item_id: itemId, order_id: orderId, quantity: qty }), "Rezervasyon yapıldı.")} />}
       {tab === "receipts" && <Receipts canEdit={canEdit} onChanged={refresh} />}
       {tab === "shipments" && <Shipments canEdit={canEdit} onChanged={refresh} position={posQ} />}
+      {autoScope !== undefined && <AutoReserveDialog itemIds={autoScope} onClose={() => setAutoScope(undefined)} onDone={(result) => {
+        setAutoScope(undefined); setErr(""); setMsg(result.message); refresh();
+      }} />}
     </>
   );
 }
@@ -241,19 +246,30 @@ function Reservations({ rows, orders, canEdit, onShip, onRelease, onMove }: {
 }
 
 // ---------------- Sipariş karşılama ----------------
-function OrdersTab({ rows, summary, canEdit, onReserve }: { rows: OrderStockRow[]; summary: StockRow[]; canEdit: boolean; onReserve: (orderId: number, itemId: number, qty: number) => void }) {
+function OrdersTab({ rows, summary, position, canEdit, onReserve }: { rows: OrderStockRow[]; summary: StockRow[]; position?: string; canEdit: boolean; onReserve: (orderId: number, itemId: number, qty: number) => void }) {
   const freeBy = new Map(summary.map((s) => [s.item_id, s.free]));
-  const [onlyOpen, setOnlyOpen] = useState(true);
+  const [onlyOpen, setOnlyOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
+  const exportExcel = async () => {
+    setExporting(true); setExportError("");
+    try { await api.download(`/api/stock/orders/export.xlsx${qs({ position, only_remaining: onlyOpen })}`, "siparis_karsilama.xlsx"); }
+    catch (e) { setExportError((e as Error).message); }
+    finally { setExporting(false); }
+  };
   const shown = rows.filter((r) => !onlyOpen || r.remaining > 0);
   return (
     <>
       <div className="row" style={{ margin: "8px 0" }}>
         <label style={{ flexDirection: "row", alignItems: "center", gap: 6 }}><input type="checkbox" checked={onlyOpen} onChange={(e) => setOnlyOpen(e.target.checked)} /> Yalnızca kalanı olan siparişler</label>
-        <span className="muted">Kalan = sipariş − rezerve − sevk. “Serbest” sütunu o ürünün depodaki serbest stoğudur.</span>
+        <button className="secondary" onClick={exportExcel} disabled={exporting}>{exporting ? "Excel hazırlanıyor…" : "Excel’e aktar"}</button>
+        <span className="muted">{shown.length} sipariş · Excel, seçili poz ve kalan filtresini uygular.</span>
       </div>
+      <p className="muted">Açık miktar = sipariş − sevk. Karşılanmamış kalan = açık miktar − rezerve. “Karşılandı”, tamamı rezerve veya sevk edilmiş demektir. Serbest stok ürün toplamıdır.</p>
+      <ErrorText err={exportError} />
       <div className="table-wrap">
         <table>
-          <thead><tr><th>Sipariş</th><th>Poz</th><th>Müşteri</th><th>Termin</th><th>Stok</th><th className="num">Miktar</th><th className="num">Rezerve</th><th className="num">Sevk</th><th className="num">Kalan</th><th className="num">Serbest stok</th><th>Plan bitişi</th><th>Durum</th><th></th></tr></thead>
+          <thead><tr><th>Sipariş</th><th>Poz</th><th>Müşteri</th><th>Termin</th><th>Stok</th><th className="num">Miktar</th><th className="num">Rezerve</th><th className="num">Sevk</th><th className="num">Açık miktar</th><th className="num">Karşılanmamış kalan</th><th className="num">Serbest stok</th><th>Plan bitişi</th><th>Durum</th><th></th></tr></thead>
           <tbody>
             {shown.map((r) => {
               const free = freeBy.get(r.item_id) ?? 0;
@@ -262,9 +278,10 @@ function OrdersTab({ rows, summary, canEdit, onReserve }: { rows: OrderStockRow[
                 <tr key={r.order_id}>
                   <td><b>{r.order_no}</b></td><td>{r.position_no || <span className="muted">—</span>}</td><td>{r.customer}</td><td>{r.due_date}</td>
                   <td>{r.item_code} <span className="muted">{r.item_name}</span></td>
-                  <td className="num">{fmt(r.quantity, 0)}</td><td className="num">{fmt(r.reserved, 0)}</td><td className="num">{fmt(r.shipped, 0)}</td>
-                  <td className="num" style={{ fontWeight: 600 }}>{fmt(r.remaining, 0)}</td>
-                  <td className="num" style={{ color: free > 0 ? "var(--ok)" : undefined }}>{fmt(free, 0)}</td>
+                  <td className="num">{fmt(r.quantity, 3)}</td><td className="num">{fmt(r.reserved, 3)}</td><td className="num">{fmt(r.shipped, 3)}</td>
+                  <td className="num">{fmt(r.quantity - r.shipped, 3)}</td>
+                  <td className="num" style={{ fontWeight: 600 }}>{fmt(r.remaining, 3)}</td>
+                  <td className="num" style={{ color: free > 0 ? "var(--ok)" : undefined }}>{fmt(free, 3)}</td>
                   <td style={{ color: late ? "var(--bad)" : undefined }}>{r.planned_end ?? "-"}</td>
                   <td>
                     {r.remaining <= 0 ? <span className="badge ok">karşılandı</span>
@@ -276,7 +293,7 @@ function OrdersTab({ rows, summary, canEdit, onReserve }: { rows: OrderStockRow[
                 </tr>
               );
             })}
-            {shown.length === 0 && <tr><td colSpan={13} className="muted">Açık sipariş yok.</td></tr>}
+            {shown.length === 0 && <tr><td colSpan={14} className="muted">Bu filtrelere uyan açık sipariş yok.</td></tr>}
           </tbody>
         </table>
       </div>

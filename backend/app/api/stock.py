@@ -3,6 +3,8 @@
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.core.deps import require_poweruser, require_user
@@ -10,6 +12,8 @@ from app.db.session import get_db
 from app.models import User
 from app.schemas import (
     AutoReserveRequest,
+    AutoReserveConfirm,
+    AutoReservePreview,
     AutoReserveResult,
     OrderStockRow,
     ReceiptIn,
@@ -20,7 +24,7 @@ from app.schemas import (
     ShipmentOut,
     StockRow,
 )
-from app.services import stock
+from app.services import stock, stock_preview, stock_export
 from app.services import orders as orders_svc
 
 router = APIRouter(prefix="/api/stock", tags=["stock"])
@@ -28,9 +32,18 @@ router = APIRouter(prefix="/api/stock", tags=["stock"])
 
 def _run(db: Session, fn, *args):
     try:
+        stock_preview.lock_stock(db)
         out = fn(db, *args)
         db.commit()
         return out
+    except stock_preview.StalePreview as e:
+        db.rollback()
+        raise HTTPException(409, str(e))
+    except OperationalError as e:
+        db.rollback()
+        if getattr(e.orig, "sqlstate", None) == "55P03" or "database is locked" in str(e.orig):
+            raise HTTPException(409, "Stok bilgileri başka bir işlemde güncelleniyor. Lütfen tekrar deneyin.") from e
+        raise
     except ValueError as e:
         db.rollback()
         raise HTTPException(400, str(e))
@@ -52,6 +65,18 @@ def orders(item_id: int | None = None, include_closed: bool = False, position: s
     for r in rows:
         r.planned_end = sched.get(r.order_id)
     return rows
+
+
+@router.get("/orders/export.xlsx")
+def export_orders(position: str | None = None, only_remaining: bool = False,
+                  db: Session = Depends(get_db), _=Depends(require_user)):
+    rows = orders(position=position, db=db)
+    if only_remaining:
+        rows = [r for r in rows if r.remaining > 0]
+    summary = stock.stock_summary(db)
+    return Response(stock_export.build(rows, summary),
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": 'attachment; filename="siparis_karsilama.xlsx"'})
 
 
 # ---- depo girisi ----
@@ -86,8 +111,13 @@ def reserve(data: ReservationIn, db: Session = Depends(get_db), user: User = Dep
 
 
 @router.post("/reservations/auto", response_model=AutoReserveResult)
-def auto(req: AutoReserveRequest, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
-    return _run(db, stock.auto_reserve, req.item_ids, user.username)
+def auto(req: AutoReserveConfirm, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
+    return _run(db, stock_preview.confirm, req.preview_token, user.username)
+
+
+@router.post("/reservations/auto/preview", response_model=AutoReservePreview)
+def auto_preview(req: AutoReserveRequest, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
+    return stock_preview.preview(db, req.item_ids, user.username)
 
 
 @router.delete("/reservations/{res_id}", status_code=204)

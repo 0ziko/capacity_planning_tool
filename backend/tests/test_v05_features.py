@@ -157,7 +157,9 @@ def test_stock_reservations_and_shipping(client, auth):
     assert client.post("/api/stock/reservations", headers=auth, json={"order_id": orders["RZ-C"]["order_id"], "quantity": 20}).status_code == 400
 
     # Otomatik: kalan 50 serbest -> termin sirasiyla RZ-A 50 (RZ-B'ye kalmaz)
-    r = client.post("/api/stock/reservations/auto", headers=auth, json={})
+    preview = client.post("/api/stock/reservations/auto/preview", headers=auth, json={})
+    assert preview.status_code == 200, preview.text
+    r = client.post("/api/stock/reservations/auto", headers=auth, json={"preview_token": preview.json()["preview_token"]})
     assert r.status_code == 200 and r.json()["created"] == 1 and r.json()["reserved_qty"] == 50
     by_order = _res_by_order(client, auth, row["item_id"])
     assert by_order["RZ-A"]["quantity"] == 50 and by_order["RZ-A"]["sources"] == {"auto"}
@@ -184,7 +186,9 @@ def test_stock_reservations_and_shipping(client, auth):
     assert client.patch(f"/api/stock/reservations/{a_id}/move", headers=auth, params={"order_id": orders["RZ-B"]["order_id"]}).status_code == 400
     # Kaldir ve yeniden otomatik dagit => RZ-A 20 (serbest 20, en erken termin)
     assert client.delete(f"/api/stock/reservations/{a_id}", headers=auth).status_code == 204
-    r = client.post("/api/stock/reservations/auto", headers=auth, json={"item_ids": [row["item_id"]]})
+    preview = client.post("/api/stock/reservations/auto/preview", headers=auth, json={"item_ids": [row["item_id"]]})
+    assert preview.status_code == 200, preview.text
+    r = client.post("/api/stock/reservations/auto", headers=auth, json={"preview_token": preview.json()["preview_token"]})
     assert r.json()["reserved_qty"] == 20
 
     # Sevk: RZ-C'nin 30'unu sevk et (kismi: 10 + kalan)

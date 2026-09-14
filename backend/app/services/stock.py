@@ -20,7 +20,6 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.models import Item, Order, ProductionActual, Reservation, RoutingOperation, Shipment, StockReceipt
 from app.schemas import (
-    AutoReserveResult,
     OrderStockRow,
     ReceiptOut,
     ReservationOut,
@@ -416,39 +415,6 @@ def move(db: Session, reservation_id: int, new_order_id: int, username: str) -> 
     r.created_by = username
     db.flush()
     return r
-
-
-def auto_reserve(db: Session, item_ids: list[int] | None, username: str) -> AutoReserveResult:
-    rows = stock_summary(db)
-    if item_ids:
-        rows = [r for r in rows if r.item_id in item_ids]
-    created = 0
-    total = 0.0
-    touched = 0
-    for row in rows:
-        free = row.free
-        if free <= 1e-9:
-            continue
-        orders = (
-            db.query(Order).filter(Order.item_id == row.item_id, Order.status == "open").order_by(Order.due_date, Order.order_no, Order.id).all()
-        )
-        used_any = False
-        for o in orders:
-            if free <= 1e-9:
-                break
-            rem = order_remaining(db, o)
-            if rem <= 1e-9:
-                continue
-            take = min(rem, free)
-            db.add(Reservation(item_id=row.item_id, order_id=o.id, quantity=round(take, 3), source="auto", note="otomatik (termin sirasi)", created_by=username))
-            db.flush()
-            free -= take
-            total += take
-            created += 1
-            used_any = True
-        if used_any:
-            touched += 1
-    return AutoReserveResult(created=created, reserved_qty=round(total, 3), items=touched, message=f"{created} rezervasyon olusturuldu ({total:g} adet, {touched} urun).")
 
 
 # ---------------- sevk ----------------

@@ -704,6 +704,7 @@ class GanttOut(BaseModel):
     as_of: date
     timeline_days: list[date]
     bars: list[GanttBar]
+    distribution_note: str = "Haftalik plandan yaklasik gun dagilimi; kesin gunluk cizelge degildir."
 
 
 class LeadTimeRequest(BaseModel):
@@ -712,6 +713,7 @@ class LeadTimeRequest(BaseModel):
     start: date
     work_center_ids: list[int] | None = None
     operation_seqs: list[int] | None = None
+    horizon_days: int = 730
 
 
 class LeadTimeStep(BaseModel):
@@ -719,18 +721,28 @@ class LeadTimeStep(BaseModel):
     operation_name: str
     work_center_code: str
     hours: float
-    start: str
-    end: str
-    start_rule: str = ""  # senaryo matrisi: baslangic kurali aciklamasi (bos = ilk operasyon)
+    start: str | None = None
+    end: str | None = None
+    start_rule: str = ""
+    scheduled_hours: float = 0.0
+    remaining_hours: float = 0.0
+    status: str = "scheduled"  # scheduled | insufficient_capacity | horizon_exceeded
+    reason: str = ""
 
 
 class LeadTimeOut(BaseModel):
     item_code: str
     quantity: float
     total_hours: float
-    start: str
-    end: str
+    start: str | None = None
+    end: str | None = None
     steps: list[LeadTimeStep]
+    status: str = "complete"  # complete | partial | infeasible
+    remaining_hours: float = 0.0
+    failure_reason: str = ""
+    planning_note: str = (
+        "Kapasiteye gore yaklasik termin; kaynak araligi rezervasyonu kurulana kadar kesin teslim tarihi degildir."
+    )
 
 
 class ForecastFromLeadTimeIn(BaseModel):
@@ -738,6 +750,7 @@ class ForecastFromLeadTimeIn(BaseModel):
     quantity: float
     label: str = ""
     steps: list[LeadTimeStep]
+    status: str = "complete"
 
 
 class ForecastSummaryOut(BaseModel):

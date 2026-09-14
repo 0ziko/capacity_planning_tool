@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.models import Item, Order, PlanLine, ProductionBatch, ProductionBatchOrder, RoutingOperation, WorkCenter
 from app.services import production_batches as pbatches
-from app.services.orders import effective_due
+from app.services.orders import effective_due, plan_line_priority_key
 from app.schemas import (
     AutoPlanRequest,
     ForecastFromLeadTimeIn,
@@ -1029,6 +1029,19 @@ def load(db: Session, wc_ids: list[int] | None, start: date, weeks: int) -> list
 # ---------------- Terminleme (lead time) ----------------
 
 _WEEK_FULL_EPS = 0.5  # haftalik plan ~%100 ise kalan saatle baslama (249.9/250 bug)
+_HOURS_LEFT_EPS = 1e-6  # isin kalan suresi — kucuk isler (15 dk) tam yerlesmeli
+LEADTIME_DEFAULT_HORIZON_DAYS = 730
+
+
+@dataclass
+class ScheduleOpResult:
+    status: str  # scheduled | insufficient_capacity | horizon_exceeded
+    scheduled_hours: float
+    remaining_hours: float
+    start: datetime | None
+    end: datetime | None
+    reason: str
+    horizon_end: date
 
 
 def _week_room_hours(db: Session, wc: WorkCenter, wk: date, planned_week: dict[date, float]) -> float:
@@ -1054,8 +1067,15 @@ def _daily_free_hours(db: Session, wc: WorkCenter, day: date, emp: int, planned_
     return max(min(total - used, week_room), 0.0)
 
 
-def _schedule_op(db: Session, wc: WorkCenter, hours: float, earliest: datetime, planned_week: dict[date, float]) -> tuple[datetime, datetime]:
-    """Bir operasyonu 'earliest' anindan itibaren ilk gercek bos kapasiteye yerlestirir."""
+def _schedule_op(
+    db: Session,
+    wc: WorkCenter,
+    hours: float,
+    earliest: datetime,
+    planned_week: dict[date, float],
+    horizon_end: date,
+) -> ScheduleOpResult:
+    """Bir operasyonu 'earliest' anindan itibaren ilk gercek bos kapasiteye yerlestirir (ufuk dahil)."""
     emp = cap.employee_count(db, wc)
     ovl = cap.Overrides(db, wc.id)
     wdays_cache: dict[date, int] = {}
@@ -1063,18 +1083,47 @@ def _schedule_op(db: Session, wc: WorkCenter, hours: float, earliest: datetime, 
     cursor = earliest
     day = cursor.date()
     step_start: datetime | None = None
-    step_end = cursor
-    guard = 0
-    while hours_left > _WEEK_FULL_EPS and guard < 730:
-        guard += 1
+    step_end: datetime | None = None
+    scheduled = 0.0
+
+    def _fail(status: str, reason: str) -> ScheduleOpResult:
+        return ScheduleOpResult(
+            status=status,
+            scheduled_hours=round(scheduled, 6),
+            remaining_hours=round(max(hours_left, 0.0), 6),
+            start=step_start,
+            end=step_end if step_end and step_start else step_start,
+            reason=reason,
+            horizon_end=horizon_end,
+        )
+
+    while hours_left > _HOURS_LEFT_EPS:
+        if day > horizon_end:
+            return _fail(
+                "horizon_exceeded",
+                f"Is merkezi '{wc.code}': {round(hours_left, 2)} saat icin plan ufku ({horizon_end.isoformat()}) yetersiz.",
+            )
         wk = cap.week_start(day)
+        cap_h = cap.planning_capacity_hours(db, wc, wk)
+        if cap_h <= _WEEK_FULL_EPS:
+            return _fail(
+                "insufficient_capacity",
+                f"Is merkezi '{wc.code}' icin planlanabilir kapasite tanimli degil (0 saat/hafta). "
+                "Personel ve calisma takvimini kontrol edin.",
+            )
         if _week_room_hours(db, wc, wk, planned_week) <= _WEEK_FULL_EPS:
-            day = wk + timedelta(days=7)
+            next_day = wk + timedelta(days=7)
+            if next_day > horizon_end:
+                return _fail(
+                    "horizon_exceeded",
+                    f"Is merkezi '{wc.code}': dolu haftalar nedeniyle ufuk ({horizon_end.isoformat()}) icinde bos kapasite yok.",
+                )
+            day = next_day
             cursor = datetime.combine(day, cap.first_shift_start(wc, day, ovl.get(day)))
             continue
         ov = ovl.get(day)
         free = _daily_free_hours(db, wc, day, emp, planned_week, wdays_cache, ovl)
-        if free > _WEEK_FULL_EPS:
+        if free > _HOURS_LEFT_EPS:
             day_start = datetime.combine(day, cap.first_shift_start(wc, day, ov))
             hc = max(cap.daily_headcount(wc, day, emp, ov), 1)
             nominal_per_day = cap.daily_nominal_hours(wc, day, emp, ov) / hc
@@ -1084,20 +1133,40 @@ def _schedule_op(db: Session, wc: WorkCenter, hours: float, earliest: datetime, 
                 day_start = cursor
             week_room = _week_room_hours(db, wc, wk, planned_week)
             take = min(free, hours_left, week_room)
-            if take > _WEEK_FULL_EPS:
+            if take > _HOURS_LEFT_EPS:
                 daily_eff = cap.daily_capacity_hours(wc, day, emp, ov)
                 elapsed_nominal = (take / daily_eff) * nominal_per_day if daily_eff > 0 else take
                 if step_start is None:
                     step_start = day_start
                 step_end = day_start + timedelta(hours=elapsed_nominal)
                 hours_left -= take
+                scheduled += take
                 planned_week[wk] = planned_week.get(wk, 0.0) + take
-        if hours_left > _WEEK_FULL_EPS:
+        if hours_left > _HOURS_LEFT_EPS:
             day += timedelta(days=1)
+            if day > horizon_end:
+                return _fail(
+                    "horizon_exceeded",
+                    f"Is merkezi '{wc.code}': {round(hours_left, 2)} saat icin plan ufku ({horizon_end.isoformat()}) yetersiz.",
+                )
             cursor = datetime.combine(day, cap.first_shift_start(wc, day, ovl.get(day)))
+
     if step_start is None:
         step_start = cursor
-    return step_start, max(step_end, step_start)
+        step_end = cursor
+    return ScheduleOpResult(
+        status="scheduled",
+        scheduled_hours=round(scheduled, 6),
+        remaining_hours=0.0,
+        start=step_start,
+        end=max(step_end or step_start, step_start),
+        reason="",
+        horizon_end=horizon_end,
+    )
+
+
+def _dt_str(dt: datetime | None) -> str | None:
+    return dt.strftime("%Y-%m-%d %H:%M") if dt else None
 
 
 def lead_time(db: Session, req: LeadTimeRequest) -> LeadTimeOut:
@@ -1118,7 +1187,8 @@ def lead_time(db: Session, req: LeadTimeRequest) -> LeadTimeOut:
     if not ops:
         raise ValueError("Secime uyan operasyon yok")
 
-    horizon_end = req.start + timedelta(days=365)
+    horizon_days = max(int(req.horizon_days or LEADTIME_DEFAULT_HORIZON_DAYS), 7)
+    horizon_end = req.start + timedelta(days=horizon_days)
     wc_ids = list({op.work_center_id for op in ops})
     planned_all = planned_hours_by_week(db, wc_ids, cap.week_start(req.start), horizon_end)
     planned_by_wc: dict[int, dict[date, float]] = defaultdict(dict)
@@ -1134,10 +1204,13 @@ def lead_time(db: Session, req: LeadTimeRequest) -> LeadTimeOut:
     prev_op: RoutingOperation | None = None
     prev_start: datetime | None = None
     prev_end: datetime | None = None
+    outcome_status = "complete"
+    failure_reason = ""
+    total_remaining = 0.0
+
     for op in ops:
         wc = op.work_center
         hours = op.hours_for(req.quantity)
-        # --- senaryo matrisi: bu operasyon en erken ne zaman baslayabilir? ---
         rule_desc = ""
         if prev_op is not None and prev_start is not None and prev_end is not None:
             rule = rules.get(item, prev_op, op)
@@ -1145,32 +1218,53 @@ def lead_time(db: Session, req: LeadTimeRequest) -> LeadTimeOut:
             rule_desc = rule.describe() + ("" if rule.source == "default" else f" ({'stok' if rule.source == 'item' else 'grup'} kuralı)")
         else:
             earliest = cursor
-        step_start, step_end = _schedule_op(db, wc, hours, earliest, planned_by_wc[wc.id])
-        # ic ice calisan operasyon, oncekinden once bitemez (son parca oncekinden sonra gelir)
-        if prev_end is not None and step_end < prev_end:
+        sched = _schedule_op(db, wc, hours, earliest, planned_by_wc[wc.id], horizon_end)
+        step_start = sched.start
+        step_end = sched.end
+        if sched.status == "scheduled" and prev_end is not None and step_end and step_end < prev_end:
             step_end = prev_end + timedelta(seconds=op.cycle_time_sec or 0)
-        steps.append(
-            LeadTimeStep(
-                operation_seq=op.seq,
-                operation_name=op.operation_name,
-                work_center_code=wc.code,
-                hours=round(hours, 2),
-                start=step_start.strftime("%Y-%m-%d %H:%M"),
-                end=step_end.strftime("%Y-%m-%d %H:%M"),
-                start_rule=rule_desc,
-            )
+        step = LeadTimeStep(
+            operation_seq=op.seq,
+            operation_name=op.operation_name,
+            work_center_code=wc.code,
+            hours=round(hours, 2),
+            start=_dt_str(step_start),
+            end=_dt_str(step_end) if sched.status == "scheduled" and step_end else None,
+            start_rule=rule_desc,
+            scheduled_hours=round(sched.scheduled_hours, 4),
+            remaining_hours=round(sched.remaining_hours, 4),
+            status=sched.status,
+            reason=sched.reason,
         )
+        steps.append(step)
+
+        if sched.status != "scheduled":
+            total_remaining += sched.remaining_hours
+            failure_reason = sched.reason or sched.status
+            if not steps[:-1]:
+                outcome_status = "infeasible"
+            else:
+                outcome_status = "partial"
+            break
+
         overall_start = overall_start or step_start
-        overall_end = step_end if overall_end is None or step_end > overall_end else overall_end
+        if step_end and (overall_end is None or step_end > overall_end):
+            overall_end = step_end
         prev_op, prev_start, prev_end = op, step_start, step_end
+
+    if outcome_status == "complete":
+        total_remaining = 0.0
 
     return LeadTimeOut(
         item_code=item.code,
         quantity=req.quantity,
         total_hours=round(sum(s.hours for s in steps), 2),
-        start=(overall_start or cursor).strftime("%Y-%m-%d %H:%M"),
-        end=(overall_end or cursor).strftime("%Y-%m-%d %H:%M"),
+        start=_dt_str(overall_start),
+        end=_dt_str(overall_end) if outcome_status == "complete" else None,
         steps=steps,
+        status=outcome_status,
+        remaining_hours=round(total_remaining, 4),
+        failure_reason=failure_reason,
     )
 
 
@@ -1194,7 +1288,7 @@ def load_detail(db: Session, work_center_id: int, week_start: date, *, firm_only
         pls = pls.filter(PlanLine.mode != "forecast")
     pls = pls.all()
     rows: list[LoadDetailRow] = []
-    for pl in sorted(pls, key=lambda p: (effective_due(p.order), p.order.order_no, p.order_id, p.operation.seq, p.id)):
+    for pl in sorted(pls, key=plan_line_priority_key):
         if pl.order is None or pl.operation is None:
             continue
         ps, pe = _line_window_in_week(db, wc, wk, pl.id, pls)
@@ -1313,6 +1407,13 @@ def add_forecast_from_leadtime(db: Session, req: ForecastFromLeadTimeIn, usernam
         raise ValueError("Stok kodu bulunamadi")
     if not req.steps:
         raise ValueError("Operasyon adimi yok")
+    if req.status != "complete":
+        raise ValueError("Yalnizca basarili (complete) termin hesabi plana tahmin olarak eklenebilir.")
+    for s in req.steps:
+        if s.status != "scheduled" or s.remaining_hours > _HOURS_LEFT_EPS:
+            raise ValueError(f"Operasyon {s.operation_seq} tam yerlesmedi; tahmin kaydedilemez.")
+        if not s.start or not s.end:
+            raise ValueError(f"Operasyon {s.operation_seq} baslangic/bitis eksik; tahmin kaydedilemez.")
 
     step_dates = [datetime.strptime(s.start[:10], "%Y-%m-%d").date() for s in req.steps]
     end_dt = datetime.strptime(req.steps[-1].end[:10], "%Y-%m-%d").date()

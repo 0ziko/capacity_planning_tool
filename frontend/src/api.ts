@@ -215,6 +215,7 @@ export interface GanttBar {
 export interface GanttData {
   work_center_id: number; work_center_code: string; range_start: string; range_end: string; as_of: string;
   timeline_days: string[]; bars: GanttBar[];
+  distribution_note?: string;
 }
 export interface PlanLine { id: number; order_id: number; order_no: string; position_no: string; production_batch_id: number | null; batch_no: string; batch_order_nos: string[]; customer: string; due_date: string; item_code: string; operation_id: number; operation_seq: number; work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; planned_qty: number; mode: string; strategy: string; revision_id?: number | null }
 
@@ -304,8 +305,16 @@ export interface LoadDetailParetoRow { item_code: string; hours: number; pct: nu
 export interface LoadDetail { work_center_id: number; work_center_code: string; week_start: string; total_hours: number; total_qty: number; rows: LoadDetailRow[]; pareto: LoadDetailParetoRow[] }
 export interface WeeklyOutputWc { work_center_id: number; work_center_code: string; total_qty: number; rows: LoadDetailRow[] }
 export interface WeeklyOutput { week_start: string; week_end: string; work_centers: WeeklyOutputWc[]; total_jobs: number; total_qty: number }
-export interface LeadTimeStep { operation_seq: number; operation_name: string; work_center_code: string; hours: number; start: string; end: string; start_rule: string }
-export interface LeadTime { item_code: string; quantity: number; total_hours: number; start: string; end: string; steps: LeadTimeStep[] }
+export interface LeadTimeStep {
+  operation_seq: number; operation_name: string; work_center_code: string; hours: number;
+  start: string | null; end: string | null; start_rule: string;
+  scheduled_hours: number; remaining_hours: number; status: string; reason: string;
+}
+export interface LeadTime {
+  item_code: string; quantity: number; total_hours: number;
+  start: string | null; end: string | null; steps: LeadTimeStep[];
+  status: string; remaining_hours: number; failure_reason: string; planning_note: string;
+}
 export interface ForecastSummary { order_id: number; order_no: string; item_code: string; item_name: string; quantity: number; due_date: string; total_hours: number; line_count: number; week_from: string | null; week_to: string | null; created_at: string | null }
 export interface Progress { work_center_id: number; work_center_code: string; week_start: string; planned_hours: number; expected_hours_to_date: number; actual_hours_to_date: number; remaining_hours: number; remaining_days: number; working_days: number; elapsed_days: number; status: string }
 export interface ImportKind { kind: string; title: string; columns: string[]; required: string[] }

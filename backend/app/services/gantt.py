@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.models import Item, Order, PlanLine, ProductionActual, ProductionBatch, ProductionBatchOrder, WorkCenter
 from app.schemas import GanttBar, GanttOut
 from app.services import capacity as cap
+from app.services.orders import effective_due, plan_line_priority_key
 from app.services.wip import resolve_wip, wip_index
 
 
@@ -43,7 +44,7 @@ def _line_window_in_week(db: Session, wc: WorkCenter, wk: date, line_id: int, li
     if not wdays:
         return wk, wk + timedelta(days=4)
     capacity = cap.week_capacity_hours(db, wc, wk)
-    ordered = sorted(lines_in_week, key=lambda p: (p.order.due_date, p.order.order_no, p.order_id, p.id))
+    ordered = sorted(lines_in_week, key=plan_line_priority_key)
     cum = 0.0
     for p in ordered:
         if p.id == line_id:
@@ -188,7 +189,7 @@ def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: 
     bars: list[GanttBar] = []
     for wk in sorted(by_week):
         week_lines = by_week[wk]
-        for pl in sorted(week_lines, key=lambda p: (p.order.due_date, p.order.order_no, p.operation.seq, p.id)):
+        for pl in sorted(week_lines, key=plan_line_priority_key):
             ps, pe = _line_window_in_week(db, wc, wk, pl.id, week_lines)
             if pe < start or ps > end:
                 continue
@@ -235,7 +236,11 @@ def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: 
                     remaining_qty=round(remaining, 2),
                     planned_hours=round(pl.planned_hours, 2),
                     earned_hours=round(float(pr["hours"]), 2),
-                    due_date=pl.production_batch.due_date if pl.production_batch else pl.order.due_date,
+                    due_date=(
+                        pl.production_batch.due_date
+                        if pl.production_batch
+                        else effective_due(pl.order)
+                    ),
                     status=status,
                     last_prod_date=pr["last_date"],
                 )
@@ -249,4 +254,5 @@ def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: 
         as_of=as_of,
         timeline_days=_timeline_days(db, wc, start, end),
         bars=sorted(bars, key=lambda b: (b.planned_start, b.order_no, b.operation_seq)),
+        distribution_note="Haftalik plandan yaklasik gun dagilimi; kesin gunluk cizelge degildir.",
     )

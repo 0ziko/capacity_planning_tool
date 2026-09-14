@@ -55,7 +55,7 @@ def test_forecast_respects_capacity(client, auth):
     r = client.post(
         "/api/plan/leadtime/forecast",
         headers=auth,
-        json={"item_code": lt["item_code"], "quantity": lt["quantity"], "steps": lt["steps"]},
+        json={"item_code": lt["item_code"], "quantity": lt["quantity"], "steps": lt["steps"], "status": lt.get("status", "complete")},
     )
     assert r.status_code == 200
     listed = client.get("/api/plan/forecast", headers=auth).json()
@@ -90,7 +90,7 @@ def test_forecast_orders_in_list(client, auth):
     client.post(
         "/api/plan/leadtime/forecast",
         headers=auth,
-        json={"item_code": lt["item_code"], "quantity": lt["quantity"], "label": "Tahmin-A", "steps": lt["steps"]},
+        json={"item_code": lt["item_code"], "quantity": lt["quantity"], "label": "Tahmin-A", "steps": lt["steps"], "status": lt.get("status", "complete")},
     )
     by_status = client.get("/api/orders", headers=auth, params={"status": "forecast"}).json()
     mine = [o for o in by_status if o["order_no"] == "Tahmin-A"]

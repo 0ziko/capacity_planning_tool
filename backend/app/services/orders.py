@@ -28,6 +28,22 @@ def effective_due(o: Order) -> date:
     return o.revised_due_date or o.due_date
 
 
+def plan_line_priority_key(p: PlanLine) -> tuple:
+    """Gantt, load_detail ve order_schedule icin ortak oncelik: effective_due (revize > ilk termin)."""
+    order = getattr(p, "order", None)
+    if order is None:
+        return (date.max, "", 0, 0, getattr(p, "id", 0) or 0)
+    op = getattr(p, "operation", None)
+    op_seq = op.seq if op is not None else (getattr(p, "operation_seq", 0) or 0)
+    return (
+        effective_due(order),
+        (order.order_no or "").upper(),
+        getattr(p, "order_id", 0) or 0,
+        op_seq,
+        getattr(p, "id", 0) or 0,
+    )
+
+
 def normalize_market(v: str | None) -> str:
     s = (v or "").strip().lower().translate(str.maketrans("çğıöşü", "cgiosu"))
     if s in ("export", "yurtdisi", "yurtdis", "yd", "ihracat", "dis"):
@@ -362,7 +378,7 @@ def _end_day_in_week(db: Session, wc: WorkCenter, wk: date, order_id: int, lines
     if not wdays:
         return wk + timedelta(days=4)
     capacity = cap.week_capacity_hours(db, wc, wk)
-    ordered = sorted(lines_in_week, key=lambda p: (effective_due(p.order), p.order.order_no, p.order_id, getattr(p, "id", 0) or 0))
+    ordered = sorted(lines_in_week, key=plan_line_priority_key)
     cum = 0.0
     reached = False
     for p in ordered:

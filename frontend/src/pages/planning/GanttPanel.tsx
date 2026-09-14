@@ -47,6 +47,8 @@ export default function GanttPanel({
       <p className="muted" style={{ marginTop: -6 }}>
         Seçilen iş merkezinde planlanan operasyon / yarımamül çubukları. Yeşil bant = üretim beyanı ile tamamlanan kısım; kalan miktar etikette gösterilir.
         Günlük ilerleme import edildikçe Gantt otomatik güncellenir.
+        {g?.distribution_note && <> <b>{g.distribution_note}</b></>}
+        Sıralama: revize termin (yoksa ilk termin) — otomatik plan ile aynı.
       </p>
       <div className="panel row" style={{ alignItems: "flex-end" }}>
         <label>İş merkezi
@@ -77,7 +79,7 @@ export default function GanttPanel({
               const pct = b.planned_qty > 0 ? Math.min(b.produced_qty / b.planned_qty, 1) : 0;
               return (
                 <div key={b.plan_line_id} className="gantt-row">
-                  <div className="gantt-label-col" title={`${b.operation_name} · termin ${b.due_date}`}>
+                  <div className="gantt-label-col" title={`${b.operation_name} · planlama termini ${b.due_date}`}>
                     <b>{b.order_no}</b>
                     {b.batch_no && b.batch_order_nos.length > 0 && (
                       <div className="muted" style={{ fontSize: 11 }}>Siparişler: {b.batch_order_nos.join(", ")}</div>

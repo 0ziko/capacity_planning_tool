@@ -547,10 +547,13 @@ function LeadTimePanel({ onForecastAdded, onShowForecastLines }: { onForecastAdd
     try { setRes(await api.post<LeadTime>("/api/plan/leadtime", { item_code: code, quantity: qty, start })); } catch (e) { setErr((e as Error).message); }
   };
   const addForecast = async () => {
-    if (!res || !confirm("Hesaplanan termin planda TAHMİN olarak kaydedilsin mi? Aynı gün içindeki sonraki terminlemeler bu yükü dikkate alır.")) return;
+    if (!res || res.status !== "complete") return;
+    if (!confirm("Hesaplanan termin planda TAHMİN olarak kaydedilsin mi? Aynı gün içindeki sonraki terminlemeler bu yükü dikkate alır.")) return;
     setBusy(true); setErr("");
     try {
-      const out = await api.post<{ created: number; message: string }>("/api/plan/leadtime/forecast", { item_code: res.item_code, quantity: res.quantity, label: label.trim(), steps: res.steps });
+      const out = await api.post<{ created: number; message: string }>("/api/plan/leadtime/forecast", {
+        item_code: res.item_code, quantity: res.quantity, label: label.trim(), steps: res.steps, status: res.status,
+      });
       setMsg(out.message);
       reload();
     } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
@@ -570,7 +573,10 @@ function LeadTimePanel({ onForecastAdded, onShowForecastLines }: { onForecastAdd
   return (
     <div className="panel">
       <h2 style={{ marginTop: 0 }}>Yeni iş terminleme (mevcut plan doluluğuna göre)</h2>
-      <p className="muted" style={{ marginTop: -6 }}>Aynı gün birden fazla termin hesapladığınızda, önceki sonuçları <b>plana tahmin olarak ekleyin</b>; sonraki hesaplamalar doluluğu doğru yansıtır. Tahminler <b>Haftalık yük</b> sekmesindeki plan satırlarında (mod: tahmin) ve aşağıdaki listede görünür.</p>
+      <p className="muted" style={{ marginTop: -6 }}>
+        Kapasiteye göre <b>yaklaşık termin</b> (kaynak rezervasyonu yok; kesin teslim tarihi değildir).
+        Aynı gün birden fazla termin hesapladığınızda, başarılı sonuçları <b>plana tahmin olarak ekleyin</b>; sonraki hesaplamalar doluluğu doğru yansıtır.
+      </p>
       <div className="row">
         <label>Stok kodu<input value={code} onChange={(e) => setCode(e.target.value)} /></label>
         <label>Miktar<input type="number" value={qty} onChange={(e) => setQty(Number(e.target.value))} /></label>
@@ -608,16 +614,41 @@ function LeadTimePanel({ onForecastAdded, onShowForecastLines }: { onForecastAdd
       {res && (
         <>
           <h3>Son hesaplama</h3>
-          <p><b>{res.item_code}</b> × {fmt(res.quantity, 0)} → toplam {fmt(res.total_hours)} saat · başlangıç <b>{res.start}</b> · bitiş <b>{res.end}</b></p>
+          {res.status !== "complete" && (
+            <div className="panel" style={{ padding: "8px 12px", marginBottom: 10, background: "#fff3e0", borderColor: "#ffb74d" }}>
+              <b>{res.status === "infeasible" ? "Termin hesaplanamadı" : "Kısmi termin"}</b>
+              {res.failure_reason && <p style={{ margin: "6px 0 0" }}>{res.failure_reason}</p>}
+              {res.remaining_hours > 0 && <p style={{ margin: "4px 0 0" }}>Yerleştirilemeyen: <b>{fmt(res.remaining_hours)}</b> saat</p>}
+            </div>
+          )}
+          <p className="muted" style={{ fontSize: 12 }}>{res.planning_note}</p>
+          <p>
+            <b>{res.item_code}</b> × {fmt(res.quantity, 0)} → toplam {fmt(res.total_hours)} saat
+            {res.start && <> · başlangıç <b>{res.start}</b></>}
+            {res.end ? <> · bitiş <b>{res.end}</b></> : res.status !== "complete" ? <> · bitiş <b>—</b></> : null}
+          </p>
           {can("poweruser") && (
             <div className="row" style={{ marginBottom: 10 }}>
               <label>Tahmin etiketi<input value={label} onChange={(e) => setLabel(e.target.value)} placeholder={`TAH-${res.item_code}`} style={{ minWidth: 200 }} /></label>
-              <button onClick={addForecast} disabled={busy}>Plana tahmin olarak ekle</button>
+              <button onClick={addForecast} disabled={busy || res.status !== "complete"} title={res.status !== "complete" ? "Yalnızca tam başarılı termin plana eklenebilir" : undefined}>
+                Plana tahmin olarak ekle
+              </button>
             </div>
           )}
           <table style={{ width: "auto" }}>
-            <thead><tr><th>Op.</th><th>İş Merkezi</th><th className="num">Saat</th><th>Başlangıç</th><th>Bitiş</th><th title="Senaryo matrisi: bu operasyon öncekine göre ne zaman başlar">Başlangıç kuralı</th></tr></thead>
-            <tbody>{res.steps.map((s) => <tr key={s.operation_seq}><td>{s.operation_seq} {s.operation_name}</td><td>{s.work_center_code}</td><td className="num">{fmt(s.hours)}</td><td>{s.start}</td><td>{s.end}</td><td className="muted">{s.start_rule || (s === res.steps[0] ? "ilk operasyon" : "")}</td></tr>)}</tbody>
+            <thead><tr><th>Op.</th><th>İş Merkezi</th><th className="num">Saat</th><th className="num">Yerleşen</th><th className="num">Kalan</th><th>Başlangıç</th><th>Bitiş</th><th title="Senaryo matrisi: bu operasyon öncekine göre ne zaman başlar">Başlangıç kuralı</th></tr></thead>
+            <tbody>{res.steps.map((s) => (
+              <tr key={s.operation_seq} className={s.status !== "scheduled" ? "warn-row" : undefined}>
+                <td>{s.operation_seq} {s.operation_name}</td>
+                <td>{s.work_center_code}</td>
+                <td className="num">{fmt(s.hours)}</td>
+                <td className="num">{fmt(s.scheduled_hours ?? s.hours)}</td>
+                <td className="num">{s.remaining_hours > 0 ? fmt(s.remaining_hours) : "—"}</td>
+                <td>{s.start ?? "—"}</td>
+                <td>{s.end ?? "—"}</td>
+                <td className="muted">{s.start_rule || (s === res.steps[0] ? "ilk operasyon" : "")}</td>
+              </tr>
+            ))}</tbody>
           </table>
           <p className="muted" style={{ marginBottom: 0 }}>Operasyon geçiş kuralları (iç içe başlama, bekleme) <a href="/scenarios">Senaryo Matrisi</a> sayfasından tanımlanır.</p>
         </>

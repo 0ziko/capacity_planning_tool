@@ -62,11 +62,10 @@ Durum kodları: **doğrulanmış** = analiz betiği/inceleme ile hâlâ repro; *
 
 | | |
 |---|---|
-| **Durum** | **doğrulanmış** |
-| **Kod** | `backend/app/services/planning.py` — `_schedule_op` (~L644–L650): `guard < 730` ile hafta atlar; sıfır kapasitede `2040-09-10` döner |
-| **Analiz kanıtı** | `observed_start/end: 2040-09-10 08:00:00` |
-| **FAZ** | **05** — açık başarısızlık + ekran birliği |
-| **Regresyon testi (henüz eklenmedi)** | Modül: `tests/test_leadtime_infeasible.py`. WC `headcount=0`; `lead_time` API veya `_schedule_op` doğrudan → `success=False` veya `plan_status=infeasible`, bitiş `null`, kalan saat 10. 15 dk'lık op ayrı alt test (B4 alt durumu). |
+| **Durum** | **düzeltildi** (FAZ 05) |
+| **Yeni kod** | `ScheduleOpResult` + tarih ufku; `LeadTimeOut.status` (`complete`/`partial`/`infeasible`); `end=null`; tahmin API/ UI engeli |
+| **Regresyon** | `tests/test_leadtime_infeasible.py` (6 test) |
+| **FAZ** | **05** ✓ |
 
 ### B5 · Ekleme modunda mükerrer plan (P1)
 
@@ -108,7 +107,7 @@ Durum kodları: **doğrulanmış** = analiz betiği/inceleme ile hâlâ repro; *
 | **02** | Tek kalan iş; mükerrer plan | B1, B5 | **tamamlandı** | 662f490 |
 | **03** | Parti + tekil aynı sıra | B6 | **tamamlandı** | c0d108c |
 | **04** | Öncül + geçiş kuralları | B2, B3 | **tamamlandı** | 1d3d549 |
-| **05** | Termin başarısızlığı açık | B4, M3 (gösterim) | bekliyor | — |
+| **05** | Termin başarısızlığı açık | B4, M3 (gösterim) | **tamamlandı** | (bu commit) |
 | **06** | Revizyon onay = hesaplanan plan | T1 | bekliyor | — |
 | **07** | Stok netleştirme + malzeme hazır | M2 | bekliyor | — |
 | **08** | Ölçüm / KPI birimleri | M5 | bekliyor | — |
@@ -277,4 +276,30 @@ setup_required        = completed_good_qty <= 0
 | 7 | Backend suite | **92 passed**, 1 flaky (`test_wip_multi_route`) (~74s) |
 | 8 | Frontend build | Basarili |
 
-**FAZ 05** — `Composer_Promptlari/Faz_05.md` (B4). Kullanici promptu verdiginde uygulanir.
+## FAZ 05 — termin basarisizligi acik + zaman mantigi birlestirme
+
+| Dosya | Degisiklik |
+|---|---|
+| `backend/app/services/planning.py` | `ScheduleOpResult`, ufuk tarihi, `_HOURS_LEFT_EPS`; `lead_time` partial/infeasible; tahmin guard |
+| `backend/app/services/orders.py` | `plan_line_priority_key` (effective_due) |
+| `backend/app/services/gantt.py` | effective_due siralama; `distribution_note` |
+| `backend/app/schemas.py` | `LeadTimeOut`/`LeadTimeStep` genisletme; `GanttOut.distribution_note`; `ForecastFromLeadTimeIn.status` |
+| `frontend/src/api.ts` | LeadTime + Gantt tipleri |
+| `frontend/src/pages/Planning.tsx` | Terminleme hata/kismi UI; tahmin engeli |
+| `frontend/src/pages/planning/GanttPanel.tsx` | Yaklasik dagilim notu |
+| `backend/tests/test_leadtime_infeasible.py` | B4 + kabul testleri (6) |
+
+### FAZ 05 kabul olcutleri
+
+| # | Olcut | Sonuc |
+|---|---|---|
+| 1 | 0 kapasite 10 saat → end null, kalan 10, 2040 yok | ✓ |
+| 2 | 15 dk is baslangic != bitis | ✓ |
+| 3 | Ufuk disi bosluk basari sayilmaz | ✓ |
+| 4 | Ileri plan dolulugu dusulur | ✓ |
+| 5 | Basarisiz termin forecast kaydedilemez | ✓ |
+| 6 | Gantt siralama effective_due | ✓ |
+| 7 | Backend suite | **99 passed**, 1 flaky (`test_wip_multi_route`) (~28s) |
+| 8 | Frontend build | Basarili (Vite 5.4.21) |
+
+**Sonraki:** FAZ 06 — revizyon onay = hesaplanan plan (T1).

@@ -419,3 +419,34 @@ Ornekler: 100 siparis + 30 dis rezervasyon → net 70 plan saati; 20 uretim + 20
 | 5 | Import/export kalite + eski dosya | ✓ `test_kpi_units::test_import_export_quality_and_legacy_downtime` |
 | 6 | Backend suite | **116 passed**, 1 skipped, 2 flaky (`test_job_move_revision`, `test_wip_multi_route`; FAZ 07 oncesi de goruldu) (~38s) |
 | 7 | Frontend build | Basarili (Vite 5.4.21) |
+
+## FAZ 09 — yedekleme, sema gecisi, veri butunlugu (T2/T3)
+
+| Dosya | Degisiklik |
+|---|---|
+| `backend/app/services/excel.py` | Excel **veri disa aktarimi**: BOM dal/sira, planlama rezervi, rota birincil/alternatif istasyon, referans sayfalar |
+| `backend/app/services/backup_guard.py` | Restore hedef adi dogrulama (canli `kapasite` reddi) |
+| `backend/app/services/data_integrity.py` | Kritik tablo sayilari + denetim raporu |
+| `backend/app/services/backup_verify.py` | Kaynak/hedef sayi karsilastirma |
+| `backend/app/db/migrate.py` | PostgreSQL BOOLEAN DEFAULT duzeltmesi |
+| `backend/scripts/backup_postgres.ps1` | pg_dump custom + manifest (sifre loglanmaz) |
+| `backend/scripts/restore_postgres_test.ps1` | Yalniz audit/test DB restore + dogrulama |
+| `backend/scripts/validate_restore_db.py` | Restore sonrasi sayim/butunluk |
+| `backend/app/api/data.py` | `GET /api/data-integrity` |
+| `frontend/src/pages/Imports.tsx` | Excel yedek vaadi kaldirildi |
+| `docs/BACKUP.md` | Komutlar ve kapsam |
+| `backend/tests/test_backup_faz09.py` | Kabul testleri |
+
+### FAZ 09 kabul olcutleri
+
+| # | Olcut | Sonuc |
+|---|---|---|
+| 1 | pg_dump → bos audit DB, kritik tablolar esit | ✓ Manuel: `backup_postgres.ps1` + `restore_postgres_test.ps1` → `count_match: true` (~3.8 MB dump, `kapasite_audit_test`) |
+| 2 | Restore canli DB adini reddeder | ✓ `test_backup_faz09::test_restore_target_rejects_live_db` |
+| 3 | BOM/rota alanlari Excel export | ✓ `test_excel_export_bom_routing_fields` |
+| 4 | Migration ikinci calisma | ✓ `test_ensure_columns_idempotent` |
+| 5 | Canli is verisi degismez | ✓ Restore yalniz `kapasite_audit_test`; kaynak `kapasite` okuma + dump |
+| 6 | Backend suite | **119 passed**, 2 skipped (`TEST_PG_URL`, pg restore dongusu), 4 flaky (job_move x2, wip_multi_route, capacity_flow — ortam/siralama) (~56s) |
+| 7 | Frontend build | Basarili |
+
+**Not:** Rol/GRANT pg_dump disinda; `docs/BACKUP.md`. Excel partiler/revizyonlar referans — otomatik geri yukleme yok.

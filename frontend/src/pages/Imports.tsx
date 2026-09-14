@@ -83,10 +83,10 @@ export default function Imports() {
 
   return (
     <>
-      <h1>Excel Import / Yedek</h1>
+      <h1>Excel Import / Veri dışa aktarım</h1>
       <div className="panel row">
-        <button onClick={() => api.download("/api/backup.xlsx", "kapasite_yedek.xlsx")}>⬇ Tek tıkla Excel yedeği (tüm tablolar)</button>
-        <span className="muted">Yedek sayfaları import şablonlarıyla aynı formattadır; gerekirse geri yüklenebilir.</span>
+        <button onClick={() => api.download("/api/backup.xlsx", "kapasite_veri_aktarim.xlsx")}>⬇ Excel veri dışa aktarımı</button>
+        <span className="muted">Import şablonlarıyla uyumlu alan aktarımı; eksiksiz veritabanı geri dönüşü değildir. Tam yedek için <code>backend/scripts/backup_postgres.ps1</code> (pg_dump). Partiler ve revizyonlar referans sayfalar — otomatik geri yükleme vaadi yok.</span>
       </div>
       <ErrorText err={kinds.err || orderPreviewErr} />
       <div className="grid">

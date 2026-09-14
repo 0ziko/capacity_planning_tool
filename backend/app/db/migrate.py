@@ -25,8 +25,25 @@ def _default_sql(col) -> str:
     return ""
 
 
+def _default_sql_pg(col, dialect_name: str) -> str:
+    if dialect_name != "postgresql":
+        return _default_sql(col)
+    d = col.default
+    if d is None or not getattr(d, "is_scalar", False):
+        return ""
+    v = d.arg
+    if isinstance(v, bool):
+        return f" DEFAULT {'TRUE' if v else 'FALSE'}"
+    if isinstance(v, (int, float)):
+        return f" DEFAULT {v}"
+    if isinstance(v, str):
+        return " DEFAULT '" + v.replace("'", "''") + "'"
+    return ""
+
+
 def ensure_columns(engine: Engine) -> list[str]:
     insp = inspect(engine)
+    dialect_name = engine.dialect.name
     added: list[str] = []
     with engine.begin() as conn:
         for table in Base.metadata.sorted_tables:
@@ -37,7 +54,8 @@ def ensure_columns(engine: Engine) -> list[str]:
                 if col.name in existing:
                     continue
                 col_type = col.type.compile(engine.dialect)
-                ddl = f"ALTER TABLE {table.name} ADD COLUMN {col.name} {col_type}{_default_sql(col)}"
+                default = _default_sql_pg(col, dialect_name) if dialect_name == "postgresql" else _default_sql(col)
+                ddl = f"ALTER TABLE {table.name} ADD COLUMN {col.name} {col_type}{default}"
                 conn.execute(text(ddl))
                 added.append(f"{table.name}.{col.name}")
     return added

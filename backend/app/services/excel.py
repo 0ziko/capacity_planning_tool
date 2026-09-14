@@ -24,9 +24,14 @@ from app.models import (
     OpTransitionRule,
     Order,
     PlanLine,
+    PlanRevision,
+    PlanRevisionEvent,
     ProductionActual,
+    ProductionBatch,
+    ProductionBatchOrder,
     Reservation,
     RoutingOperation,
+    RoutingOperationStation,
     Shipment,
     StockReceipt,
     User,
@@ -61,8 +66,9 @@ TEMPLATES: dict[str, dict] = {
             ("area_code", "Alan Kodu", ["alan", "alankodu", "grupkodu"]),
             ("area_name", "Alan Adı", ["alanadi", "grup", "grupadi"]),
             ("capacity_source", "Kapasite Kaynağı (İM/Makine)", ["kapasitekaynagi", "kaynak"]),
+            ("planning_reserve_pct", "Planlama Rezervi (%)", ["planlamarezervi", "rezerv", "planningreserve"]),
         ],
-        "example": ["PRESHANE 1", "PRESHANE 1", "", "E", "E", 10, 4, "PRS", "PRESHANELER", "İM"],
+        "example": ["PRESHANE 1", "PRESHANE 1", "", "E", "E", 10, 4, "PRS", "PRESHANELER", "İM", 0],
         "required": ["code", "name"],
     },
     "machines": {
@@ -142,8 +148,10 @@ TEMPLATES: dict[str, dict] = {
             ("quantity", "Miktar", ["kullanimmiktari"]),
             ("unit", "Birim", []),
             ("source_wip", "Kaynak Yarımamül", ["kaynakwip", "sourcewip", "dal"]),
+            ("branch_listing_sira", "Dal Sıra", ["dalsira", "branchlisting"]),
+            ("recipe_seq", "Reçete Sıra", ["recetesira", "recipeseq"]),
         ],
-        "example": ["MAM-0001", "HM-SAC-2MM", "Paslanmaz Sac 2mm", 3.5, "KG", ""],
+        "example": ["MAM-0001", "HM-SAC-2MM", "Paslanmaz Sac 2mm", 3.5, "KG", "", 0, 0],
         "required": ["item_code", "component_code"],
     },
     "routing": {
@@ -156,8 +164,9 @@ TEMPLATES: dict[str, dict] = {
             ("cycle_time_sec", "Çevrim Süresi (sn)", ["cycletime", "cevrimsuresi", "cevrimsuresisn", "cevrim"]),
             ("setup_time_min", "Setup (dk)", ["setup", "hazirlik", "setupsuresi"]),
             ("semi_finished_code", "Yarımamül Kodu", ["yarimamul", "yarimamulkodu", "wip", "wipkodu", "semifinished"]),
+            ("primary_machine_code", "Birincil Makine Kodu", ["birincilmakine", "primarymachine"]),
         ],
-        "example": ["MAM-0001", 10, "Kesim", "TZG-A", 50, 15, "MAM-0001-K10"],
+        "example": ["MAM-0001", 10, "Kesim", "TZG-A", 50, 15, "MAM-0001-K10", ""],
         "required": ["item_code", "seq", "wc_code", "cycle_time_sec"],
     },
     "orders": {
@@ -527,6 +536,9 @@ def import_workcenters(db: Session, rows: list[dict]) -> tuple[int, int, list[st
             src = norm(_str(r.get("capacity_source")))
             if src:
                 wc.capacity_source = "machines" if src.startswith("makin") or src == "machines" else "work_center"
+            rp = _float(r.get("planning_reserve_pct"), None)
+            if rp is not None:
+                wc.planning_reserve_pct = max(0.0, min(rp, 99.0))
         except Exception as e:  # noqa: BLE001
             errs.append(f"Satir {r['_row']}: {e}")
     return ins, upd, errs
@@ -695,6 +707,12 @@ def import_bom(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
             line.quantity = _float(r.get("quantity"), 1.0)
             line.unit = _str(r.get("unit")) or line.unit or "AD"
             line.source_wip = src
+            bs = _int(r.get("branch_listing_sira"), None)
+            rs = _int(r.get("recipe_seq"), None)
+            if bs is not None:
+                line.branch_listing_sira = bs
+            if rs is not None:
+                line.recipe_seq = rs
         except Exception as e:  # noqa: BLE001
             errs.append(f"Satir {r['_row']}: {e}")
     return ins, upd, errs
@@ -703,8 +721,11 @@ def import_bom(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
 def import_routing(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
     ins = upd = 0
     errs = []
+    from app.models import Machine, RoutingOperationStation
+
     items = _item_lookup(db)
     wcs = _wc_lookup(db)
+    machines = {m.code.upper(): m for m in db.query(Machine).all()}
     for r in rows:
         try:
             item = _get_or_create_item(db, items, _str(r.get("item_code")))
@@ -728,6 +749,12 @@ def import_routing(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
             wip = _str(r.get("semi_finished_code"))
             if wip:
                 op.semi_finished_code = wip
+            mc = _str(r.get("primary_machine_code")).upper()
+            if mc:
+                m = machines.get(mc)
+                if not m:
+                    raise ValueError(f"Makine bulunamadi: {r.get('primary_machine_code')}")
+                op.primary_machine_id = m.id
         except Exception as e:  # noqa: BLE001
             errs.append(f"Satir {r['_row']}: {e}")
     return ins, upd, errs
@@ -1378,13 +1405,46 @@ def workbook_bytes(wb: Workbook) -> bytes:
 
 
 def build_backup(db: Session) -> bytes:
-    """Tum tablolar tek Excel dosyasinda (her tablo bir sayfa). Sablon formatiyla uyumlu => geri yuklenebilir."""
+    """Excel veri disa aktarimi: import sablonlariyla uyumlu sayfalar + referans/dis aktarim sayfalari.
+
+    Tam PostgreSQL geri donusu degildir; ic kimlikli yapilar (parti, revizyon) otomatik geri yuklenmez.
+    """
     wb = Workbook()
     wc_code = {w.id: w.code for w in db.query(WorkCenter).all()}
     item_code = {i.id: i.code for i in db.query(Item).all()}
 
-    _ws_from_rows(wb, "İş Merkezleri", [c[1] for c in TEMPLATES["workcenters"]["columns"]],
-                  [[w.code, w.name, w.description, "E" if w.is_active else "H", "E" if w.is_planned else "H", w.capacity_unit_hours, w.default_efficient_hours, w.area_code, w.area_name, "Makine" if w.capacity_source == "machines" else "İM"] for w in db.query(WorkCenter).order_by(WorkCenter.code)])
+    _ws_from_rows(
+        wb,
+        "Veri Aktarım Notu",
+        ["Konu", "Açıklama"],
+        [
+            ["Dosya türü", "Excel veri dışa aktarımı — şablon uyumlu alan aktarımı"],
+            ["PostgreSQL yedek", "backend/scripts/backup_postgres.ps1 ile pg_dump (custom format)"],
+            ["Partiler / revizyonlar", "Referans sayfalar; iç ID ile otomatik geri yükleme vaadi yok"],
+            ["Rota istasyonları", "Rota İstasyonları sayfası — birincil/alternatif makine listesi"],
+        ],
+    )
+    _ws_from_rows(
+        wb,
+        "İş Merkezleri",
+        [c[1] for c in TEMPLATES["workcenters"]["columns"]],
+        [
+            [
+                w.code,
+                w.name,
+                w.description,
+                "E" if w.is_active else "H",
+                "E" if w.is_planned else "H",
+                w.capacity_unit_hours,
+                w.default_efficient_hours,
+                w.area_code,
+                w.area_name,
+                "Makine" if w.capacity_source == "machines" else "İM",
+                w.planning_reserve_pct,
+            ]
+            for w in db.query(WorkCenter).order_by(WorkCenter.code)
+        ],
+    )
     machine_code = {m.id: m.code for m in db.query(Machine).all()}
     _ws_from_rows(wb, "Makineler", [c[1] for c in TEMPLATES["machines"]["columns"]],
                   [[wc_code.get(m.work_center_id), m.code, m.name, m.description, "E" if m.is_active else "H"] for m in db.query(Machine).order_by(Machine.work_center_id, Machine.code)])
@@ -1392,12 +1452,60 @@ def build_backup(db: Session) -> bytes:
                   [[wc_code.get(s.work_center_id), s.name, s.weekdays, s.start_time, s.end_time, s.headcount, s.efficient_hours_per_person] for s in db.query(WorkCenterShift).order_by(WorkCenterShift.work_center_id, WorkCenterShift.id)])
     _ws_from_rows(wb, "Personel", [c[1] for c in TEMPLATES["employees"]["columns"]],
                   [[e.code, e.name, wc_code.get(e.work_center_id), machine_code.get(e.machine_id), "E" if e.is_active else "H"] for e in db.query(Employee).order_by(Employee.code)])
-    _ws_from_rows(wb, "Stok Kodları", [c[1] for c in TEMPLATES["items"]["columns"]],
-                  [[i.code, i.name, i.product_group, i.unit] for i in db.query(Item).order_by(Item.code)])
-    _ws_from_rows(wb, "BOM", [c[1] for c in TEMPLATES["bom"]["columns"]],
-                  [[item_code.get(b.item_id), b.component_code, b.component_name, b.quantity, b.unit] for b in db.query(BomLine).order_by(BomLine.item_id, BomLine.id)])
-    _ws_from_rows(wb, "Rota", [c[1] for c in TEMPLATES["routing"]["columns"]],
-                  [[item_code.get(o.item_id), o.seq, o.operation_name, wc_code.get(o.work_center_id), o.cycle_time_sec, o.setup_time_min, o.semi_finished_code] for o in db.query(RoutingOperation).order_by(RoutingOperation.item_id, RoutingOperation.seq)])
+    _ws_from_rows(
+        wb,
+        "Stok Kodları",
+        [c[1] for c in TEMPLATES["items"]["columns"]],
+        [[i.code, i.name, i.main_group, i.sub_group, i.product_group, i.unit] for i in db.query(Item).order_by(Item.code)],
+    )
+    _ws_from_rows(
+        wb,
+        "BOM",
+        [c[1] for c in TEMPLATES["bom"]["columns"]],
+        [
+            [
+                item_code.get(b.item_id),
+                b.component_code,
+                b.component_name,
+                b.quantity,
+                b.unit,
+                b.source_wip or "",
+                b.branch_listing_sira,
+                b.recipe_seq,
+            ]
+            for b in db.query(BomLine).order_by(BomLine.item_id, BomLine.id)
+        ],
+    )
+    _ws_from_rows(
+        wb,
+        "Rota",
+        [c[1] for c in TEMPLATES["routing"]["columns"]],
+        [
+            [
+                item_code.get(o.item_id),
+                o.seq,
+                o.operation_name,
+                wc_code.get(o.work_center_id),
+                o.cycle_time_sec,
+                o.setup_time_min,
+                o.semi_finished_code,
+                machine_code.get(o.primary_machine_id) if o.primary_machine_id else "",
+            ]
+            for o in db.query(RoutingOperation).order_by(RoutingOperation.item_id, RoutingOperation.seq)
+        ],
+    )
+    station_rows: list[list[Any]] = []
+    for op in db.query(RoutingOperation).options(joinedload(RoutingOperation.alt_stations)).order_by(RoutingOperation.item_id, RoutingOperation.seq):
+        for st in sorted(op.alt_stations, key=lambda s: s.id):
+            station_rows.append(
+                [
+                    item_code.get(op.item_id),
+                    op.seq,
+                    machine_code.get(st.machine_id),
+                    "E" if st.is_primary else "H",
+                ]
+            )
+    _ws_from_rows(wb, "Rota İstasyonları", ["Stok Kodu", "Operasyon Sıra", "Makine Kodu", "Birincil (E/H)"], station_rows)
     _ws_from_rows(wb, "Siparişler", [c[1] for c in TEMPLATES["orders"]["columns"]] + ["Durum"],
                   [[o.order_no, o.position_no or "", o.customer, o.order_date, o.due_date, o.revised_due_date, _market_cell(o.market), item_code.get(o.item_id), o.quantity, o.unit_price, o.material_status or "unknown", o.material_ready_date or "", o.material_note or "", o.status] for o in db.query(Order).order_by(Order.due_date, Order.order_no, Order.position_no)])
     _ws_from_rows(wb, "Plan", ["Hafta", "İş Merkezi Kodu", "Sipariş No", "Stok Kodu", "Operasyon Id", "Planlanan Saat", "Planlanan Miktar", "Mod", "Oluşturan"],
@@ -1455,8 +1563,60 @@ def build_backup(db: Session) -> bytes:
                   [[s.receipt_date, item_code.get(s.item_id), s.quantity, s.lot, s.note] for s in db.query(StockReceipt).order_by(StockReceipt.receipt_date, StockReceipt.id)])
     order_no = {o.id: o.order_no for o in db.query(Order).all()}
     order_pos = {o.id: o.position_no or "" for o in db.query(Order).all()}
-    _ws_from_rows(wb, "Rezervasyonlar", ["Stok Kodu", "Sipariş No", "Poz No", "Miktar", "Kaynak", "Not", "Oluşturan", "Tarih"],
-                  [[item_code.get(r.item_id), order_no.get(r.order_id), order_pos.get(r.order_id), r.quantity, "manuel" if r.source == "manual" else "otomatik", r.note, r.created_by, r.created_at] for r in db.query(Reservation).order_by(Reservation.id)])
+    batch_no = {b.id: b.batch_no for b in db.query(ProductionBatch).all()}
+    _ws_from_rows(
+        wb,
+        "Üretim Partileri (referans)",
+        ["Parti No", "Stok Kodu", "Termin", "Miktar", "Durum", "Not", "Oluşturan"],
+        [
+            [b.batch_no, item_code.get(b.item_id), b.due_date, b.quantity, b.status, b.note, b.created_by]
+            for b in db.query(ProductionBatch).order_by(ProductionBatch.id)
+        ],
+    )
+    _ws_from_rows(
+        wb,
+        "Parti Siparişleri (referans)",
+        ["Parti No", "Sipariş No", "Miktar"],
+        [[batch_no.get(l.batch_id), order_no.get(l.order_id), l.quantity] for l in db.query(ProductionBatchOrder).order_by(ProductionBatchOrder.id)],
+    )
+    _ws_from_rows(
+        wb,
+        "Plan Revizyonları (referans)",
+        ["Revizyon No", "Durum", "Hafta", "Hafta Sayısı", "Mod", "Oluşturan", "Onaylayan"],
+        [
+            [r.revision_no, r.status, r.start_week, r.weeks, r.mode, r.created_by, r.approved_by or ""]
+            for r in db.query(PlanRevision).order_by(PlanRevision.id)
+        ],
+    )
+    rev_no = {r.id: r.revision_no for r in db.query(PlanRevision).all()}
+    _ws_from_rows(
+        wb,
+        "Revizyon Olayları (referans)",
+        ["Revizyon No", "Olay", "Kullanıcı", "Detay", "Tarih"],
+        [
+            [rev_no.get(e.revision_id), e.action, e.username, e.detail, e.created_at]
+            for e in db.query(PlanRevisionEvent).order_by(PlanRevisionEvent.id)
+        ],
+    )
+    _ws_from_rows(
+        wb,
+        "Rezervasyonlar",
+        ["Stok Kodu", "Sipariş No", "Poz No", "Miktar", "Kaynak", "Stok Kökeni", "Not", "Oluşturan", "Tarih"],
+        [
+            [
+                item_code.get(r.item_id),
+                order_no.get(r.order_id),
+                order_pos.get(r.order_id),
+                r.quantity,
+                "manuel" if r.source == "manual" else "otomatik",
+                r.stock_provenance or "legacy_unspecified",
+                r.note,
+                r.created_by,
+                r.created_at,
+            ]
+            for r in db.query(Reservation).order_by(Reservation.id)
+        ],
+    )
     _ws_from_rows(wb, "Sevkler", ["Tarih", "Stok Kodu", "Sipariş No", "Poz No", "Miktar", "Not", "Oluşturan"],
                   [[s.ship_date, item_code.get(s.item_id), order_no.get(s.order_id), order_pos.get(s.order_id), s.quantity, s.note, s.created_by] for s in db.query(Shipment).order_by(Shipment.ship_date, Shipment.id)])
     _ws_from_rows(wb, "Kullanıcılar", ["Kullanıcı", "Ad Soyad", "Rol", "Aktif"],

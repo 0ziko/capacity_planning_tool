@@ -111,4 +111,8 @@ def import_log(limit: int = 50, db: Session = Depends(get_db), _=Depends(require
 @router.get("/backup.xlsx")
 def backup(db: Session = Depends(get_db), _=Depends(require_user)):
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
-    return Response(excel.build_backup(db), media_type=XLSX, headers={"Content-Disposition": f'attachment; filename="kapasite_yedek_{stamp}.xlsx"'})
+    return Response(
+        excel.build_backup(db),
+        media_type=XLSX,
+        headers={"Content-Disposition": f'attachment; filename="kapasite_veri_aktarim_{stamp}.xlsx"'},
+    )

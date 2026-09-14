@@ -506,3 +506,61 @@ Ornekler: 100 siparis + 30 dis rezervasyon → net 70 plan saati; 20 uretim + 20
 | 7 | Kalan miktar raporu | ✓ `test_capacity_shortfall_reports_remaining` |
 | 8 | Backend suite | **133 passed**, 2 skipped, 3 failed (flaky: job_move x2, wip_multi_route) (~46s) |
 | 9 | Frontend build | Basarili |
+
+## FAZ 12 — plan kalitesi olcumu ve faz kabulu (M6/M7/T3)
+
+| Dosya | Degisiklik |
+|---|---|
+| `backend/app/services/plan_evaluation.py` | KPI sozlugu, mod karsilastirma, reserve % senaryolari, snapshot/backtest notlari |
+| `backend/app/services/planning.py` | `production_as_of` → uretim kesimi (tarihsel degerlendirme) |
+| `backend/app/services/remaining_work.py` | `SchedulingContext.production_as_of` |
+| `backend/app/api/planning.py` | `POST /api/plan/evaluation` |
+| `backend/app/schemas.py` | `PlanEvaluationRequest` |
+| `backend/tests/test_plan_evaluation_faz12.py` | 5 zorunlu kabul testi |
+| `backend/tests/brute_force_reference.py` | Test-only 4 is permutasyon referansi |
+| `frontend` | Karsilastir sekmesinde plan kalite raporu |
+| `docs/composer-remediation.md` | Faz kapanis ozeti (bu bolum) |
+
+### FAZ 12 kabul olcutleri
+
+| # | Olcut | Sonuc |
+|---|---|---|
+| 1 | Ayni snapshot → ayni fingerprint ve KPI | ✓ `test_plan_evaluation_faz12::test_same_snapshot_same_fingerprint_and_kpis` |
+| 2 | DB revize termin orijinal taahhut KPI'sini iyilestirmez (snapshot) | ✓ `test_original_commitment_kpi_unchanged_when_db_revised` |
+| 3 | `production_as_of` sonrasi uretim plan girdisine girmez | ✓ `test_production_after_as_of_excluded_from_plan_input` |
+| 4 | Sentetik benchmark fabrika performansi degil | ✓ `test_synthetic_benchmark_not_factory_performance` |
+| 5 | Sezgisel vs brute-force referans (test-only) | ✓ `test_heuristic_vs_brute_force_lateness_gap` |
+| 6 | Backend suite | **138 passed**, 2 skipped, **3 failed** (FAZ 12 disi / bilinen: `test_job_move_revision` x2, `test_wip_multi_route::test_production_import_excel_serial_date`; ~54s) |
+| 7 | Frontend build | Basarili (Vite 5.4.21, ~2.1s) |
+
+### Pilot / B1–B7 son durum (kod + test kaniti)
+
+| Alan | Durum |
+|---|---|
+| B1–B7 | FAZ 02–05 regresyon testleri dosyada **düzeltildi** olarak kayitli; suite'te B1/B5 `test_remaining_work`, B2/B3 `test_transition_rules_planning`, B4 `test_leadtime_infeasible` geciyor |
+| Miktar korunumu / oncul / cakisma | FAZ 04–11 testleri suite icinde (133+ gecen cekirdek) |
+| Idempotency / onay-snapshot | `test_revision_snapshot.py`, `test_plan_revisions.py` geciyor |
+| PostgreSQL kritik entegrasyon | Testler **sqlite** izole DB; canli PG icin ayri kosul yok — production `ensure_columns` migration yolu mevcut |
+| Job move revizyon (2 test) | **Basarisiz** — kapasite/yerlestirme beklentisi ile gercek sonuc uyusmuyor (FAZ 12 ile ilgisiz) |
+| WIP coklu rota Excel tarih | **Basarisiz** — uretim import eslestirme (FAZ 12 ile ilgisiz) |
+
+### Kullanicinin tamamlamasi gereken veri tanimlari
+
+| Veri | Neden | daily_detailed hazir? |
+|---|---|---|
+| Operasyon bazli makine/ekip tanimi (`daily_detailed`) | `resource_definition_stats` eksik satir sayar | **Hayir** — tanimlar tamamlanmadan pilot hazir damgasi yok |
+| Tarihsel termin snapshot (due + revised aninda) | Gercek backtest | Hayir — sentetik/canli olcum kullanilir |
+| Uretim/sevk tarihleri bilgi kesimine uygun | Tarihsel plan KPI | Kismi (canli import) |
+| Birim fiyat / sevk degeri | Planlanan vs gerceklesen sevk KPI | Eksik fiyatli siparisler `data_gaps` ile raporlanir |
+
+### Composer fazlari — tamamlanma ozeti (FAZ 00–12)
+
+| Faz | Konu | Durum |
+|---|---|---|
+| 00 | Baseline | ✓ |
+| 01–09 | Analiz remediation (B1–B7, KPI, revizyon, …) | ✓ (dosyada faz bazli) |
+| 10 | Kaynak modeli + takvim (M1/M3) | ✓ |
+| 11 | Gunluk pilot cizelge (M4) | ✓ |
+| 12 | Plan kalitesi olcumu (M6/M7/T3) | ✓ (bu commit) |
+
+**Kalan urun engelleri (veri/kalite):** daily_detailed alan tanimlari, gercek backtest snapshot zinciri, job_move ve WIP import flaky testlerinin kok nedeni (ayri is).

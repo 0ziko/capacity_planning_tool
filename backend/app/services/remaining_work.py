@@ -24,6 +24,8 @@ class SchedulingContext:
     horizon_end_exclusive: date
     replace_existing: bool = True
     replace_manual: bool = False
+    # FAZ 12: tarihsel degerlendirmede bu tarihten sonraki uretim plan girdisine alinmaz
+    production_as_of: date | None = None
 
 
 @dataclass

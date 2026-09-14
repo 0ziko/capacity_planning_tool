@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, fmt, weekLong, type CompareDiff, type CompareRow, type PlanCompare, type PlanMode, type PlanScenario } from "../../api";
+import { api, fmt, weekLong, type CompareDiff, type CompareRow, type PlanCompare, type PlanEvaluationReport, type PlanMode, type PlanScenario } from "../../api";
 import { useAuth } from "../../auth";
 import { ErrorText } from "../../components";
 import { PlanStatusBadge } from "./OrderSchedulePanel";
@@ -54,6 +54,14 @@ export default function ComparePanel({ start, weeks, wcIds, onApplied }: { start
   const [filter, setFilter] = useState<"" | "diff" | CompareDiff>("diff");
   const [gran, setGran] = useState<"week" | "month">("week");
   const [msg, setMsg] = useState("");
+  const [evalR, setEvalR] = useState<PlanEvaluationReport | null>(null);
+
+  const runEval = async () => {
+    setBusy(true); setErr("");
+    try {
+      setEvalR(await api.post<PlanEvaluationReport>("/api/plan/evaluation", { start_week: start, weeks, work_center_ids: wcIds.length ? wcIds : null, benchmark_kind: "live" }));
+    } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
+  };
 
   const run = async () => {
     setBusy(true); setErr(""); setMsg("");
@@ -82,8 +90,22 @@ export default function ComparePanel({ start, weeks, wcIds, onApplied }: { start
     <>
       <div className="row" style={{ marginBottom: 10 }}>
         <button onClick={run} disabled={busy}>⚖ İki planı hesapla ve karşılaştır</button>
+        <button type="button" className="secondary" onClick={runEval} disabled={busy}>📊 Plan kalite raporu</button>
         <span className="muted">Üstteki başlangıç haftası / hafta sayısı / iş merkezi seçimi kullanılır. Hesaplama kayıtlı planı <b>değiştirmez</b>; beğendiğiniz planı "Bu planı uygula" ile yazarsınız.</span>
       </div>
+      {evalR && (
+        <div className="panel" style={{ marginBottom: 10 }}>
+          <h3 style={{ marginTop: 0 }}>Plan kalitesi (ölçüm)</h3>
+          {evalR.notes.map((n) => <p key={n} className="muted" style={{ margin: "4px 0" }}>{n}</p>)}
+          <p className="muted">Parmak izi: <code>{evalR.input_fingerprint.slice(0, 16)}…</code></p>
+          <ul>
+            {evalR.delivery_kpis.map((k) => (
+              <li key={k.name}>{k.name}: {k.value != null ? `${(k.value * (k.unit === "siparis" ? 100 : 1)).toFixed(k.unit === "siparis" ? 0 : 2)}${k.unit === "siparis" ? "%" : ""}` : "—"} ({k.numerator}/{k.denominator} {k.unit}, n={k.sample_count})</li>
+            ))}
+          </ul>
+          {evalR.data_gaps.length > 0 && <p className="warn">Veri eksikleri: {evalR.data_gaps.join("; ")}</p>}
+        </div>
+      )}
       <ErrorText err={err} />
       {msg && <div className="success">{msg}</div>}
       {!data && !busy && (

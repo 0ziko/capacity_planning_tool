@@ -30,6 +30,7 @@ from app.schemas import (
     OrderScheduleOut,
     PlanCompareOut,
     PlanCompareRequest,
+    PlanEvaluationRequest,
     JobMovePreviewOut,
     PlanLineOut,
     PlanSegmentOut,
@@ -472,6 +473,27 @@ def get_revenue(start: date, weeks: int = Query(12, ge=1, le=52), work_center_id
 @router.post("/plan/compare", response_model=PlanCompareOut)
 def compare_plans(req: PlanCompareRequest, db: Session = Depends(get_db), _=Depends(require_user)):
     return revenue.compare(db, req)
+
+
+@router.post("/plan/evaluation")
+def plan_evaluation(req: PlanEvaluationRequest, db: Session = Depends(get_db), _=Depends(require_user)):
+    from app.services import plan_evaluation as peval
+
+    auto = AutoPlanRequest(
+        **{
+            **req.model_dump(exclude={"benchmark_kind", "production_as_of", "include_reserve_benchmark", "snapshot_payload"}),
+            "replace_existing": False,
+        }
+    )
+    report = peval.evaluate_plan(
+        db,
+        auto,
+        benchmark_kind=req.benchmark_kind,
+        snapshot_payload=req.snapshot_payload,
+        production_as_of=req.production_as_of,
+        include_reserve_benchmark=req.include_reserve_benchmark,
+    )
+    return peval.report_to_dict(report)
 
 
 # ---- Siparis bazli plan sonucu (bitis tarihleri) ----

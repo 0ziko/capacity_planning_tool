@@ -755,7 +755,13 @@ def _try_place_candidate(
     return not un, ls, un, trial
 
 
-def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = None) -> Simulation:
+def simulate(
+    db: Session,
+    req: AutoPlanRequest,
+    extra_batches: list | None = None,
+    *,
+    production_as_of: date | None = None,
+) -> Simulation:
     """Otomatik plani hesaplar, veritabanina yazmaz.
 
     due_date: adaylar (tekil + parti) effective_due sirasiyla yerlestirilir; sigmayan 'unplanned'.
@@ -786,10 +792,11 @@ def simulate(db: Session, req: AutoPlanRequest, extra_batches: list | None = Non
         horizon_start=start,
         horizon_end_exclusive=scope.end_exclusive,
         replace_existing=req.replace_existing,
+        production_as_of=production_as_of,
     )
     from app.services.remaining_work import produced_qty_map
 
-    produced_map, _ = produced_qty_map(db)
+    produced_map, _ = produced_qty_map(db, as_of=sched_ctx.production_as_of)
 
     # kalan kapasite = planlanabilir kapasite - mevcut plan (manuel + tahmin + otomatik)
     manual = planned_hours_by_week(db, wc_ids, start, weeks[-1], mode="manual")

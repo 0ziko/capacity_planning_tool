@@ -251,6 +251,22 @@ export interface PlanScenario { mode: PlanMode; label: string; created_lines: nu
 export type CompareDiff = "same" | "rev_misses_due" | "rev_drops" | "due_drops" | "rev_earlier" | "rev_later" | "other";
 export interface CompareRow { order_id: number; order_no: string; position_no: string; customer: string; item_code: string; quantity: number; revenue: number; due_date: string; due_status: OrderSchedule["plan_status"]; due_end: string | null; due_lateness: number | null; rev_status: OrderSchedule["plan_status"]; rev_end: string | null; rev_lateness: number | null; diff: CompareDiff }
 export interface PlanCompare { due: PlanScenario; revenue: PlanScenario; rows: CompareRow[]; rev_misses_due: string[]; rev_drops: string[]; due_drops: string[] }
+export interface PlanEvaluationKpi { name: string; numerator: number; denominator: number; value: number | null; unit: string; period_start: string; period_end: string; sample_count: number; notes: string }
+export interface PlanEvaluationReport {
+  benchmark_kind: "live" | "synthetic_benchmark" | "snapshot";
+  input_fingerprint: string;
+  revenue_heuristic_not_optimal: boolean;
+  notes: string[];
+  mode_comparison: Record<string, unknown>;
+  delivery_kpis: PlanEvaluationKpi[];
+  revenue_kpis: { planned_ship_value: number; actual_ship_value: number; partial_revenue: number; no_price_orders: number };
+  reserve_pct_scenarios: { planning_reserve_pct: number; planned_hours: number; utilization_pct: number; label: string }[];
+  revision_kpis: Record<string, unknown>;
+  wip_summary: Record<string, unknown>;
+  bottleneck_unplanned_hours: number;
+  data_gaps: string[];
+  backtest_data_requirements: string[];
+}
 export interface OrderSchedule {
   order_id: number; order_no: string; position_no: string; customer: string; item_code: string; item_name: string; quantity: number; unit_price: number; revenue: number; due_date: string;
   required_hours: number; planned_hours: number; coverage_pct: number; planned_start: string | null; planned_end_week: string | null; planned_end: string | null;

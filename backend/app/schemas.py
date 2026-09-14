@@ -603,6 +603,13 @@ class PlanCompareRequest(BaseModel):
     work_center_ids: list[int] | None = None
 
 
+class PlanEvaluationRequest(AutoPlanRequest):
+    benchmark_kind: Literal["live", "synthetic_benchmark", "snapshot"] = "live"
+    production_as_of: date | None = None
+    include_reserve_benchmark: bool = False
+    snapshot_payload: dict | None = None
+
+
 class PeriodRevenue(BaseModel):
     period: str  # hafta: Pazartesi tarihi (YYYY-MM-DD); ay: YYYY-MM
     completed_revenue: float  # o donemde tamamlanan (son operasyonu biten) siparislerin cirosu

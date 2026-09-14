@@ -8,7 +8,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import Item, Order, PlanLine, ProductionActual, ProductionBatch, ProductionBatchOrder, WorkCenter
-from app.schemas import GanttBar, GanttOut
+from app.schemas import GanttBar, GanttOut, PlanSegmentOut
 from app.services import capacity as cap
 from app.services.orders import effective_due, plan_line_priority_key
 from app.services.wip import resolve_wip, wip_index
@@ -246,6 +246,31 @@ def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: 
                 )
             )
 
+    from app.services.daily_scheduler import segments_for_gantt
+
+    seg_rows = segments_for_gantt(db, work_center_id, start, end)
+    segments = [
+        PlanSegmentOut(
+            id=s.id,
+            order_id=s.order_id,
+            operation_id=s.operation_id,
+            production_batch_id=s.production_batch_id,
+            work_center_id=s.work_center_id,
+            machine_id=s.machine_id,
+            machine_code=s.machine.code if s.machine else "",
+            segment_kind=s.segment_kind,
+            start_at=s.start_at,
+            end_at=s.end_at,
+            good_qty=s.good_qty,
+            crew_size=s.crew_size,
+            is_locked=s.is_locked,
+        )
+        for s in seg_rows
+    ]
+    note = "Haftalik plandan yaklasik gun dagilimi; kesin gunluk cizelge degildir."
+    if segments:
+        note = "Gunluk kaynak segmentleri (plan_operation_segments); cubuklar haftalik ozet."
+
     return GanttOut(
         work_center_id=wc.id,
         work_center_code=wc.code,
@@ -254,5 +279,6 @@ def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: 
         as_of=as_of,
         timeline_days=_timeline_days(db, wc, start, end),
         bars=sorted(bars, key=lambda b: (b.planned_start, b.order_no, b.operation_seq)),
-        distribution_note="Haftalik plandan yaklasik gun dagilimi; kesin gunluk cizelge degildir.",
+        segments=segments,
+        distribution_note=note,
     )

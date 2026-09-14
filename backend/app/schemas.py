@@ -479,6 +479,7 @@ class RequirementQuery(BaseModel):
 
 # ---- Planning ----
 PlanMode = Literal["due_date", "revenue"]
+PlanningGranularity = Literal["weekly", "daily_detailed"]
 
 
 class CoShipmentSelection(BaseModel):
@@ -520,6 +521,7 @@ class AutoPlanRequest(BaseModel):
     work_center_ids: list[int] | None = None  # None => is_planned olanlar
     replace_existing: bool = True
     mode: PlanMode = "due_date"  # due_date: termine gore; revenue: ufuk icinde maksimum ciro
+    planning_granularity: PlanningGranularity = "weekly"
     material_policy: MaterialPolicy = "conditional"
     co_shipment: CoShipmentOptions | None = None  # null / enabled=false => mevcut akis
 
@@ -758,6 +760,22 @@ class GanttBar(BaseModel):
     last_prod_date: date | None = None
 
 
+class PlanSegmentOut(ORM):
+    id: int
+    order_id: int
+    operation_id: int
+    production_batch_id: int | None = None
+    work_center_id: int
+    machine_id: int
+    machine_code: str = ""
+    segment_kind: str
+    start_at: datetime
+    end_at: datetime
+    good_qty: float
+    crew_size: int
+    is_locked: bool = False
+
+
 class GanttOut(BaseModel):
     work_center_id: int
     work_center_code: str
@@ -766,6 +784,7 @@ class GanttOut(BaseModel):
     as_of: date
     timeline_days: list[date]
     bars: list[GanttBar]
+    segments: list[PlanSegmentOut] = []
     distribution_note: str = "Haftalik plandan yaklasik gun dagilimi; kesin gunluk cizelge degildir."
 
 

@@ -312,3 +312,45 @@ class PlanRevisionEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     revision: Mapped[PlanRevision] = relationship(back_populates="events")
+
+
+class PlanScheduleVersion(Base):
+    """Gunluk ayrintili plan surumu."""
+
+    __tablename__ = "plan_schedule_versions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    horizon_start: Mapped[date] = mapped_column(Date, index=True)
+    horizon_end: Mapped[date] = mapped_column(Date, index=True)
+    granularity: Mapped[str] = mapped_column(String(16), default="daily_detailed")
+    created_by: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class PlanOperationSegment(Base):
+    """Kaynak araligi: makine + is gucu havuzu; setup veya process."""
+
+    __tablename__ = "plan_operation_segments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    schedule_version_id: Mapped[int] = mapped_column(ForeignKey("plan_schedule_versions.id", ondelete="CASCADE"), index=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), index=True)
+    operation_id: Mapped[int] = mapped_column(ForeignKey("routing_operations.id", ondelete="CASCADE"), index=True)
+    production_batch_id: Mapped[int | None] = mapped_column(ForeignKey("production_batches.id", ondelete="CASCADE"), nullable=True, index=True)
+    work_center_id: Mapped[int] = mapped_column(ForeignKey("work_centers.id"), index=True)
+    machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id"), index=True)
+    segment_kind: Mapped[str] = mapped_column(String(16), default="process")  # setup | process
+    start_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    end_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    good_qty: Mapped[float] = mapped_column(Float, default=0.0)
+    crew_size: Mapped[int] = mapped_column(Integer, default=1)
+    setup_from_family: Mapped[str] = mapped_column(String(64), default="")
+    setup_to_family: Mapped[str] = mapped_column(String(64), default="")
+    is_locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    remaining_qty_after: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    schedule_version: Mapped[PlanScheduleVersion] = relationship()
+    order: Mapped[Order] = relationship()
+    operation = relationship("RoutingOperation")
+    machine = relationship("Machine")
+    work_center = relationship("WorkCenter")

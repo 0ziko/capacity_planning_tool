@@ -221,6 +221,7 @@ export interface OrderAnalysisRow { customer: string; market: string; due_date: 
 export interface OrderAnalysisParetoRow { customer: string; revenue: number; pct: number; cum_pct: number; order_count: number }
 export interface OrderAnalysis { rows: OrderAnalysisRow[]; total_revenue: number; domestic_revenue: number; export_revenue: number; by_customer: { customer: string; domestic: number; export: number; total: number }[]; pareto: OrderAnalysisParetoRow[]; period: string | null; due_from: string | null; due_to: string | null }
 export type PlanMode = "due_date" | "revenue";
+export type PlanningGranularity = "weekly" | "daily_detailed";
 
 export interface CoShipmentSelection { order_no: string; position_nos: string[] | null }
 export interface CoShipmentOptions { enabled: boolean; ready_before_delivery_days: number; selections: CoShipmentSelection[] }
@@ -233,6 +234,7 @@ export interface AutoPlanRequest {
   work_center_ids: number[] | null;
   replace_existing?: boolean;
   mode?: PlanMode;
+  planning_granularity?: PlanningGranularity;
   material_policy?: MaterialPolicy;
   co_shipment?: CoShipmentOptions | null;
 }

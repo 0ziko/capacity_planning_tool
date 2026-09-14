@@ -1033,7 +1033,20 @@ def auto_plan(
     replace_manual: bool = False,
 ) -> dict:
     sim = simulate(db, req)
-    return write_simulation(db, req, sim, username, revision_id=revision_id, commit=commit, replace_manual=replace_manual)
+    out = write_simulation(db, req, sim, username, revision_id=revision_id, commit=commit, replace_manual=replace_manual)
+    if req.planning_granularity == "daily_detailed":
+        from app.services.daily_scheduler import build_daily_schedule
+
+        dr = build_daily_schedule(db, req, username=username, plan_lines=sim.lines)
+        if commit:
+            db.commit()
+        out["daily_schedule"] = {
+            "version_id": dr.version_id,
+            "segments_created": dr.segments_created,
+            "skipped": dr.skipped,
+            "remaining_qty": dr.remaining_qty,
+        }
+    return out
 
 
 def add_manual_line(db: Session, line: ManualPlanLineIn, username: str) -> PlanLine:

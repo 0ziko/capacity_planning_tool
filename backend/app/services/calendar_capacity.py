@@ -157,3 +157,68 @@ def machine_daily_capacity_hours(
 
 def night_shift_duration_hours(start: time, end: time) -> float:
     return sum(r.duration_hours() for r in expand_shift_to_ranges(date(2000, 1, 3), start, end))
+
+
+def machine_work_intervals(
+    db: Session,
+    machine: Machine,
+    day: date,
+    ovl: Overrides | None = None,
+) -> list[TimeRange]:
+    """Makinenin calisabilir araliklari (bakim/tatil haric)."""
+    wc = machine.work_center or db.get(WorkCenter, machine.work_center_id)
+    if wc is None or not machine.is_active:
+        return []
+    ov = ovl.get(day) if ovl else None
+    if work_center_holiday(db, wc.id, day):
+        return []
+    if not is_working_day(wc, day, ov):
+        return []
+
+    cal_entries = (
+        db.query(MachineCalendarEntry)
+        .filter(MachineCalendarEntry.machine_id == machine.id, MachineCalendarEntry.cal_date == day)
+        .all()
+    )
+    work_ranges: list[TimeRange] = []
+    maint_blocks: list[TimeRange] = []
+
+    for e in cal_entries:
+        if e.entry_kind == "maintenance":
+            maint_blocks.extend(expand_shift_to_ranges(day, e.start_time, e.end_time))
+        else:
+            work_ranges.extend(expand_shift_to_ranges(day, e.start_time, e.end_time))
+
+    exc_rows = (
+        db.query(ResourceCalendarException)
+        .filter(
+            ResourceCalendarException.resource_type == "machine",
+            ResourceCalendarException.resource_id == machine.id,
+            ResourceCalendarException.cal_date == day,
+        )
+        .all()
+    )
+    for ex in exc_rows:
+        if ex.exception_kind == "holiday" and ex.start_time is None:
+            return []
+        if ex.start_time is not None and ex.end_time is not None:
+            blk = expand_shift_to_ranges(day, ex.start_time, ex.end_time)
+            if ex.exception_kind in ("maintenance", "closed", "holiday"):
+                maint_blocks.extend(blk)
+
+    if not work_ranges:
+        work_ranges = _default_machine_intervals(wc, day, ov)
+
+    return _subtract_blocked(work_ranges, maint_blocks)
+
+
+def work_center_crew_pool_size(wc: WorkCenter, day: date, ovl) -> int:
+    """Esanlamli is gucu havuzu: gunun vardiyalarindaki toplam kisi."""
+    from app.services import capacity
+
+    total = 0
+    for shift in effective_shifts(wc):
+        if _shift_on_day(shift, day, ovl):
+            hc = shift.headcount if shift.headcount and shift.headcount > 0 else capacity.daily_headcount(wc, day, 0, ovl)
+            total += max(hc, 0)
+    return max(total, 1)

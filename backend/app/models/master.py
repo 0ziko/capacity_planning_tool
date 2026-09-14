@@ -182,6 +182,7 @@ class RoutingOperation(Base):
     setup_labor_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
     setup_machine_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
     units_per_cycle: Mapped[int] = mapped_column(Integer, default=1)
+    setup_family: Mapped[str] = mapped_column(String(64), default="")
     semi_finished_code: Mapped[str] = mapped_column(String(64), default="", index=True)  # operasyon sonu yarımamül
     primary_machine_id: Mapped[int | None] = mapped_column(
         ForeignKey("machines.id", ondelete="SET NULL"), nullable=True, index=True
@@ -211,6 +212,21 @@ class MachineCalendarEntry(Base):
     start_time: Mapped[time] = mapped_column(Time)
     end_time: Mapped[time] = mapped_column(Time)
     entry_kind: Mapped[str] = mapped_column(String(16), default="work")  # work | maintenance
+
+    machine: Mapped["Machine"] = relationship()
+
+
+class SetupFamilyTransition(Base):
+    """Makine bazli hazirlik ailesi gecisi (dk)."""
+
+    __tablename__ = "setup_family_transitions"
+    __table_args__ = (UniqueConstraint("machine_id", "from_family", "to_family", name="uq_setup_family"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id", ondelete="CASCADE"), index=True)
+    from_family: Mapped[str] = mapped_column(String(64), default="")
+    to_family: Mapped[str] = mapped_column(String(64), default="")
+    setup_minutes: Mapped[float] = mapped_column(Float, default=0.0)
 
     machine: Mapped["Machine"] = relationship()
 

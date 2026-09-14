@@ -1,5 +1,5 @@
 import { Fragment, useState } from "react";
-import { addDays, api, fmt, mondayOf, qs, shortDate, weekLabel, weekLong, type AutoPlanRequest, type CoShipmentOptions, type CoShipmentException, type CoShipmentResult, type ForecastSummary, type ItemDetail, type LoadDetail, type LeadTime, type MaterialPolicy, type Order, type OrderSchedule, type PlanLine, type PlanMode, type WcWeek, type WorkCenterLoad } from "../api";
+import { addDays, api, fmt, mondayOf, qs, shortDate, weekLabel, weekLong, type AutoPlanRequest, type CoShipmentOptions, type CoShipmentException, type CoShipmentResult, type ForecastSummary, type ItemDetail, type LoadDetail, type LeadTime, type MaterialPolicy, type Order, type OrderSchedule, type PlanLine, type PlanMode, type PlanningGranularity, type WcWeek, type WorkCenterLoad } from "../api";
 import { useAuth } from "../auth";
 import { Bar, ErrorText, PlanStackBar, UtilBadge, WeekInput, WcMultiSelect, useAsync, useWorkCenters } from "../components";
 import WcWeeksPanel from "./WcWeeksPanel";
@@ -51,6 +51,7 @@ export default function Planning() {
   const [weeks, setWeeks] = useState(8);
   const [wcIds, setWcIds] = useState<number[]>([]);
   const [mode, setMode] = useState<PlanMode>("due_date");
+  const [planningGranularity, setPlanningGranularity] = useState<PlanningGranularity>("weekly");
   const [materialPolicy, setMaterialPolicy] = useState<MaterialPolicy>("conditional");
   const [result, setResult] = useState<AutoResult | null>(null);
   const [err, setErr] = useState("");
@@ -73,6 +74,7 @@ export default function Planning() {
     work_center_ids: wcIds.length ? wcIds : null,
     replace_existing: true,
     mode,
+    planning_granularity: planningGranularity,
     material_policy: materialPolicy,
     ...(coShipment.enabled && coShipment.selections.length
       ? { co_shipment: coShipment }
@@ -136,6 +138,10 @@ export default function Planning() {
                     <option value="conditional">Koşullu (unknown işaretle)</option>
                     <option value="strict">Strict (unknown engelle)</option>
                   </select>
+                </label>
+                <label title="Pilot: yalnızca tam kaynak tanımlı operasyonlar için makine aralığı segmentleri üretilir.">
+                  <input type="checkbox" checked={planningGranularity === "daily_detailed"} onChange={(e) => setPlanningGranularity(e.target.checked ? "daily_detailed" : "weekly")} />
+                  Günlük ayrıntılı çizelge (pilot)
                 </label>
                 <button onClick={() => runAuto()} disabled={busy} title="Onay kaydı olmadan canlı plana yazar">▶ Otomatik planla (revizyonsuz)</button>
                 <button className="secondary" onClick={() => setTab("revision")}>Plan revizyonu</button>

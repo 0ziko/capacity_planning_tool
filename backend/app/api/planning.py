@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.deps import require_poweruser, require_user
 from app.db.session import get_db
-from app.models import PlanLine, User, WorkCenter
+from app.models import PlanLine, PlanOperationSegment, User, WorkCenter
 from app.schemas import (
     AutoPlanRequest,
     CapacityOut,
@@ -32,6 +32,7 @@ from app.schemas import (
     PlanCompareRequest,
     JobMovePreviewOut,
     PlanLineOut,
+    PlanSegmentOut,
     PlanRevisionChangeIn,
     PlanRevisionChangesBulkIn,
     PlanRevisionCreate,
@@ -308,6 +309,73 @@ def get_gantt(
         return gantt.plan_gantt(db, work_center_id, start, end, as_of)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@router.get("/plan/segments", response_model=list[PlanSegmentOut])
+def list_plan_segments(
+    work_center_id: int | None = None,
+    start: date | None = None,
+    end: date | None = None,
+    db: Session = Depends(get_db),
+    _=Depends(require_user),
+):
+    from datetime import datetime, time
+
+    from app.services.daily_scheduler import segments_for_gantt
+
+    if work_center_id is None:
+        raise HTTPException(400, "work_center_id gerekli")
+    s = start or date.today()
+    e = end or (s + timedelta(days=30))
+    rows = segments_for_gantt(db, work_center_id, s, e)
+    return [
+        PlanSegmentOut(
+            id=r.id,
+            order_id=r.order_id,
+            operation_id=r.operation_id,
+            production_batch_id=r.production_batch_id,
+            work_center_id=r.work_center_id,
+            machine_id=r.machine_id,
+            machine_code=r.machine.code if r.machine else "",
+            segment_kind=r.segment_kind,
+            start_at=r.start_at,
+            end_at=r.end_at,
+            good_qty=r.good_qty,
+            crew_size=r.crew_size,
+            is_locked=r.is_locked,
+        )
+        for r in rows
+    ]
+
+
+@router.patch("/plan/segments/{segment_id}/lock", response_model=PlanSegmentOut)
+def lock_plan_segment(
+    segment_id: int,
+    locked: bool = True,
+    db: Session = Depends(get_db),
+    _=Depends(require_poweruser),
+):
+    seg = db.get(PlanOperationSegment, segment_id)
+    if not seg:
+        raise HTTPException(404, "Segment bulunamadi")
+    seg.is_locked = locked
+    db.commit()
+    db.refresh(seg)
+    return PlanSegmentOut(
+        id=seg.id,
+        order_id=seg.order_id,
+        operation_id=seg.operation_id,
+        production_batch_id=seg.production_batch_id,
+        work_center_id=seg.work_center_id,
+        machine_id=seg.machine_id,
+        machine_code=seg.machine.code if seg.machine else "",
+        segment_kind=seg.segment_kind,
+        start_at=seg.start_at,
+        end_at=seg.end_at,
+        good_qty=seg.good_qty,
+        crew_size=seg.crew_size,
+        is_locked=seg.is_locked,
+    )
 
 
 @router.get("/plan/load/detail", response_model=LoadDetailOut)

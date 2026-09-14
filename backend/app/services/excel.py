@@ -327,7 +327,7 @@ def build_template(kind: str) -> bytes:
 def read_rows(content: bytes, kind: str) -> tuple[list[dict], list[str]]:
     """Excel -> [ {key: value} ], hatalar. Basliklar Turkce/alias uyumlu eslenir."""
     t = TEMPLATES[kind]
-    wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+    wb = load_workbook(io.BytesIO(content), data_only=kind != "wc_weeks", read_only=True)
     sheets = list(wb.worksheets)
     if not sheets:
         return [], ["Dosya bos"]
@@ -369,7 +369,8 @@ def read_rows(content: bytes, kind: str) -> tuple[list[dict], list[str]]:
                 return parsed
         return [], [f"Zorunlu sutun(lar) bulunamadi: siparis import sayfasi araniyor ({', '.join(c[1] for c in t['columns'] if c[0] in t['required'])})"]
 
-    parsed = parse_sheet(wb.active)
+    target = wb["Haftalık İş Gücü"] if kind == "wc_weeks" and "Haftalık İş Gücü" in wb.sheetnames else wb.active
+    parsed = parse_sheet(target)
     if parsed is None:
         missing = [title for key, title, _ in t["columns"] if key in t["required"]]
         return [], [f"Zorunlu sutun(lar) bulunamadi: {', '.join(missing)}"]
@@ -1270,33 +1271,49 @@ def import_wc_weeks(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]
     ins = upd = 0
     errs = []
     wcs = _wc_lookup(db)
+    validated = []
+    seen = set()
     for r in rows:
         try:
             wc = wcs.get(_str(r.get("wc_code")).upper())
             if not wc:
                 raise ValueError(f"Is merkezi bulunamadi: {r.get('wc_code')}")
             wk = parse_week(r.get("week_start"))
-            hc = _int(r.get("headcount"))
+            hc = _float(r.get("headcount"))
             eff = _float(r.get("efficient_hours_per_person"))
-            days = _int(r.get("working_days"))
-            if days is not None and not 0 <= days <= 7:
-                raise ValueError("Calisma gunu 0-7 arasinda olmali")
+            days = _float(r.get("working_days"))
+            if hc is not None and (not hc.is_integer() or not 0 <= hc <= 1000000):
+                raise ValueError("Kişi sayısı 0–1000000 arasında tam sayı olmalı")
+            if eff is not None and not 0 <= eff <= 24:
+                raise ValueError("Kişi başı verimli saat 0–24 arasında olmalı")
+            if days is not None and (not days.is_integer() or not 0 <= days <= 7):
+                raise ValueError("Çalışma günü 0–7 arasında tam sayı olmalı")
             note = _str(r.get("note"))
-            row = db.query(WorkCenterWeek).filter(WorkCenterWeek.work_center_id == wc.id, WorkCenterWeek.week_start == wk).first()
-            if hc is None and eff is None and days is None and not note:
-                if row:
-                    db.delete(row)
-                    upd += 1
-                continue
-            if row:
-                upd += 1
-            else:
-                row = WorkCenterWeek(work_center_id=wc.id, week_start=wk)
-                db.add(row)
-                ins += 1
-            row.headcount, row.efficient_hours_per_person, row.working_days, row.note = hc, eff, days, note
+            key = (wc.id, wk)
+            if key in seen:
+                raise ValueError("Aynı iş merkezi ve hafta dosyada birden fazla kez bulunuyor")
+            seen.add(key)
+            validated.append((wc, wk, int(hc) if hc is not None else None, eff, int(days) if days is not None else None, note))
         except Exception as e:  # noqa: BLE001
             errs.append(f"Satir {r['_row']}: {e}")
+    if errs:
+        return 0, 0, errs  # Validate the entire file before changing any weekly capacity.
+    for wc, wk, hc, eff, days, note in validated:
+        row = db.query(WorkCenterWeek).filter(WorkCenterWeek.work_center_id == wc.id, WorkCenterWeek.week_start == wk).first()
+        if hc is None and eff is None and days is None and not note:
+            if row:
+                db.delete(row)
+                upd += 1
+            continue
+        if row:
+            if (row.headcount, row.efficient_hours_per_person, row.working_days, row.note) == (hc, eff, days, note):
+                continue
+            upd += 1
+        else:
+            row = WorkCenterWeek(work_center_id=wc.id, week_start=wk)
+            db.add(row)
+            ins += 1
+        row.headcount, row.efficient_hours_per_person, row.working_days, row.note = hc, eff, days, note
     return ins, upd, errs
 
 
@@ -1416,6 +1433,68 @@ def run_import(db: Session, kind: str, content: bytes, filename: str, username: 
 
 
 # ---- Export ----
+
+def build_wc_weeks_xlsx(db: Session, start: date, weeks: int, work_center_ids: list[int] | None = None) -> bytes:
+    from openpyxl.comments import Comment
+    from openpyxl.styles import Protection
+    from openpyxl.worksheet.datavalidation import DataValidation
+    from app.services.capacity import week_start
+
+    start = week_start(start)
+    q = db.query(WorkCenter)
+    if work_center_ids is not None:
+        q = q.filter(WorkCenter.id.in_(work_center_ids))
+    wcs = q.order_by(WorkCenter.code).all()
+    overrides = {(r.work_center_id, r.week_start): r for r in db.query(WorkCenterWeek).filter(
+        WorkCenterWeek.week_start >= start, WorkCenterWeek.week_start < start + timedelta(weeks=weeks)).all()}
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Haftalık İş Gücü"
+    ws.append([c[1] for c in TEMPLATES["wc_weeks"]["columns"]] + ["İş Merkezi Adı"])
+    for wc in wcs:
+        for i in range(weeks):
+            wk = start + timedelta(weeks=i)
+            ov = overrides.get((wc.id, wk))
+            ws.append([wc.code, wk, ov.headcount if ov else None,
+                       ov.efficient_hours_per_person if ov else None,
+                       ov.working_days if ov else None, ov.note if ov else "", wc.name])
+            for cell in ws[ws.max_row]:
+                if isinstance(cell.value, str):
+                    cell.data_type = "s"
+                if 3 <= cell.column <= 6:
+                    cell.protection = Protection(locked=False)
+                    cell.fill = PatternFill("solid", fgColor="EFF6FF")
+                    cell.font = Font(color="1D4ED8")
+            ws.cell(ws.max_row, 2).number_format = "dd.mm.yyyy"
+            ws.cell(ws.max_row, 4).number_format = "0.##"
+    _style_header(ws)
+    for col, width in zip("ABCDEFG", [25, 35, 18, 25, 18, 40, 35]):
+        ws.column_dimensions[col].width = width
+    ws.freeze_panes = "C2"
+    ws.auto_filter.ref = ws.dimensions
+    ws.protection.sheet = True
+    ws.protection.autoFilter = False
+    for col, typ, maximum in [("C", "whole", 1000000), ("D", "decimal", 24), ("E", "whole", 7)]:
+        rule = DataValidation(type=typ, operator="between", formula1=0, formula2=maximum, allow_blank=True)
+        rule.showErrorMessage = True
+        rule.errorTitle = "Geçersiz değer"
+        rule.error = f"0–{maximum} arasında {'tam sayı' if typ == 'whole' else 'sayı'} girin; varsayılan için boş bırakın."
+        ws.add_data_validation(rule)
+        if ws.max_row > 1:
+            rule.add(f"{col}2:{col}{ws.max_row}")
+        ws[f"{col}1"].comment = Comment("Boş = vardiya/personel/makine varsayılanı. 0 = sıfır. Formül yerine sayı girin.", "Bilge İnox")
+    notes = wb.create_sheet("Kullanım")
+    for line in ["Yalnızca mavi hücreleri doldurun: kişi, kişi başı günlük verimli saat, çalışma günü ve not.",
+                 "Dosya mevcut haftalık istisnaları içerir. Boş sayısal hücreler varsayılan vardiya/personel/makine değerlerini kullanır.",
+                 "0 gerçek sıfırdır. Bir satırın tüm düzenlenebilir alanlarını boşaltmak o haftayı varsayılana döndürür.",
+                 "İş merkezi kodu ve hafta eşleşirse güncellenir; eşleşmezse mevcut iş merkezi için haftalık kayıt eklenir.",
+                 "Yeni iş merkezi oluşturulmaz. Dosyada olmayan iş merkezleri/haftalar değiştirilmez.",
+                 "İş Merkezleri ekranından veya Excel Import → Haftalık İş Gücü bölümünden yükleyin.",
+                 "Formül kullanmayın. Hatalı satır varsa haftalık verilerin hiçbiri kaydedilmez."]:
+        notes.append([line])
+    notes.column_dimensions["A"].width = 130
+    wb.active = 0
+    return workbook_bytes(wb)
 
 def _ws_from_rows(wb: Workbook, title: str, header: list[str], rows: list[list[Any]]) -> None:
     ws = wb.create_sheet(sheet_title(title))

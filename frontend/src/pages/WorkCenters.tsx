@@ -3,6 +3,7 @@ import { api, fmt, mondayOf, qs, type Capacity, type CapacitySource, type Machin
 import { useAuth } from "../auth";
 import { ErrorText, useAsync, useWorkCenters } from "../components";
 import WcWeeksPanel from "./WcWeeksPanel";
+import WcWeeksExcel from "./WcWeeksExcel";
 
 const DAYS = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"];
 const emptyWc = {
@@ -58,6 +59,7 @@ export default function WorkCenters() {
   const [filters, setFilters] = useState<WcFilters>({ ...EMPTY_FILTERS });
   const [openId, setOpenId] = useState<number | null>(null);
   const [detailTab, setDetailTab] = useState<"shifts" | "machines" | "weeks">("shifts");
+  const [excelRevision, setExcelRevision] = useState(0);
   const cap = useAsync(() => api.get<Capacity[]>(`/api/capacity${qs({ start: week })}`), [week, wcs.length]);
   const capBy = Object.fromEntries((cap.data ?? []).map((c) => [c.work_center_id, c]));
   const canEdit = can("poweruser");
@@ -131,6 +133,7 @@ export default function WorkCenters() {
         Satıra tıklayarak vardiya, makine ve haftalık iş gücü detaylarını açın. Yalnızca <b>Planlanıyor</b> işaretli iş merkezleri otomatik planlamaya girer.
       </p>
       <ErrorText err={err || cap.err} />
+      <WcWeeksExcel start={week} ids={filtered.map((wc) => wc.id)} canEdit={canEdit} onImported={() => { refresh(); setExcelRevision((n) => n + 1); }} />
 
       {edit && (
         <div className="panel">
@@ -255,6 +258,7 @@ export default function WorkCenters() {
                     <tr>
                       <td colSpan={10} style={{ background: "#f8fafc", padding: 0 }}>
                         <WcDetail
+                          key={`${wc.id}-${excelRevision}`}
                           wc={wc}
                           cap={c}
                           week={week}

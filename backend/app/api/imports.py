@@ -1,6 +1,6 @@
 """Excel import / sablon / yedek."""
 
-from datetime import datetime
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
@@ -14,6 +14,14 @@ from app.services import excel
 
 router = APIRouter(prefix="/api", tags=["imports"])
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@router.get("/exports/wc-weeks.xlsx")
+def export_wc_weeks(start: date, weeks: int = Query(12, ge=1, le=60),
+                    work_center_ids: list[int] | None = Query(None),
+                    db: Session = Depends(get_db), _=Depends(require_user)):
+    return Response(excel.build_wc_weeks_xlsx(db, start, weeks, work_center_ids), media_type=XLSX,
+                    headers={"Content-Disposition": f'attachment; filename="haftalik_is_gucu_{start.isoformat()}.xlsx"'})
 
 
 @router.get("/imports/kinds", response_model=list[dict])

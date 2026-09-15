@@ -54,6 +54,7 @@ export default function SidebarNav({ canAdmin, canOwner }: { canAdmin: boolean; 
       title: "Planlama Süreç Yönetimi",
       items: [
         { to: "/planning", label: "Kapasite Planlama" },
+        { to: "/progress", label: "Günlük İlerleme" },
         { to: "/scenarios", label: "Senaryo Matrisi" },
         { to: "/orders", label: "Sipariş Yönetimi" },
         { to: "/stock", label: "Stok & Rezervasyon" },
@@ -63,7 +64,6 @@ export default function SidebarNav({ canAdmin, canOwner }: { canAdmin: boolean; 
       id: "mes",
       title: "MES Entegrasyonu",
       items: [
-        { to: "/progress", label: "Günlük İlerleme" },
         { to: "/analysis", label: "Duruş & Çevrim Süresi" },
         { to: "/imports", label: "Excel Import / Yedek" },
       ],

@@ -66,6 +66,8 @@ app.include_router(planning.router)
 app.include_router(imports.router)
 app.include_router(scenarios.router)
 app.include_router(stock.router)
+from app.api import mes
+app.include_router(mes.router)
 
 
 @app.get("/api/health")

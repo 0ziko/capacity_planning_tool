@@ -22,7 +22,7 @@ CHECKPOINTS: tuple[dict, ...] = (
 def _last_import(db: Session, kind: str) -> ImportLog | None:
     rows = (
         db.query(ImportLog)
-        .filter(ImportLog.kind == kind)
+        .filter(ImportLog.kind.in_(["production", "mes_production"]) if kind == "production" else ImportLog.kind == kind)
         .order_by(ImportLog.created_at.desc())
         .limit(5)
         .all()
@@ -37,7 +37,11 @@ def _max_prod_date(db: Session, *, wip_only: bool = False) -> date | None:
     q = db.query(func.max(ProductionActual.prod_date))
     if wip_only:
         q = q.filter(ProductionActual.semi_finished_code != "")
-    return q.scalar()
+    legacy = q.scalar()
+    from app.models.mes import MesDetail
+    mes_dates = [d for d, m in db.query(MesDetail.prod_date, MesDetail.mapping).all()
+                 if m.get("status") == "mapped" and (not wip_only or m.get("kind") == "wip")]
+    return max(([legacy] if legacy else []) + mes_dates, default=None)
 
 
 def _max_receipt_date(db: Session) -> date | None:

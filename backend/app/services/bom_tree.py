@@ -149,7 +149,7 @@ class OrderPlanJobs:
     finish_job: WipJob | None
 
 
-def explode_order(db: Session, order: Order) -> OrderPlanJobs:
+def explode_order(db: Session, order: Order, *, wip_items: dict | None = None) -> OrderPlanJobs:
     """FG siparisini yari mamul islerine ve bitis rotasina ayirir."""
     fg = order.item
     if fg is None:
@@ -166,7 +166,7 @@ def explode_order(db: Session, order: Order) -> OrderPlanJobs:
         if code in seen:
             continue
         seen.add(code)
-        wip_item = db.query(Item).options(joinedload(Item.operations)).filter(Item.code.ilike(code)).first()
+        wip_item = wip_items.get(code.upper()) if wip_items is not None else db.query(Item).options(joinedload(Item.operations)).filter(Item.code.ilike(code)).first()
         if not wip_item or not wip_item.operations:
             continue
         qty = order.quantity * (bl.quantity or 1.0)

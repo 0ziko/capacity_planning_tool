@@ -44,6 +44,7 @@ def db():
 def _isolate_planning_artifacts(db):
     """Testler arasi plan/uretim/siparis kalintisi otomatik planlamayi etkilemesin."""
     from app.models import Downtime, Order, PlanLine, ProductionActual
+    from app.models.mes import MesDetail, MesPlanBaseline
     from app.models.planning import (
         OrderMaterialLog,
         PlanRevision,
@@ -56,6 +57,10 @@ def _isolate_planning_artifacts(db):
         Shipment,
     )
 
+    from app.models import StockReceipt
+    db.query(MesDetail).delete()
+    db.query(MesPlanBaseline).delete()
+    db.query(StockReceipt).filter(StockReceipt.source == "mes").delete()
     db.query(PlanRevisionEvent).delete()
     db.query(PlanRevisionSnapshot).delete()
     db.query(PlanRevisionChange).delete()

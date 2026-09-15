@@ -1,4 +1,5 @@
 from app.models.user import User  # noqa: F401
+from app.models.mes import MesDetail, MesPlanBaseline  # noqa: F401
 from app.models.master import (  # noqa: F401
     BomLine,
     Employee,

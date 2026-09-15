@@ -173,7 +173,7 @@ def delete_receipt(db: Session, receipt_id: int) -> None:
     r = db.get(StockReceipt, receipt_id)
     if not r:
         raise ValueError("Depo girisi bulunamadi")
-    if r.source == "progress":
+    if r.source in ("progress", "mes"):
         raise ValueError("Uretim beyanindan otomatik olusan depo girisi silinemez; uretim miktarini guncelleyin veya manuel duzeltme yapin")
     if item_free(db, r.item_id) - r.quantity < -1e-9:
         raise ValueError("Bu giris silinirse serbest stok eksiye duser; once rezervasyonlari kaldirin")

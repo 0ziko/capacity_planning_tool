@@ -62,7 +62,7 @@ def _open_orders_for_production(db: Session) -> list[Order]:
     )
 
 
-def produced_qty_map(db: Session, *, as_of: date | None = None) -> tuple[dict[WorkKey, float], list[str]]:
+def produced_qty_map(db: Session, *, as_of: date | None = None, mes_allocations: list | None = None) -> tuple[dict[WorkKey, float], list[str]]:
     """(order_id, operation_id) -> uretilen miktar; position_no belirsizliginde uyari."""
     out: dict[WorkKey, float] = defaultdict(float)
     warnings: list[str] = []
@@ -71,7 +71,9 @@ def produced_qty_map(db: Session, *, as_of: date | None = None) -> tuple[dict[Wo
         q = q.filter(ProductionActual.prod_date <= as_of)
     actuals = q.order_by(ProductionActual.prod_date, ProductionActual.id).all()
     if not actuals:
-        return dict(out), warnings
+        from app.models.mes import MesDetail
+        if db.query(MesDetail.detail_id).first() is None:
+            return dict(out), warnings
 
     open_orders = _open_orders_for_production(db)
     orders_by_no_item: dict[tuple[str, int], list[Order]] = defaultdict(list)
@@ -81,7 +83,7 @@ def produced_qty_map(db: Session, *, as_of: date | None = None) -> tuple[dict[Wo
     for o in open_orders:
         orders_by_item[o.item_id].append(o)
 
-    idx = wip_index(db)
+    idx = wip_index(db) if actuals else {}
 
     def op_id_for(item: Item, seq: int | None, wc_id: int, wip_code: str) -> int | None:
         if not item:
@@ -135,6 +137,10 @@ def produced_qty_map(db: Session, *, as_of: date | None = None) -> tuple[dict[Wo
             last = orders_by_item[a.item_id][-1]
             out[(last.id, op_id)] += qty_left
 
+    from app.services.mes_remaining import add_mes_credit
+    allocations = add_mes_credit(db, out, open_orders, as_of)
+    if mes_allocations is not None:
+        mes_allocations.extend(allocations or [])
     return dict(out), warnings
 
 
@@ -144,6 +150,7 @@ def required_qty_by_operation(
     *,
     produced: dict[WorkKey, float] | None = None,
     netting_cache: dict[int, "OrderDemandNetting"] | None = None,
+    wip_items: dict | None = None,
 ) -> dict[int, float]:
     """Operasyon id -> BOM/yari mamul katsayili gerekli miktar (bitmis stok netlemesi uygulanir)."""
     from app.services.order_finished_netting import compute_order_demand_netting, net_production_scale
@@ -160,7 +167,7 @@ def required_qty_by_operation(
     scale = net_production_scale(order, netting)
     base_qty = float(netting.net_production_qty if netting else order.quantity or 0)
     if has_wip_structure(order):
-        jobs = explode_order(db, order)
+        jobs = explode_order(db, order, wip_items=wip_items)
         req: dict[int, float] = {}
         ratio = scale if order.quantity else 0.0
         for job in jobs.wip_jobs:

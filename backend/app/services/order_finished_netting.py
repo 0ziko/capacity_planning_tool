@@ -38,11 +38,13 @@ def compute_order_demand_netting(
     order: Order,
     *,
     produced_map: dict[tuple[int, int], float] | None = None,
+    shipped_qty: float | None = None,
+    reservations: list | None = None,
 ) -> OrderDemandNetting:
     """Talep bakiyesi = siparis miktari - sevk. Stok/uretim kredisi cift sayilmaz."""
     from app.services.remaining_work import produced_qty_map
 
-    shipped = float(
+    shipped = float(shipped_qty) if shipped_qty is not None else float(
         db.query(func.sum(Shipment.quantity)).filter(Shipment.order_id == order.id).scalar() or 0.0
     )
     demand_balance = max(float(order.quantity or 0) - shipped, 0.0)
@@ -58,7 +60,7 @@ def compute_order_demand_netting(
     legacy = 0.0
     warnings: list[str] = []
 
-    rows = db.query(Reservation).filter(Reservation.order_id == order.id).all()
+    rows = reservations if reservations is not None else db.query(Reservation).filter(Reservation.order_id == order.id).all()
     for r in rows:
         prov = (getattr(r, "stock_provenance", None) or PROVENANCE_LEGACY).strip()
         q = float(r.quantity or 0)

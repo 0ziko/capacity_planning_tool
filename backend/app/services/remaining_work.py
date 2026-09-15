@@ -62,7 +62,7 @@ def _open_orders_for_production(db: Session) -> list[Order]:
     )
 
 
-def produced_qty_map(db: Session, *, as_of: date | None = None, mes_allocations: list | None = None) -> tuple[dict[WorkKey, float], list[str]]:
+def produced_qty_map(db: Session, *, as_of: date | None = None, mes_allocations: list | None = None, include_mes: bool = True) -> tuple[dict[WorkKey, float], list[str]]:
     """(order_id, operation_id) -> uretilen miktar; position_no belirsizliginde uyari."""
     out: dict[WorkKey, float] = defaultdict(float)
     warnings: list[str] = []
@@ -71,6 +71,8 @@ def produced_qty_map(db: Session, *, as_of: date | None = None, mes_allocations:
         q = q.filter(ProductionActual.prod_date <= as_of)
     actuals = q.order_by(ProductionActual.prod_date, ProductionActual.id).all()
     if not actuals:
+        if not include_mes:
+            return dict(out), warnings
         from app.models.mes import MesDetail
         if db.query(MesDetail.detail_id).first() is None:
             return dict(out), warnings
@@ -138,7 +140,7 @@ def produced_qty_map(db: Session, *, as_of: date | None = None, mes_allocations:
             out[(last.id, op_id)] += qty_left
 
     from app.services.mes_remaining import add_mes_credit
-    allocations = add_mes_credit(db, out, open_orders, as_of)
+    allocations = add_mes_credit(db, out, open_orders, as_of) if include_mes else []
     if mes_allocations is not None:
         mes_allocations.extend(allocations or [])
     return dict(out), warnings

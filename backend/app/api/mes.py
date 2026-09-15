@@ -10,6 +10,13 @@ from app.services import mes, mes_progress
 router = APIRouter(prefix="/api/mes", tags=["MES"])
 
 
+@router.get("/delivery-risk")
+def delivery_risk(as_of: date, horizon: int = Query(8, ge=1, le=12), work_center_ids: list[int] | None = Query(None),
+                  db: Session = Depends(get_db), _=Depends(require_user)):
+    from app.services.delivery_risk import analyze
+    return analyze(db, as_of, horizon, work_center_ids)
+
+
 def contents(file):
     if not (file.filename or "").lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(400, "MES raporunu .xlsx olarak yükleyin")

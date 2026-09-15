@@ -5,7 +5,7 @@ from app.models import Item, PlanLine, norm_wip
 from app.services.mes import monday, inputs_for
 
 
-def allocate_pool(db, pool, as_of, orders, required, credits, items=None):
+def allocate_pool(db, pool, as_of, orders, required, credits, items=None, *, plan_lines=None):
     """Mutates only request-local pool/credits; returns reviewable material allocations.
 
     Final-operation plan lines are capacity-limited slots, not whole-order priorities.
@@ -14,8 +14,8 @@ def allocate_pool(db, pool, as_of, orders, required, credits, items=None):
     by_order = {o.id: o for o in orders}
     final_ids = {o.id: max(o.item.operations, key=lambda x: x.seq).id
                  for o in orders if o.item and o.item.operations}
-    lines = db.query(PlanLine).filter(PlanLine.mode.in_(["auto", "manual"])).order_by(
-        PlanLine.week_start, PlanLine.id).all()
+    lines = plan_lines if plan_lines is not None else db.query(PlanLine).filter(
+        PlanLine.mode.in_(["auto", "manual"])).order_by(PlanLine.week_start, PlanLine.id).all()
     if items is None:
         items = db.query(Item).options(selectinload(Item.bom_lines), selectinload(Item.operations)).all()
     operations = {op.id: op for i in items for op in i.operations}

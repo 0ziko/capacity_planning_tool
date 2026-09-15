@@ -3,6 +3,7 @@ import { api, fmt, qs } from "../api";
 import { ErrorText, WcMultiSelect, useAsync, useWorkCenters } from "../components";
 import { useAuth } from "../auth";
 import "./Progress.css";
+import DeliveryRisk from "./DeliveryRisk";
 
 type Mapping = { status: string; reason: string; kind?: string; operation_name?: string; work_center_code?: string; candidates: string[]; inputs: Record<string, number>; standard_unit_hours: number };
 type Detail = { detail_id: string; prod_date: string; material_code: string; machine_code: string; quantity: number; mapping: Mapping; action?: string; match_week?: string; match_products?: string[]; standard_hours?: number; classification?: string };
@@ -66,6 +67,7 @@ export default function ProgressPage() {
     <div className="panel row mes-filters"><label>Rapor tarihi<input type="date" value={asOf} onChange={e => e.target.value && setAsOf(e.target.value)} /></label><WcMultiSelect wcs={wcs} value={wcIds} onChange={setWcIds} /><label>Yakın plan ufku<select value={horizon} onChange={e => setHorizon(Number(e.target.value))}>{[2, 4, 8, 12].map(n => <option key={n} value={n}>{n} hafta</option>)}</select></label><button onClick={() => setRefresh(v => v + 1)}>Yenile</button></div>
     <div className="mes-export-row"><span className="muted" role="status">{report.loading ? "Rapor hazırlanıyor…" : "Tüm saatler standart işçilik karşılığıdır."}</span><button disabled={report.loading || !r || busy} onClick={async () => { setBusy(true); setErr(""); try { await api.download(`/api/mes/progress.xlsx${qs({ as_of: asOf, work_center_ids: wcIds, horizon })}`, "MES_ilerleme.xlsx"); } catch (e) { setErr(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); } }}>Excel'e aktar</button></div>
     <ErrorText err={report.err || err} />{message && <div className="mes-notice" role="status">{message}</div>}
+    <DeliveryRisk asOf={asOf} horizon={horizon} wcIds={wcIds} refresh={refresh} />
     {r && <>
       <div className="mes-week"><b>{dateLabel(r.week)} – {dateLabel(r.week_end)}</b><span>{r.baseline === "frozen" ? "İlk MES importundaki plan korunuyor" : "Güncel plan · henüz MES referansı alınmadı"}</span><span>Rapor tarihi dahil</span></div>
       <div className="mes-cards">

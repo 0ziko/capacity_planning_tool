@@ -35,18 +35,18 @@ def test_weekly_labor_override(client, auth):
     wc = _wc(client, auth, "HFT-1")
     _upload(client, auth, "employees", ["Sicil No", "Ad Soyad", "İş Merkezi Kodu"], [["H-1", "A", "HFT-1"], ["H-2", "B", "HFT-1"]])
     wk0, wk1 = _monday(), _monday(1)
-    assert _week_cap(client, auth, wc["id"], wk0) == 2 * 4 * 5
+    assert _week_cap(client, auth, wc["id"], wk0) == 0
 
     # Hafta profili: varsayilanlar
     rows = client.get(f"/api/workcenters/{wc['id']}/weeks", headers=auth, params={"start": wk0, "weeks": 2}).json()
-    assert rows[0]["headcount"] == 2 and rows[0]["working_days"] == 5 and rows[0]["has_override"] is False
+    assert rows[0]["headcount"] == 0 and rows[0]["working_days"] == 5 and rows[0]["has_override"] is False
 
     # Ikinci haftaya istisna: 3 kisi, 4.5 saat, 4 gun
     r = client.put(f"/api/workcenters/{wc['id']}/weeks/{wk1}", headers=auth, json={"headcount": 3, "efficient_hours_per_person": 4.5, "working_days": 4, "note": "bayram"})
     assert r.status_code == 200, r.text
     assert r.json()["has_override"] and r.json()["capacity_hours"] == 3 * 4.5 * 4
     assert _week_cap(client, auth, wc["id"], wk1) == 54
-    assert _week_cap(client, auth, wc["id"], wk0) == 40  # diger hafta degismedi
+    assert _week_cap(client, auth, wc["id"], wk0) == 0  # diger hafta degismedi
 
     # Excel ile hafta numarasiyla yukleme (yalnizca kisi sayisi); '2026-W37' formati
     iso = date.fromisoformat(wk0).isocalendar()
@@ -57,13 +57,15 @@ def test_weekly_labor_override(client, auth):
     # Bos degerler => istisna silinir
     r = client.put(f"/api/workcenters/{wc['id']}/weeks/{wk0}", headers=auth, json={})
     assert r.json()["has_override"] is False
-    assert _week_cap(client, auth, wc["id"], wk0) == 40
+    assert _week_cap(client, auth, wc["id"], wk0) == 0
 
 
 def test_scenario_matrix_rules_and_leadtime(client, auth):
     _upload(client, auth, "workcenters", ["İş Merkezi Kodu", "İş Merkezi Adı", "Planlanıyor (E/H)", "Kişi Başı Verimli Saat"], [["PRS-T", "Preshane Test", "E", 8]])
     _upload(client, auth, "employees", ["Sicil No", "Ad Soyad", "İş Merkezi Kodu"], [["P-1", "A", "PRS-T"]])
     _upload(client, auth, "items", ["Stok Kodu", "Stok Adı", "Ürün Grubu"], [["EVY-1", "Evye 1", "EVYE"], ["EVY-2", "Evye 2", "EVYE"]])
+    from tests.test_capacity_flow import _weekly_staffing
+    _weekly_staffing(client, auth, [["PRS-T", 1, 8, 5]])
     # 3 operasyon; her biri 100 adet x 36 sn = 1 saat
     _upload(
         client, auth, "routing",
@@ -125,12 +127,14 @@ def test_scenario_matrix_rules_and_leadtime(client, auth):
 
     # Otomatik plan: cycles kuralinda ic ice hafta, kural yokken sonraki haftaya kayabilir — hata vermeden calisir
     _upload(client, auth, "orders", ["Sipariş No", "Müşteri", "Termin", "Stok Kodu", "Miktar"], [["SC-1", "M", (date.today() + timedelta(days=60)).isoformat(), "EVY-1", 100]])
-    r = client.post("/api/plan/auto", headers=auth, json={"start_week": start, "weeks": 4, "work_center_ids": [_wc(client, auth, "PRS-T")["id"]], "replace_existing": True})
+    r = _plan_with_ack(client, "/api/plan/auto", headers=auth, json={"start_week": start, "weeks": 4, "work_center_ids": [_wc(client, auth, "PRS-T")["id"]], "replace_existing": True})
     assert r.status_code == 200, r.text
 
 
 def test_stock_reservations_and_shipping(client, auth):
     _upload(client, auth, "items", ["Stok Kodu", "Stok Adı", "Ürün Grubu"], [["RZ-1", "Rezerve Ürün", "EVYE"]])
+    _upload(client, auth, "workcenters", ["İş Merkezi Kodu", "İş Merkezi Adı", "Planlanıyor (E/H)", "Birim Saat", "Kişi Başı Verimli Saat"], [["RZ-WC", "Rezerve WC", "E", 10, 4]])
+    _upload(client, auth, "routing", ["Stok Kodu", "Sıra", "Operasyon", "İş Merkezi Kodu", "Çevrim Süresi (sn)"], [["RZ-1", 10, "Op", "RZ-WC", 60]])  # giris kapisi: rota sart
     d = date.today()
     _upload(
         client, auth, "orders",
@@ -260,3 +264,5 @@ def test_last_op_only_no_auto_stock(client, auth):
     _upload(client, auth, "production", ["Tarih", "Yarımamül Kodu", "Miktar"], [[wk, "STK-M2-20", 100]])
     rows = client.get("/api/stock/summary", headers=auth).json()
     assert not any(x["item_code"] == "STK-M2" for x in rows)
+
+from tests.test_capacity_flow import _plan_with_ack

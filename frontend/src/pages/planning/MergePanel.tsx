@@ -1,5 +1,5 @@
-import { Fragment, useMemo, useState } from "react";
-import { api, fmt, qs, weekLong, type MergeGroup, type MergeImpact, type PlanMode, type ProductionBatch } from "../../api";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { api, fmt, qs, weekLong, trackedMergeImpact, type MergeGroup, type MergeImpact, type PlanMode, type ProductionBatch } from "../../api";
 import { useAuth } from "../../auth";
 import { ErrorText, useAsync } from "../../components";
 
@@ -74,6 +74,10 @@ export default function MergePanel({ planCtx, onChanged, onAutoPlan }: { planCtx
   const [err, setErr] = useState("");
   const [openKey, setOpenKey] = useState("");
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [analysisPhase, setAnalysisPhase] = useState("");
+  const mounted = useRef(true);
+  const analyzing = useRef(false);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [impact, setImpact] = useState<MergeImpact | null>(null);
   const [pending, setPending] = useState<MergeGroup[]>([]);
   const reloadAll = () => { groups.reload(); batches.reload(); onChanged(); };
@@ -116,20 +120,26 @@ export default function MergePanel({ planCtx, onChanged, onAutoPlan }: { planCtx
   };
 
   const previewAndApply = async (rows: MergeGroup[], _title: string) => {
+    if (analyzing.current) return;
     const eligible = rows.filter((g) => g.orders.length >= 2);
     if (!eligible.length) { setErr("Uygulanacak grup yok."); return; }
-    setBulkBusy(true); setErr("");
+    analyzing.current = true;
+    setBulkBusy(true); setErr(""); setImpact(null); setAnalysisPhase("Analiz başlatılıyor…");
     try {
-      const data = await api.post<MergeImpact>("/api/plan/merge/impact", {
+      const result = await trackedMergeImpact<MergeImpact>({
         merge_groups: eligible.map((g) => ({ order_ids: g.orders.map((o) => o.id) })),
         start_week: planCtx.start_week,
         weeks: planCtx.weeks,
         work_center_ids: planCtx.work_center_ids.length ? planCtx.work_center_ids : null,
         mode: planCtx.mode,
-      });
-      setImpact(data);
+      }, setAnalysisPhase, () => mounted.current);
+      if (!mounted.current) return;
+      setImpact(result);
       setPending(eligible);
-    } catch (e) { setErr((e as Error).message); } finally { setBulkBusy(false); }
+    } catch (e) { if (mounted.current) setErr((e as Error).message); } finally {
+      analyzing.current = false;
+      if (mounted.current) { setBulkBusy(false); setAnalysisPhase(""); }
+    }
   };
 
   const renderTable = (
@@ -227,6 +237,7 @@ export default function MergePanel({ planCtx, onChanged, onAutoPlan }: { planCtx
       </div>
       {msg && <div className="success" style={{ marginBottom: 8 }}>{msg}</div>}
       <ErrorText err={err || groups.err} />
+      {analysisPhase && <div className="panel" role="status" aria-live="polite"><b>{analysisPhase}</b><p>Etki analizi sunucuda devam ediyor. Sonuç hazır olduğunda burada açılacak; bu işlem sipariş veya plan kaydı değiştirmez.</p></div>}
 
       {renderTable(recommended, "Önerilen birleştirmeler", recFilters, setRecFilters, "önerilen")}
       {renderTable(optional, "Opsiyonel birleştirmeler", optFilters, setOptFilters, "opsiyonel")}

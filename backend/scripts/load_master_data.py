@@ -65,6 +65,9 @@ def main() -> None:
         machines = {m.code.upper(): m for m in db.query(Machine).filter(Machine.is_active.is_(True)).all()}
         cache = _refresh_cache(db)
         counters = {"created": 0, "updated": 0, "routes": 0, "bom": 0}
+        from app.services.laser_times import standards_by_code
+
+        laser_standards = standards_by_code(db)
         warnings: list[str] = []
         errors: list[str] = []
         total_fg = 0
@@ -80,7 +83,7 @@ def main() -> None:
                             continue
                         import_parsed_fg(
                             db, parsed, cache=cache, wc_idx=wc_idx, machines=machines,
-                            counters=counters, warnings=warnings,
+                            counters=counters, warnings=warnings, laser_standards=laser_standards,
                         )
                     batch_fg += 1
                 except Exception as e:  # noqa: BLE001

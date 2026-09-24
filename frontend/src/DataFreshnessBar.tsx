@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, type DataFreshness, type DataFreshnessCheckpoint } from "./api";
+import { api, fmt, type DataFreshness, type DataFreshnessCheckpoint, type ErpExcelPreview, type ErpExcelResult } from "./api";
 import { useAsync } from "./components";
+import ErpExcelModal from "./ErpExcelModal";
+
+const ERP_KEYS: Record<string, "orders" | "stock"> = { open_orders: "orders", finished_stock: "stock" };
 
 function fmtShort(iso: string | null) {
   if (!iso) return "—";
@@ -26,6 +29,9 @@ export default function DataFreshnessBar() {
   const { data, reload, err } = useAsync(() => api.get<DataFreshness>("/api/data-freshness"), []);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [confirmErr, setConfirmErr] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [erpTarget, setErpTarget] = useState<"orders" | "stock" | null>(null);
+  const [erpFile, setErpFile] = useState<File | null>(null);
 
   useEffect(() => {
     const tick = () => reload();
@@ -55,6 +61,9 @@ export default function DataFreshnessBar() {
     [reload],
   );
 
+  const pickErp = (target: "orders" | "stock") => { setErpTarget(target); fileRef.current?.click(); };
+  const onErpFile = (f: File | null) => { if (f) setErpFile(f); if (fileRef.current) fileRef.current.value = ""; };
+
   if (!data && !err) return null;
 
   const attention = data?.needs_attention ?? false;
@@ -74,6 +83,10 @@ export default function DataFreshnessBar() {
           Import sayfası →
         </Link>
       </div>
+      <input ref={fileRef} type="file" accept=".xlsx,.xlsm" style={{ display: "none" }} onChange={(e) => onErpFile(e.target.files?.[0] ?? null)} />
+      {erpFile && erpTarget && (
+        <ErpExcelModal file={erpFile} target={erpTarget} onClose={() => setErpFile(null)} onApplied={() => { setErpFile(null); reload(); window.dispatchEvent(new Event("data-imported")); }} />
+      )}
       {err && <div className="error" style={{ marginTop: 6 }}>{err}</div>}
       {confirmErr && <div className="error" style={{ marginTop: 6 }}>{confirmErr}</div>}
       {data && (
@@ -105,6 +118,11 @@ export default function DataFreshnessBar() {
                 </span>
               )}
               {c.status !== "ok" && <span className="data-freshness-warn">{c.detail}</span>}
+              {ERP_KEYS[c.key] && (
+                <button type="button" className="data-freshness-confirm-btn" title="ERP'den çekilen 'Sipariş ve Depo Miktarları' Excel dosyasını seçin; önce ön izleme gösterilir" onClick={() => pickErp(ERP_KEYS[c.key])}>
+                  Excel'den güncelle
+                </button>
+              )}
               {c.can_confirm_no_change && (
                 <button
                   type="button"

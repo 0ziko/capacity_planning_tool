@@ -13,6 +13,7 @@ from app.models import (
     Employee,
     Item,
     Machine,
+    MachineWeek,
     Order,
     PlanLine,
     ProductionActual,
@@ -38,9 +39,12 @@ from app.schemas import (
     CalendarExceptionOut,
     OperationOut,
     OperationPatchIn,
+    ConveyorRecipeIn,
+    WipLimitsIn,
     OperationStationOut,
     ResourceModelStatsOut,
     MachineIn,
+    MachineWeekIn,
     MachineOut,
     OrderIn,
     OrderOut,
@@ -48,6 +52,7 @@ from app.schemas import (
     ShiftIn,
     ShiftOut,
     WcWeekIn,
+    OvertimeDecisionIn,
     WcWeekOut,
     WorkCenterIn,
     WorkCenterOut,
@@ -158,6 +163,12 @@ def _week_out(db: Session, wc: WorkCenter, wk: date) -> WcWeekOut:
         ov_efficient_hours_per_person=ov.efficient_hours_per_person if ov else None,
         ov_working_days=ov.working_days if ov else None,
         note=ov.note if ov else "",
+        ov_overtime_headcount=ov.overtime_headcount if ov else None,
+        ov_overtime_days=ov.overtime_days if ov else None,
+        ov_overtime_hours_per_person=ov.overtime_hours_per_person if ov else None,
+        ov_weekend_overtime_headcount=ov.weekend_overtime_headcount if ov else None,
+        ov_weekend_overtime_days=ov.weekend_overtime_days if ov else None,
+        ov_weekend_overtime_hours_per_person=ov.weekend_overtime_hours_per_person if ov else None,
     )
 
 
@@ -177,7 +188,8 @@ def upsert_wc_week(wc_id: int, week: date, data: WcWeekIn, db: Session = Depends
         raise HTTPException(404, "Is merkezi bulunamadi")
     wk = capacity.week_start(week)
     row = db.query(WorkCenterWeek).filter(WorkCenterWeek.work_center_id == wc_id, WorkCenterWeek.week_start == wk).first()
-    empty = data.headcount is None and data.efficient_hours_per_person is None and data.working_days is None and not data.note.strip()
+    empty = (data.headcount is None and data.efficient_hours_per_person is None and data.working_days is None
+             and data.line_hours_per_day is None and not data.note.strip() and not data.overtime_headcount and not data.weekend_overtime_headcount and not data.overtime_extra_headcount)
     if empty:
         if row:
             db.delete(row)
@@ -188,7 +200,25 @@ def upsert_wc_week(wc_id: int, week: date, data: WcWeekIn, db: Session = Depends
         row.headcount = data.headcount
         row.efficient_hours_per_person = data.efficient_hours_per_person
         row.working_days = data.working_days
+        row.line_hours_per_day = data.line_hours_per_day
         row.note = data.note.strip()
+        row.overtime_headcount = data.overtime_headcount or None
+        row.overtime_days = data.overtime_days if data.overtime_headcount else None
+        row.overtime_hours_per_person = data.overtime_hours_per_person if data.overtime_headcount else None
+        row.weekend_overtime_headcount = data.weekend_overtime_headcount or None
+        row.weekend_overtime_days = data.weekend_overtime_days if data.weekend_overtime_headcount else None
+        row.weekend_overtime_hours_per_person = data.weekend_overtime_hours_per_person if data.weekend_overtime_headcount else None
+        row.overtime_proposed = bool(data.overtime_proposed) if (data.overtime_headcount or data.weekend_overtime_headcount) else False
+        row.overtime_extra_headcount = data.overtime_extra_headcount or None
+        problem = capacity.overtime_violation(
+            wc, row, overtime_headcount=row.overtime_headcount, overtime_days=row.overtime_days,
+            overtime_hours=row.overtime_hours_per_person, emp_count=capacity.employee_count(db, wc),
+            weekend_headcount=row.weekend_overtime_headcount, weekend_days=row.weekend_overtime_days,
+            weekend_hours=row.weekend_overtime_hours_per_person, db=db,
+        )
+        if problem:
+            db.rollback()
+            raise HTTPException(400, problem)
     db.commit()
     return _week_out(db, wc, wk)
 
@@ -198,6 +228,41 @@ def delete_wc_week(wc_id: int, week: date, db: Session = Depends(get_db), _=Depe
     wk = capacity.week_start(week)
     db.query(WorkCenterWeek).filter(WorkCenterWeek.work_center_id == wc_id, WorkCenterWeek.week_start == wk).delete(synchronize_session=False)
     db.commit()
+
+
+@router.get("/wc-weeks/overtime-pending")
+def list_overtime_pending(start: date = Query(...), weeks: int = Query(12, ge=1, le=60), db: Session = Depends(get_db), _=Depends(require_user)):
+    """Plan önerisi olan (onay bekleyen) fazla mesai hücreleri."""
+    wk0 = capacity.week_start(start)
+    wk1 = wk0 + timedelta(weeks=weeks - 1)
+    rows = db.query(WorkCenterWeek).filter(WorkCenterWeek.overtime_proposed.is_(True), WorkCenterWeek.week_start >= wk0, WorkCenterWeek.week_start <= wk1).all()
+    out = []
+    for r in rows:
+        p = capacity.week_profile(db, r.work_center, r.week_start)
+        out.append({"work_center_id": r.work_center_id, "work_center_code": r.work_center.code, "week_start": r.week_start.isoformat(),
+                    "overtime_headcount": r.overtime_headcount or 0, "overtime_days": r.overtime_days, "weekend_overtime_headcount": r.weekend_overtime_headcount or 0,
+                    "weekend_overtime_days": r.weekend_overtime_days, "overtime_capacity_hours": p.get("overtime_capacity_hours", 0.0), "person_hours_week": p.get("overtime_person_hours_week", 0.0)})
+    return out
+
+
+@router.post("/wc-weeks/overtime-decision")
+def decide_overtime(body: OvertimeDecisionIn, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    """Onay bekleyen fazla mesaiyi onayla (kalıcı kapasite) veya reddet (alanlar temizlenir; bir sonraki plan yeniden hesaplar)."""
+    n = 0
+    for c in body.cells:
+        wk = capacity.week_start(c.week_start)
+        row = db.query(WorkCenterWeek).filter(WorkCenterWeek.work_center_id == c.work_center_id, WorkCenterWeek.week_start == wk).first()
+        if not row or not row.overtime_proposed:
+            continue
+        if body.decision == "approve":
+            row.overtime_proposed = False
+        else:
+            row.overtime_headcount = row.overtime_days = row.overtime_hours_per_person = None
+            row.weekend_overtime_headcount = row.weekend_overtime_days = row.weekend_overtime_hours_per_person = None
+            row.overtime_proposed = False
+        n += 1
+    db.commit()
+    return {"updated": n, "decision": body.decision}
 
 
 @router.get("/wc-weeks", response_model=list[WcWeekOut])
@@ -375,6 +440,7 @@ def _operation_out(op: RoutingOperation, seq: int, wip_code: str = "") -> Operat
             machine_code=s.machine.code if s.machine else "",
             machine_name=s.machine.name if s.machine else "",
             is_primary=s.is_primary,
+            units_per_cycle=getattr(s, "units_per_cycle", None),
         )
         for s in (op.alt_stations or [])
     ]
@@ -392,6 +458,8 @@ def _operation_out(op: RoutingOperation, seq: int, wip_code: str = "") -> Operat
         setup_labor_minutes=getattr(op, "setup_labor_minutes", None),
         setup_machine_minutes=getattr(op, "setup_machine_minutes", None),
         units_per_cycle=int(getattr(op, "units_per_cycle", None) or 1),
+        line_interval_sec=op.line_interval_sec,
+        planning_mode=op.work_center.planning_mode or "labor",
         missing_resource_definition=missing_resource_definition(op),
         semi_finished_code=op.semi_finished_code or "",
         wip_code=wip_code,
@@ -438,6 +506,41 @@ def get_item(item_id: int, db: Session = Depends(get_db), _=Depends(require_user
     if not it:
         raise HTTPException(404, "Stok kodu bulunamadi")
     return _item_detail_out(db, it)
+
+
+# ---- Orders ----
+@router.patch("/items/{item_id}/wip-limits", response_model=ItemOut)
+def update_wip_limits(item_id: int, data: WipLimitsIn, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    """Yarimamul ara stok siniri (azami adet / gun). Plan son gecisi onculu bu sinira gore geciktirir."""
+    it = db.get(Item, item_id)
+    if not it:
+        raise HTTPException(404, "Stok karti bulunamadi")
+    it.max_wip_qty = data.max_wip_qty if data.max_wip_qty else None
+    it.max_wip_days = data.max_wip_days if data.max_wip_days else None
+    db.commit()
+    db.refresh(it)
+    return it
+
+
+@router.patch("/items/{item_id}/conveyor-units")
+def update_conveyor_units(item_id: int, data: ConveyorRecipeIn, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    from app.services.routing_resource import conveyor_kind
+    item = db.get(Item, item_id)
+    if not item:
+        raise HTTPException(404, "Stok kodu bulunamadı")
+    if data.apply_to_group and not (item.product_group or "").strip():
+        raise HTTPException(400, "Ürün grubu boş; toplu uygulama yapılamaz")
+    items = db.query(Item).filter(Item.product_group == item.product_group).all() if data.apply_to_group else [item]
+    operations = {f.operation.id: f.operation for it in items for f in flatten_fg_operations(db, it) if conveyor_kind(f.operation)}
+    if not operations:
+        raise HTTPException(400, "Bu kapsamda tavlama veya yıkama operasyonu yok")
+    counts = {"annealing": 0, "washing": 0}
+    for op in operations.values():
+        kind = conveyor_kind(op)
+        op.units_per_cycle = data.annealing_units if kind == "annealing" else data.washing_units
+        counts[kind] += 1
+    db.commit()
+    return {"recipe_count": len(items), "operation_count": len(operations), **counts}
 
 
 # ---- Orders ----
@@ -504,10 +607,7 @@ def delete_order(order_id: int, db: Session = Depends(get_db), _=Depends(require
         raise HTTPException(404, "Siparis bulunamadi")
     if db.query(Order).filter(Order.merged_into_id == order_id).first():
         raise HTTPException(400, "Bu birlesik siparisi silmek icin once birlestirmeyi geri alin")
-    db.query(PlanLine).filter(PlanLine.order_id == order_id).delete(synchronize_session=False)
-    db.query(Reservation).filter(Reservation.order_id == order_id).delete(synchronize_session=False)
-    db.query(Shipment).filter(Shipment.order_id == order_id).delete(synchronize_session=False)
-    db.delete(o)
+    orders_svc.bulk_delete_orders(db, [order_id])
     db.commit()
 
 
@@ -529,12 +629,17 @@ def set_order_status(order_id: int, status: str, db: Session = Depends(get_db), 
 def delete_orders(status: str = "closed", db: Session = Depends(get_db), _=Depends(require_poweruser)):
     ids = [i for (i,) in db.query(Order.id).filter(Order.status == status).all()]
     if ids:
+        from app.models import ProductionBatchOrder
+        from app.services.production_batches import close_empty_batches
+        batch_ids = {bid for (bid,) in db.query(ProductionBatchOrder.batch_id).filter(ProductionBatchOrder.order_id.in_(ids)).all()}
         # toplu silmede ORM cascade calismaz; bagli kayitlari elle temizle
         db.query(PlanLine).filter(PlanLine.order_id.in_(ids)).delete(synchronize_session=False)
         db.query(Reservation).filter(Reservation.order_id.in_(ids)).delete(synchronize_session=False)
         db.query(Shipment).filter(Shipment.order_id.in_(ids)).delete(synchronize_session=False)
         db.query(Order).filter(Order.merged_into_id.in_(ids)).update({Order.merged_into_id: None}, synchronize_session=False)
+        db.query(ProductionBatchOrder).filter(ProductionBatchOrder.order_id.in_(ids)).delete(synchronize_session=False)
         db.query(Order).filter(Order.id.in_(ids)).delete(synchronize_session=False)
+        close_empty_batches(db, batch_ids)
     db.commit()
 
 
@@ -566,6 +671,8 @@ def patch_routing_operation(
     if not op:
         raise HTTPException(404, "Operasyon bulunamadi")
     payload = data.model_dump(exclude_unset=True)
+    if payload.get("line_interval_sec", 1) is None and op.work_center.planning_mode == "line":
+        raise HTTPException(400, "Hat modundaki operasyonun çıkış aralığı boş bırakılamaz.")
     if "time_basis" in payload and payload["time_basis"] not in TIME_BASIS_VALUES:
         raise HTTPException(400, "Gecersiz time_basis")
     if "units_per_cycle" in payload and payload["units_per_cycle"] is not None and payload["units_per_cycle"] < 1:
@@ -618,3 +725,28 @@ def delete_calendar_exception(exc_id: int, db: Session = Depends(get_db), _=Depe
         raise HTTPException(404, "Istisna bulunamadi")
     db.delete(row)
     db.commit()
+
+
+@router.get("/workcenters/{wc_id}/station-weeks")
+def list_station_weeks(wc_id: int, start: date = Query(...), weeks: int = Query(12, ge=1, le=60), db: Session = Depends(get_db), _=Depends(require_user)):
+    from app.services.station_capacity import station_rows
+    wc = db.get(WorkCenter, wc_id)
+    if not wc:
+        raise HTTPException(404, "İş merkezi bulunamadı")
+    first = capacity.week_start(start)
+    return [{"week_start": first + timedelta(weeks=i), "stations": station_rows(db, wc, first + timedelta(weeks=i))} for i in range(weeks)]
+
+
+@router.put("/machines/{machine_id}/weeks/{week}")
+def save_station_week(machine_id: int, week: date, data: MachineWeekIn, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    machine = db.get(Machine, machine_id)
+    if not machine:
+        raise HTTPException(404, "İstasyon bulunamadı")
+    week = capacity.week_start(week)
+    row = db.query(MachineWeek).filter_by(machine_id=machine_id, week_start=week).first()
+    if row is None:
+        row = MachineWeek(machine_id=machine_id, week_start=week)
+        db.add(row)
+    row.working_hours = data.working_hours
+    db.commit()
+    return {"machine_id": machine_id, "week_start": week, "working_hours": row.working_hours}

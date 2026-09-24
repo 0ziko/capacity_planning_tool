@@ -27,6 +27,7 @@ IMPORT_PURGE_MAP = {
     "machines": "machines",
     "istasyonlar": "machines",
     "production_bom": "routing",
+    "laser_times": "laser_times",
     "shifts": "shifts",
     "wc_weeks": "wc_weeks",
     "employees": "employees",

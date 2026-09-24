@@ -28,12 +28,38 @@ def _upload(client, auth, kind, header, rows):
 WEEK = date(2026, 9, 7)  # Pazartesi
 
 
+def _weekly_staffing(client, auth, rows, weeks=16):
+    """Explicit weekly inputs for planning scenarios previously seeded with shifts."""
+    return _upload(client, auth, "wc_weeks",
+                   ["İş Merkezi Kodu", "Hafta", "Kişi Sayısı", "Kişi Başı Verimli Saat", "Çalışma Günü"],
+                   [[code, (WEEK + timedelta(weeks=i)).isoformat(), hc, hours, days]
+                    for code, hc, hours, days in rows for i in range(weeks)])
+
+
+def _staff_db(db, wc_id, headcount, hours=4, weeks=16):
+    from app.models import WorkCenterWeek
+    for i in range(weeks):
+        db.add(WorkCenterWeek(work_center_id=wc_id, week_start=WEEK + timedelta(weeks=i),
+                              headcount=headcount, efficient_hours_per_person=hours, working_days=5))
+    db.flush()
+
+
+def _plan_with_ack(client, path, **kwargs):
+    """Existing plan scenarios explicitly accept missing weeks; guard tests use raw POST."""
+    req = dict(kwargs['json'])
+    check = client.post('/api/plan/auto/preflight', headers=kwargs.get('headers'), json=req)
+    if check.status_code == 200:
+        req['missing_headcount_ack'] = check.json().get('missing_headcount_token')
+    return client.post(path, **{**kwargs, 'json': req})
+
+
 def test_full_flow(client, auth):
     for st in ("open", "closed", "merged"):
         client.delete("/api/orders", headers=auth, params={"status": st})
     # is merkezi + vardiya (10 kisi, 4 saat verimli, Pzt-Cum 08-18)
     _upload(client, auth, "workcenters", ["İş Merkezi Kodu", "İş Merkezi Adı", "Planlanıyor (E/H)", "Birim Saat", "Kişi Başı Verimli Saat"], [["TZG-A", "A Tezgahı", "E", 10, 4]])
     _upload(client, auth, "shifts", ["İş Merkezi Kodu", "Vardiya", "Günler (Pzt=0..Paz=6)", "Başlangıç", "Bitiş", "Kişi Sayısı", "Kişi Başı Verimli Saat"], [["TZG-A", "Gündüz", "0,1,2,3,4", "08:00", "18:00", 10, 4]])
+    _weekly_staffing(client, auth, [['TZG-A', 10, 4, 5]])
 
     wcs = client.get("/api/workcenters", headers=auth).json()
     wc = next(w for w in wcs if w["code"] == "TZG-A")
@@ -54,7 +80,7 @@ def test_full_flow(client, auth):
     assert round(req["total_hours"], 1) == round(20000 * 50 / 3600, 1)
 
     # otomatik plan: 277.8 saat -> 1. hafta 200, 2. hafta 77.8
-    r = client.post("/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 4, "work_center_ids": [wc_id]}).json()
+    r = _plan_with_ack(client, "/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 4, "work_center_ids": [wc_id]}).json()
     assert r["created"] >= 2 and r["unplanned"] == []
     load = client.get("/api/plan/load", headers=auth, params={"start": WEEK.isoformat(), "weeks": 2, "work_center_ids": [wc_id]}).json()
     weeks = load[0]["weeks"]

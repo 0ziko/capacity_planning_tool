@@ -5,6 +5,9 @@ from pathlib import Path
 _test_db = Path(__file__).resolve().parent / f"test_kapasite_{os.getpid()}.db"
 os.environ["DATABASE_URL"] = f"sqlite:///{_test_db.as_posix()}"
 os.environ["SECRET_KEY"] = "test-secret"
+# Testler gelistiricinin .env dosyasindan bagimsiz calisir: uretim kaynagi varsayilan (legacy) olur.
+# MES modunu sinayan testler ayari monkeypatch ile kendileri acar (tests/test_phase2_sources.py).
+os.environ["PRODUCTION_SOURCE"] = "legacy"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest  # noqa: E402
@@ -58,9 +61,13 @@ def _isolate_planning_artifacts(db):
     )
 
     from app.models import StockReceipt
+    from app.models import BackgroundJob
+    db.query(BackgroundJob).delete()
     db.query(MesDetail).delete()
     db.query(MesPlanBaseline).delete()
-    db.query(StockReceipt).filter(StockReceipt.source == "mes").delete()
+    # Bitmis urun stogu da plan girdisidir (netleme): onceki testin depo girisi sonrakinin
+    # ihtiyacini/cirosunu dusurmesin. Testler kendi stok kayitlarini test icinde olusturur.
+    db.query(StockReceipt).delete()
     db.query(PlanRevisionEvent).delete()
     db.query(PlanRevisionSnapshot).delete()
     db.query(PlanRevisionChange).delete()

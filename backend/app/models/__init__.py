@@ -4,7 +4,9 @@ from app.models.master import (  # noqa: F401
     BomLine,
     Employee,
     Item,
+    LaserTimeStandard,
     Machine,
+    MachineWeek,
     MachineCalendarEntry,
     OpTransitionRule,
     ResourceCalendarException,
@@ -17,6 +19,8 @@ from app.models.master import (  # noqa: F401
     norm_op,
     norm_wip,
 )
+from app.models.background_job import BackgroundJob  # noqa: F401
+from app.models.plan_report import PlanReport  # noqa: F401
 from app.models.planning import (  # noqa: F401
     DailyDataAck,
     Downtime,

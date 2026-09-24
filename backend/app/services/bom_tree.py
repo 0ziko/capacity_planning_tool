@@ -151,6 +151,8 @@ class OrderPlanJobs:
 
 def explode_order(db: Session, order: Order, *, wip_items: dict | None = None) -> OrderPlanJobs:
     """FG siparisini yari mamul islerine ve bitis rotasina ayirir."""
+    if wip_items is None and "_merge_read_snapshot" in db.info:
+        wip_items = db.info["_merge_read_snapshot"]["items"]
     fg = order.item
     if fg is None:
         fg = db.query(Item).options(joinedload(Item.bom_lines), joinedload(Item.operations)).filter(Item.id == order.item_id).first()

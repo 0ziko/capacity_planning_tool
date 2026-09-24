@@ -78,7 +78,13 @@ def audit_data(db: Session) -> dict:
 
     # Basit BOM dongusu: ayni mamul icinde bilesen -> mamul kodu zinciri (1 adim)
     items_by_id = {i.id: i for i in db.query(Item).all()}
-    for bl in db.query(BomLine).all():
+    # BOM satirlari tek seferde yuklenir; asagidaki dongu kontrolleri ayni listeyi kullanir
+    # (onceden mamul basina ayri sorgu atiliyordu: buyuk BOM'da on binlerce sorgu).
+    bom_lines = db.query(BomLine).all()
+    bom_by_item: dict[int, list[BomLine]] = defaultdict(list)
+    for bl in bom_lines:
+        bom_by_item[bl.item_id].append(bl)
+    for bl in bom_lines:
         parent = items_by_id.get(bl.item_id)
         if not parent:
             issues.append({"level": "error", "code": "missing_item", "message": f"BOM yetim item_id={bl.item_id}"})
@@ -88,16 +94,16 @@ def audit_data(db: Session) -> dict:
 
     # Dongulu BOM (2 adim): A bileseni B mamulunde, B bileseni A mamulunde
     comp_index: dict[str, set[int]] = defaultdict(set)
-    for bl in db.query(BomLine).all():
+    for bl in bom_lines:
         comp_index[bl.component_code.upper()].add(bl.item_id)
-    for bl in db.query(BomLine).all():
+    for bl in bom_lines:
         parent = items_by_id.get(bl.item_id)
         if not parent:
             continue
         for other_item in comp_index.get(parent.code.upper(), ()):
             if other_item == bl.item_id:
                 continue
-            if any(b.component_code.upper() == parent.code.upper() for b in db.query(BomLine).filter(BomLine.item_id == other_item)):
+            if any(b.component_code.upper() == parent.code.upper() for b in bom_by_item.get(other_item, ())):
                 issues.append(
                     {
                         "level": "warn",

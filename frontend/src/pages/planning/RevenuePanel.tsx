@@ -57,6 +57,7 @@ export function RevenueKpis({ r }: { r: RevenueReport }) {
       <div className="panel kpi warn"><span className="v">{fmt(r.partial_revenue, 0)}</span><span className="l">Kısmen planlanan (ufka sığmadı){pct(r.partial_revenue)}</span></div>
       <div className="panel kpi bad"><span className="v">{fmt(r.unplanned_revenue, 0)}</span><span className="l">Planlanmayan{pct(r.unplanned_revenue)}</span></div>
       {r.no_price_orders > 0 && <div className="panel kpi"><span className="v" style={{ color: "var(--warn)" }}>{r.no_price_orders}</span><span className="l">Birim fiyatı olmayan sipariş</span></div>}
+      {!!(r.conditional_orders || r.unknown_material_orders) && <p className="muted">Planın malzeme koşulu: {r.conditional_orders} sipariş pozisyonunda malzeme doğrulanmamış; {r.unknown_material_orders} pozisyonda geçmiş malzeme koşulu kaydedilmemiş. Bu gruplar örtüşebilir. Ciro tahminleri bu plan koşullarını taşır; kesin teslimat değildir.</p>}
     </div>
   );
 }

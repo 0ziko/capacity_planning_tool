@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api, fmt, qs, shortDate, type GanttData, type WorkCenter } from "../../api";
-import { ErrorText, useAsync } from "../../components";
+import { ErrorText, StringMultiSelect, useAsync } from "../../components";
 
 const STATUS: Record<string, string> = { planned: "Planlandı", in_progress: "Devam", completed: "Tamam" };
 
@@ -14,20 +14,29 @@ export default function GanttPanel({
   defaultEnd: string;
 }) {
   const planned = wcs.filter((w) => w.is_planned);
-  const [wcId, setWcId] = useState(planned[0]?.id ?? 0);
+  const [selectedCodes, setSelectedCodes] = useState<string[]>([]);
+  const [search, setSearch] = useState("");
+  const selected = selectedCodes.length ? planned.filter(w => selectedCodes.includes(w.code)) : planned.slice(0, 1);
   const [start, setStart] = useState(defaultStart);
   const [end, setEnd] = useState(defaultEnd);
   const [asOf, setAsOf] = useState(new Date().toISOString().slice(0, 10));
 
-  const data = useAsync(
-    () =>
-      wcId
-        ? api.get<GanttData>(`/api/plan/gantt${qs({ work_center_id: wcId, start, end, as_of: asOf })}`)
-        : Promise.resolve(null),
-    [wcId, start, end, asOf],
-  );
+  const data = useAsync(async () => {
+    const groups: GanttData[] = [];
+    // Read centers sequentially to avoid flooding the local backend.
+    for (const wc of selected) {
+      groups.push(await api.get<GanttData>(`/api/plan/gantt${qs({ work_center_id: wc.id, start, end, as_of: asOf })}`));
+    }
+    return {
+      timeline_days: [...new Set(groups.flatMap(g => g.timeline_days))].sort(),
+      bars: groups.flatMap(g => g.bars.map(b => ({ ...b, work_center_code: g.work_center_code }))),
+      distribution_note: [...new Set(groups.map(g => g.distribution_note).filter(Boolean))].join(" "),
+    };
+  }, [selected.map(w => w.id).join(","), start, end, asOf]);
 
   const g = data.data;
+  const query = search.trim().toLocaleLowerCase("tr");
+  const bars = (g?.bars ?? []).filter(b => !query || [b.order_no, b.position_no, ...b.batch_order_nos, b.item_code, b.semi_finished_code, b.semi_finished_name, b.operation_name].join(" ").toLocaleLowerCase("tr").includes(query));
   const days = g?.timeline_days ?? [];
   const dayIndex = (iso: string) => days.indexOf(iso);
 
@@ -45,17 +54,14 @@ export default function GanttPanel({
   return (
     <>
       <p className="muted" style={{ marginTop: -6 }}>
-        Seçilen iş merkezinde planlanan operasyon / yarımamül çubukları. Yeşil bant = üretim beyanı ile tamamlanan kısım; kalan miktar etikette gösterilir.
+        Seçilen iş merkezlerinde planlanan operasyon / yarımamül çubukları. Yeşil bant = üretim beyanı ile tamamlanan kısım; kalan miktar etikette gösterilir.
         Günlük ilerleme import edildikçe Gantt otomatik güncellenir.
         {g?.distribution_note && <> <b>{g.distribution_note}</b></>}
         Sıralama: revize termin (yoksa ilk termin) — otomatik plan ile aynı.
       </p>
       <div className="panel row" style={{ alignItems: "flex-end" }}>
-        <label>İş merkezi
-          <select value={wcId} onChange={(e) => setWcId(Number(e.target.value))}>
-            {planned.map((w) => <option key={w.id} value={w.id}>{w.code}</option>)}
-          </select>
-        </label>
+        <StringMultiSelect label="İş merkezleri (boş = ilk merkez)" options={planned.map(w => w.code)} value={selectedCodes} onChange={setSelectedCodes} />
+        <label>Sipariş / mamul / yarımamül ara<input value={search} onChange={e => setSearch(e.target.value)} /></label>
         <label>Başlangıç<input type="date" value={start} onChange={(e) => setStart(e.target.value)} /></label>
         <label>Bitiş<input type="date" value={end} onChange={(e) => setEnd(e.target.value)} /></label>
         <label>Üretim verisi (as-of)<input type="date" value={asOf} onChange={(e) => setAsOf(e.target.value)} /></label>
@@ -73,19 +79,20 @@ export default function GanttPanel({
                 ))}
               </div>
             </div>
-            {g.bars.length === 0 && <p className="muted" style={{ padding: 12 }}>Bu aralıkta plan satırı yok.</p>}
-            {g.bars.map((b) => {
+            {bars.length === 0 && <p className="muted" style={{ padding: 12 }}>Bu aralıkta plan satırı yok.</p>}
+            {bars.map((b) => {
               const { left, width } = pos(b.planned_start, b.planned_end);
               const pct = b.planned_qty > 0 ? Math.min(b.produced_qty / b.planned_qty, 1) : 0;
               return (
                 <div key={b.plan_line_id} className="gantt-row">
                   <div className="gantt-label-col" title={`${b.operation_name} · planlama termini ${b.due_date}`}>
-                    <b>{b.order_no}</b>
+                    <b>{b.order_no}</b> <span className="muted">{b.work_center_code}</span>
                     {b.batch_no && b.batch_order_nos.length > 0 && (
                       <div className="muted" style={{ fontSize: 11 }}>Siparişler: {b.batch_order_nos.join(", ")}</div>
                     )}
                     {!b.batch_no && b.position_no && <span className="muted" style={{ marginLeft: 4 }}>/ poz {b.position_no}</span>}
-                    <div className="muted" style={{ fontSize: 11 }}>{b.semi_finished_code || b.operation_name}</div>
+                    <div className="muted" style={{ fontSize: 11 }}>{b.semi_finished_code || b.operation_name} {b.semi_finished_name}</div>
+                    {b.material_unverified !== false && <div className="muted" style={{fontSize:11}}>{b.material_note}</div>}
                     <div style={{ fontSize: 11 }}>{fmt(b.produced_qty, 0)}/{fmt(b.planned_qty, 0)} ad · kalan {fmt(b.remaining_qty, 0)}</div>
                   </div>
                   <div className="gantt-track">
@@ -106,20 +113,20 @@ export default function GanttPanel({
             <table>
               <thead>
                 <tr>
-                  <th>Sipariş</th><th>Poz</th><th>Yarımamül</th><th>Operasyon</th><th>Başlangıç</th><th>Bitiş</th>
+                  <th>Sipariş / İş merkezi</th><th>Poz</th><th>Yarımamül</th><th>Operasyon</th><th>Başlangıç</th><th>Bitiş</th>
                   <th className="num">Plan adet</th><th className="num">Üretilen</th><th className="num">Kalan</th><th>Durum</th>
                 </tr>
               </thead>
               <tbody>
-                {g.bars.map((b) => (
+                {bars.map((b) => (
                   <tr key={b.plan_line_id}>
                     <td>
-                      <b>{b.order_no}</b>
+                      <b>{b.order_no}</b> <span className="muted">{b.work_center_code}</span>
                       {b.batch_order_nos.length > 0 && <div className="muted" style={{ fontSize: 11 }}>{b.batch_order_nos.join(", ")}</div>}
                       <div className="muted">{b.item_code}</div>
                     </td>
                     <td>{b.batch_no ? <span className="muted">—</span> : (b.position_no || <span className="muted">—</span>)}</td>
-                    <td><code>{b.semi_finished_code || "—"}</code></td>
+                    <td><code>{b.semi_finished_code || "—"}</code><div className="muted">{b.semi_finished_name}</div></td>
                     <td>{b.operation_name}</td>
                     <td>{b.planned_start}</td><td>{b.planned_end}</td>
                     <td className="num">{fmt(b.planned_qty, 0)}</td>

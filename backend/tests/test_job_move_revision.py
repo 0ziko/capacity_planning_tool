@@ -5,7 +5,7 @@ from datetime import timedelta
 from app.models import Order, Reservation
 from app.models import ProductionActual, Shipment
 from app.services.order_finished_netting import PROVENANCE_EXTERNAL, compute_order_demand_netting
-from tests.test_capacity_flow import _upload
+from tests.test_capacity_flow import _upload, _weekly_staffing
 from tests.test_revenue_modes import WEEK, _setup
 
 
@@ -35,6 +35,7 @@ def _two_wcs(client, auth):
             ["MOVE-X", "Gündüz", "0,1,2,3,4", "08:00", "18:00", 10, 4],
         ],
     )
+    _weekly_staffing(client, auth, [['MOVE-1', 10, 4, 5], ['MOVE-X', 10, 4, 5]])
     _upload(client, auth, "items", ["Stok Kodu", "Stok Adı", "Ürün Grubu"], [["MOVEA", "A", "G"], ["MOVEB", "B", "G"], ["MOVEC", "C", "G"], ["MOVE2", "İki op", "G"]])
     _upload(
         client,
@@ -126,7 +127,7 @@ def test_job_move_free_capacity_keeps_unrelated_and_same_wc(client, auth, db):
         assert client.post("/api/orders", headers=auth, json={"order_no": no, "due_date": due, "item_code": item, "quantity": qty}).status_code == 201
     _assert_job_move_clean_slate(db, order_nos)
 
-    planned = client.post("/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 2, "work_center_ids": [wc1, wcx], "mode": "due_date"}).json()
+    planned = _plan_with_ack(client, "/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 2, "work_center_ids": [wc1, wcx], "mode": "due_date"}).json()
     assert planned["created"] >= 3
 
     orders = {o["order_no"]: o for o in client.get("/api/orders", headers=auth).json()}
@@ -189,7 +190,7 @@ def test_job_move_overflow_bumps_only_same_wc(client, auth, db):
         assert client.post("/api/orders", headers=auth, json={"order_no": no, "due_date": due, "item_code": item, "quantity": qty}).status_code == 201
     _assert_job_move_clean_slate(db, order_nos)
 
-    client.post("/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 2, "work_center_ids": [wc1, wcx], "mode": "due_date"})
+    _plan_with_ack(client, "/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 2, "work_center_ids": [wc1, wcx], "mode": "due_date"})
     orders = {o["order_no"]: o for o in client.get("/api/orders", headers=auth).json()}
     bid = orders["JM-B"]["id"]
 
@@ -259,3 +260,5 @@ def test_due_date_revision_still_works(client, auth):
     assert ch.status_code == 200
     assert client.post(f"/api/plan/revisions/{rev['id']}/calculate", headers=auth).status_code == 200
     assert client.post(f"/api/plan/revisions/{rev['id']}/approve", headers=auth).json()["status"] == "applied"
+
+from tests.test_capacity_flow import _plan_with_ack

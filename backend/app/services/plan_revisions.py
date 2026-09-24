@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
@@ -15,8 +15,10 @@ from app.schemas import (
     PlanRevisionChangeOut,
     PlanRevisionCompareOut,
     PlanRevisionCreate,
+    PlanRevisionDiffSummary,
     PlanRevisionEventOut,
     PlanRevisionKpis,
+    PlanRevisionOrderDiff,
     PlanRevisionOut,
     REVISION_REASON_CODES,
 )
@@ -29,6 +31,10 @@ from app.services.plan_input_lock import plan_input_write_lock
 from app.services.plan_preflight import plan_preflight
 
 OPEN_STATUSES = ("draft", "calculated")
+# Haftalik is gucu taslak alanlari: normal vardiya + fazla mesai (18:00-21:00, kisi basi <= 2.5 sa)
+WC_WEEK_FIELDS = ("headcount", "efficient_hours_per_person", "working_days",
+                  "overtime_headcount", "overtime_days", "overtime_hours_per_person",
+                  "weekend_overtime_headcount", "weekend_overtime_days", "weekend_overtime_hours_per_person")
 
 
 class RevisionConflictError(Exception):
@@ -141,12 +147,25 @@ def _apply_changes(db: Session, rev: PlanRevision, *, revert: bool = False) -> N
             parsed: int | float | None
             if val in ("", None):
                 parsed = None
-            elif ch.field == "efficient_hours_per_person":
+            elif ch.field in ("efficient_hours_per_person", "overtime_hours_per_person", "weekend_overtime_hours_per_person"):
                 parsed = float(val)
             else:
                 parsed = int(float(val))
-            if ch.field in ("headcount", "efficient_hours_per_person", "working_days"):
+            if ch.field in WC_WEEK_FIELDS:
                 setattr(row, ch.field, parsed)
+            if ch.field == "overtime_headcount" and not parsed:
+                row.overtime_headcount = None
+            if ch.field == "weekend_overtime_headcount" and not parsed:
+                row.weekend_overtime_headcount = None
+            if not revert and "overtime_" in ch.field:
+                problem = cap.overtime_violation(
+                    row.work_center, row, overtime_headcount=row.overtime_headcount, overtime_days=row.overtime_days,
+                    overtime_hours=row.overtime_hours_per_person, emp_count=cap.employee_count(db, row.work_center),
+                    weekend_headcount=row.weekend_overtime_headcount, weekend_days=row.weekend_overtime_days,
+                    weekend_hours=row.weekend_overtime_hours_per_person, db=db,
+                )
+                if problem:
+                    raise ValueError(f"{row.work_center.code} {week.isoformat()}: {problem}")
     db.flush()
 
 
@@ -164,8 +183,12 @@ def _current_field_value(db: Session, body: PlanRevisionChangeIn) -> str:
             raise ValueError("Sipariste yalnizca revised_due_date veya job_move degistirilebilir")
         return order.revised_due_date.isoformat() if order.revised_due_date else ""
     if body.entity_type == "wc_week":
-        if body.field not in ("headcount", "efficient_hours_per_person", "working_days"):
+        if body.field not in WC_WEEK_FIELDS:
             raise ValueError("Haftalik is gucunde gecersiz alan")
+        if body.field == "overtime_hours_per_person" and body.new_value not in ("", None) and float(body.new_value) > cap.OVERTIME_MAX_HOURS + 1e-9:
+            raise ValueError(f"Kisi basi fazla mesai en fazla {cap.OVERTIME_MAX_HOURS} saat olabilir (18:00-21:00)")
+        if body.field == "weekend_overtime_hours_per_person" and body.new_value not in ("", None) and float(body.new_value) > cap.WEEKEND_OVERTIME_MAX_HOURS + 1e-9:
+            raise ValueError(f"Kisi basi hafta sonu fazla mesai en fazla {cap.WEEKEND_OVERTIME_MAX_HOURS} saat olabilir (08:00-18:00)")
         parts = (body.extra_key or "").split("|")
         if len(parts) != 2:
             raise ValueError("wc_week extra_key wc_id|hafta (Pazartesi) olmali")
@@ -190,8 +213,140 @@ def _req(rev: PlanRevision) -> AutoPlanRequest:
         weeks=rev.weeks,
         work_center_ids=_ids(rev.wc_ids_json) or None,
         replace_existing=True,
+        material_policy=rev.material_policy or "conditional",
+        placement=rev.placement or "flow",  # type: ignore[arg-type]
+        jit_buffer_days=int(rev.jit_buffer_days if rev.jit_buffer_days is not None else 2),
+        slip_mode=(rev.slip_mode or "chain"),  # type: ignore[arg-type]
+        use_overtime=bool(rev.use_overtime if rev.use_overtime is not None else True),
+        prep_fill=bool(rev.prep_fill if rev.prep_fill is not None else True),
         mode=rev.mode,  # type: ignore[arg-type]
     )
+
+
+def _row_date(v) -> date | None:
+    if not v:
+        return None
+    try:
+        return date.fromisoformat(str(v)[:10])
+    except ValueError:
+        return None
+
+
+def _row_effective_due(row: dict) -> date | None:
+    """order_schedule satırı etkin termini taşımaz; bitiş − gecikme farkından geri türetilir."""
+    end = _row_date(row.get("planned_end"))
+    late = row.get("lateness_days")
+    if end is not None and late is not None:
+        return end - timedelta(days=int(late))
+    return _row_date(row.get("due_date"))
+
+
+def _job_move_start(value: str) -> date | None:
+    try:
+        return _row_date((json.loads(value or "{}") or {}).get("start_date"))
+    except (ValueError, TypeError):
+        return None
+
+
+def build_order_diffs(
+    base_rows: list[dict],
+    prop_rows: list[dict],
+    changes,
+    bumped_orders: list[str],
+) -> tuple[list[PlanRevisionOrderDiff], PlanRevisionDiffSummary]:
+    """Canlı ve önerilen sipariş takvimini sipariş bazında karşılaştırır.
+
+    Tüm alanlar iki takvimin kesişim/birleşiminden türetilir; ek sorgu yapılmaz, bu yüzden
+    hesaplama anındaki anlık görüntüyle (fingerprint) tutarlı kalır.
+    """
+    base = {int(r["order_id"]): r for r in base_rows if r.get("order_id") is not None}
+    prop = {int(r["order_id"]): r for r in prop_rows if r.get("order_id") is not None}
+    requested: dict[int, object] = {}
+    for ch in changes or []:
+        if getattr(ch, "entity_type", "") == "order" and getattr(ch, "field", "") in ("revised_due_date", "job_move"):
+            requested[int(ch.entity_id)] = ch
+    bumped = set(bumped_orders or [])
+    diffs: list[PlanRevisionOrderDiff] = []
+    summary = PlanRevisionDiffSummary()
+    for oid in sorted(set(base) | set(prop)):
+        b, p = base.get(oid, {}), prop.get(oid, {})
+        src = p or b
+        end_b, end_a = _row_date(b.get("planned_end")), _row_date(p.get("planned_end"))
+        st_b, st_a = str(b.get("plan_status") or ""), str(p.get("plan_status") or "")
+        ch = requested.get(oid)
+        kind = getattr(ch, "field", "") if ch else ""
+        due_before = _row_effective_due(b) if b else _row_date(src.get("due_date"))
+        if kind == "revised_due_date":
+            due_after = _row_date(ch.new_value) or _row_date(src.get("due_date"))
+        else:
+            due_after = _row_effective_due(p) if p else due_before
+        delta = (end_a - end_b).days if end_a and end_b else None
+        pushed = bool(delta is not None and delta > 0) or (end_b is not None and end_a is None and st_a in ("unplanned", "partial"))
+        pulled = bool(delta is not None and delta < 0)
+        # Talep edilen siparişin yeni termine yetişememesi "karşılanamayan" olarak sayılır;
+        # "yeni geç" yalnızca talep dışı (yan etki) siparişleri işaretler.
+        newly_late = ch is None and st_b in ("on_time", "no_ops", "") and st_a == "late"
+        met: bool | None = None
+        if ch is not None:
+            met = bool(end_a is not None and due_after is not None and end_a <= due_after and st_a not in ("unplanned", "partial"))
+        row = PlanRevisionOrderDiff(
+            order_id=oid,
+            order_no=str(src.get("order_no") or ""),
+            position_no=str(src.get("position_no") or ""),
+            customer=str(src.get("customer") or ""),
+            item_code=str(src.get("item_code") or ""),
+            quantity=float(src.get("quantity") or 0),
+            due_date=_row_date(src.get("due_date")),
+            due_before=due_before,
+            due_after=due_after,
+            end_before=end_b,
+            end_after=end_a,
+            delta_days=delta,
+            status_before=st_b,
+            status_after=st_a,
+            lateness_before=b.get("lateness_days") if b else None,
+            lateness_after=p.get("lateness_days") if p else None,
+            change_kind=kind,
+            change_id=getattr(ch, "id", None) if ch else None,
+            requested=ch is not None,
+            met=met,
+            pushed=pushed,
+            pulled_forward=pulled,
+            newly_late=newly_late,
+            bumped=str(src.get("order_no") or "") in bumped,
+        )
+        diffs.append(row)
+        if row.requested:
+            summary.requested += 1
+            if row.met:
+                summary.met += 1
+            else:
+                summary.unmet += 1
+        if row.pushed:
+            summary.pushed += 1
+        if row.newly_late:
+            summary.newly_late += 1
+        if row.pulled_forward:
+            summary.pulled_forward += 1
+        if row.bumped:
+            summary.bumped += 1
+        if not row.requested and delta in (0, None) and st_a == st_b:
+            summary.unchanged += 1
+
+    def _rank(r: PlanRevisionOrderDiff):
+        # Önce karşılanamayan talepler, sonra karşılananlar, sonra yeni geç kalanlar, sonra en çok kayanlar.
+        if r.requested:
+            return (0 if not r.met else 1, -(r.delta_days or 0), r.order_no)
+        if r.newly_late:
+            return (2, -(r.delta_days or 0), r.order_no)
+        if r.pushed or r.bumped:
+            return (3, -(r.delta_days or 0), r.order_no)
+        if r.pulled_forward:
+            return (4, r.delta_days or 0, r.order_no)
+        return (5, 0, r.order_no)
+
+    diffs.sort(key=_rank)
+    return diffs, summary
 
 
 def _compare_from_snapshots(rev: PlanRevision) -> PlanRevisionCompareOut | None:
@@ -200,13 +355,17 @@ def _compare_from_snapshots(rev: PlanRevision) -> PlanRevisionCompareOut | None:
         return None
     base = json.loads(by_kind["baseline"].payload_json or "{}")
     prop = json.loads(by_kind["proposed"].payload_json or "{}")
+    bumped = prop.get("bumped_orders") or []
+    diffs, summary = build_order_diffs(base.get("schedule") or [], prop.get("schedule") or [], rev.changes, bumped)
     return PlanRevisionCompareOut(
         baseline=PlanRevisionKpis(**(base.get("kpis") or {})),
         proposed=PlanRevisionKpis(**(prop.get("kpis") or {})),
         schedule_rows=prop.get("schedule") or [],
-        bumped_orders=prop.get("bumped_orders") or [],
+        bumped_orders=bumped,
         insert_notes=prop.get("insert_notes") or [],
         unplanned=prop.get("unplanned") or [],
+        order_diffs=diffs,
+        diff_summary=summary,
     )
 
 
@@ -219,6 +378,12 @@ def to_out(rev: PlanRevision, *, apply_message: str = "") -> PlanRevisionOut:
         note=rev.note or "",
         start_week=rev.start_week,
         weeks=rev.weeks,
+        material_policy=rev.material_policy or "conditional",
+        placement=rev.placement or "flow",
+        jit_buffer_days=int(rev.jit_buffer_days if rev.jit_buffer_days is not None else 2),
+        slip_mode=rev.slip_mode or "chain",
+        use_overtime=bool(rev.use_overtime if rev.use_overtime is not None else True),
+        prep_fill=bool(rev.prep_fill if rev.prep_fill is not None else True),
         mode=rev.mode,
         work_center_ids=_ids(rev.wc_ids_json),
         replace_manual=bool(rev.replace_manual),
@@ -291,6 +456,12 @@ def create_revision(db: Session, body: PlanRevisionCreate, username: str) -> Pla
         note=body.note or "",
         start_week=start,
         weeks=body.weeks,
+        material_policy=body.material_policy,
+        placement=body.placement,
+        jit_buffer_days=body.jit_buffer_days,
+        slip_mode=body.slip_mode,
+        use_overtime=body.use_overtime,
+        prep_fill=body.prep_fill,
         mode=body.mode,
         wc_ids_json=json.dumps(wc_ids),
         horizon_key=key,
@@ -408,7 +579,9 @@ def _simulate_revision_preview(db: Session, rev: PlanRevision, req: AutoPlanRequ
             keep_line_mode = True
         else:
             sim = planning.simulate(db, req)
-            extra = {"unplanned": sim.unplanned, "skipped": sim.skipped}
+            extra = {"unplanned": sim.unplanned, "skipped": sim.skipped,
+                     "insert_notes": [f"{n['label']}: {n['detail']}" for n in (sim.placement_notes or [])],
+                     "placement_notes": sim.placement_notes or [], "overtime_proposals": sim.overtime_proposals or []}
             apply_path = "auto"
             keep_line_mode = False
         return sim, extra, apply_path, keep_line_mode
@@ -416,12 +589,42 @@ def _simulate_revision_preview(db: Session, rev: PlanRevision, req: AutoPlanRequ
         nested.rollback()
 
 
-def calculate(db: Session, revision_id: int, username: str) -> PlanRevisionOut:
+def delete_changes(db: Session, revision_id: int, change_ids: list[int], username: str) -> PlanRevisionOut:
+    """Birden fazla taslak girdisini tek işlemde çıkarır (ör. karşılanamayan talepleri geri çekme)."""
+    rev = _get(db, revision_id)
+    if rev.status not in MUTABLE_STATUSES:
+        raise ValueError("Bu revizyondan girdi silinemez")
+    wanted = {int(i) for i in change_ids}
+    rows = db.query(PlanRevisionChange).filter(PlanRevisionChange.revision_id == rev.id, PlanRevisionChange.id.in_(wanted)).all()
+    if len(rows) != len(wanted):
+        missing = sorted(wanted - {r.id for r in rows})
+        raise ValueError(f"Girdi satiri yok: {', '.join(str(m) for m in missing)}")
+    labels = sorted({f"{r.entity_type}.{r.field}" for r in rows})
+    for r in rows:
+        db.delete(r)
+    rev.status = "draft"
+    rev.calculated_at = None
+    rev.input_fingerprint = ""
+    db.query(PlanRevisionSnapshot).filter(PlanRevisionSnapshot.revision_id == rev.id).delete()
+    _add_event(db, rev, "change", username, f"toplu silindi {len(rows)} girdi ({', '.join(labels)})")
+    db.commit()
+    db.expire_all()
+    return to_out(_get(db, rev.id))
+
+
+def calculate(db: Session, revision_id: int, username: str, *, commit: bool = True) -> PlanRevisionOut:
+    """commit=False: arka plan isi kendi islemi icinde sonucu ve is kaydini birlikte kalici yapar."""
     rev = _get(db, revision_id)
     if rev.status not in MUTABLE_STATUSES:
         raise ValueError("Bu revizyon hesaplanamaz")
     req = _req(rev)
     wc_ids = req.work_center_ids
+    # Ucuz on kontrol en basta: rotasiz acik siparis varsa dakikalar suren taban takvimi/fingerprint
+    # hesabina girmeden ayni hatayla hemen doner (rota eksigi taslak girdilerinden bagimsizdir).
+    early = plan_preflight(db, req)
+    if not early.can_plan and early.no_routing:
+        codes = ", ".join(r.item_code for r in early.no_routing[:8])
+        raise ValueError(f"Rotasi olmayan stok var; hesaplanamaz: {codes}")
     input_fp = compute_plan_input_fingerprint(db, req)
 
     baseline_sched = orders_svc.order_schedule(db, wc_ids)
@@ -453,6 +656,9 @@ def calculate(db: Session, revision_id: int, username: str) -> PlanRevisionOut:
         "weeks": req.weeks,
         "work_center_ids": wc_ids or [],
         "input_fingerprint": input_fp,
+        "unplanned": extra.get("unplanned") or [],
+        "placement_notes": extra.get("placement_notes") or [],
+        "overtime_proposals": extra.get("overtime_proposals") or [],
     }
 
     db.query(PlanRevisionSnapshot).filter(PlanRevisionSnapshot.revision_id == rev.id).delete()
@@ -491,12 +697,28 @@ def calculate(db: Session, revision_id: int, username: str) -> PlanRevisionOut:
     rev.calculated_at = datetime.now()
     rev.input_fingerprint = input_fp
     _add_event(db, rev, "calculate", username, f"{proposed_kpis.line_count} satir, fp={input_fp[:12]}")
+    if not commit:
+        db.flush()
+        db.expire_all()  # silinen/yeni snapshot koleksiyonu ayni islem icinde taze okunsun
+        return to_out(_get(db, rev.id))
     db.commit()
     db.expire_all()
     return to_out(_get(db, rev.id))
 
 
-def approve_and_apply(db: Session, revision_id: int, username: str) -> PlanRevisionOut:
+def revision_preflight(db: Session, revision_id: int):
+    rev = _get(db, revision_id)
+    req = _req(rev)
+    nested = db.begin_nested()
+    try:
+        _apply_changes(db, rev, revert=False)
+        return plan_preflight(db, req)
+    finally:
+        nested.rollback()
+        db.expire_all()
+
+
+def approve_and_apply(db: Session, revision_id: int, username: str, missing_headcount_ack: str | None = None) -> PlanRevisionOut:
     rev = _get(db, revision_id)
     if rev.status == "applied":
         raise RevisionConflictError("Revizyon zaten uygulandi")
@@ -515,7 +737,9 @@ def approve_and_apply(db: Session, revision_id: int, username: str) -> PlanRevis
         if current_fp != rev.input_fingerprint:
             raise RevisionConflictError("Veri degisti; yeniden hesaplayin")
 
-        check = plan_preflight(db, req)
+        check = revision_preflight(db, revision_id)
+        if check.missing_headcount_token and missing_headcount_ack != check.missing_headcount_token:
+            raise RevisionConflictError("Haftalık kişi sayısı eksik; girişleri düzeltin veya ön kontrolde sıfır kapasiteyi onaylayın.")
         if not check.can_plan:
             raise ValueError("Rotasi olmayan stok var; uygulanamaz")
 
@@ -541,6 +765,7 @@ def approve_and_apply(db: Session, revision_id: int, username: str) -> PlanRevis
             replace_manual=bool(rev.replace_manual),
             keep_line_mode=bool(apply_payload.get("keep_line_mode")),
             message_tag="revizyon onay snapshot",
+            overtime_proposals=apply_payload.get("overtime_proposals") or [],
         )
         now = datetime.now()
         rev.status = "applied"
@@ -550,6 +775,15 @@ def approve_and_apply(db: Session, revision_id: int, username: str) -> PlanRevis
         _add_event(db, rev, "approve", username, "onayla ve devreye al")
         _add_event(db, rev, "apply", username, result.get("message") or "")
         db.commit()
+        try:
+            from app.services import plan_report as report_svc
+            report_svc.generate_and_store(db, req, {"unplanned": apply_payload.get("unplanned") or [],
+                                                     "placement_notes": apply_payload.get("placement_notes") or [],
+                                                     "overtime_proposals": apply_payload.get("overtime_proposals") or [],
+                                                     "slip_mode": rev.slip_mode or "chain", "created": len(plan_lines)}, kind="revision", username=username, revision_id=rev.id)
+            db.commit()
+        except Exception:  # rapor onayi bozmaz
+            db.rollback()
     db.expire_all()
     return to_out(_get(db, rev.id), apply_message=result.get("message") or "")
 

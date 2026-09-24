@@ -125,13 +125,13 @@ def test_stale_preview_cannot_overwrite_changed_record(db, case):
         mes.apply_import(db, target, p["token"], "test")
 
 
-def test_ambiguous_times_preserved_unresolved_without_earned_hours(db, case):
+def test_ambiguous_times_preserve_stock_without_earned_hours(db, case):
     case["ops"][1][0].cycle_time_sec = 7200
     db.commit()
     p, _ = import_rows(db, case, [("a", DAY, case["shared"], 10)])
-    assert p["counts"]["unresolved"] == 1
+    assert p["counts"]["free_stock"] == 1
     assert p["standard_hours"] == 0
-    assert mes.balances([mes.detail_dict(d) for d in db.query(MesDetail).all()]) == {}
+    assert mes.balances([mes.detail_dict(d) for d in db.query(MesDetail).all()])[case["shared"]] == 10
 
 
 def test_weekly_plan_early_output_and_frozen_baseline(db, case):
@@ -159,7 +159,7 @@ def test_common_pool_prioritizes_finished_week_not_customer_due_date(db, case):
     plan(db, case, 1, DAY + timedelta(weeks=1), 40, final=True)
     import_rows(db, case, [("a", DAY, case["shared"], 50)])
     allocations = []
-    credit, _ = produced_qty_map(db, as_of=DAY, mes_allocations=allocations)
+    credit, _ = produced_qty_map(db, include_mes=True, as_of=DAY, mes_allocations=allocations)
     assert credit[(case["orders"][0].id, case["ops"][0][0].id)] == 30
     assert credit[(case["orders"][1].id, case["ops"][1][0].id)] == 20
     assert sum(a["quantity"] for a in allocations) == 50
@@ -172,14 +172,14 @@ def test_split_finish_plan_cannot_take_all_stock_before_other_fg(db, case):
     plan(db, case, 1, DAY + timedelta(weeks=1), 40, final=True)
     import_rows(db, case, [("a", DAY, case["shared"], 60)])
     allocations = []
-    produced_qty_map(db, as_of=DAY, mes_allocations=allocations)
+    produced_qty_map(db, include_mes=True, as_of=DAY, mes_allocations=allocations)
     assert [(a["finished_item_code"], a["quantity"]) for a in allocations] == [
         (case["items"][0].code, 10), (case["items"][1].code, 40), (case["items"][0].code, 10)]
 
 
 def test_no_finish_plan_leaves_common_pool_unassigned(db, case):
     import_rows(db, case, [("a", DAY, case["shared"], 50)])
-    credits, _ = produced_qty_map(db, as_of=DAY)
+    credits, _ = produced_qty_map(db, include_mes=True, as_of=DAY)
     assert sum(credits.values()) == 0
 
 
@@ -200,7 +200,7 @@ def test_finished_consumption_cannot_be_credited_to_second_product(db, case):
     plan(db, case, 1, DAY, 100, final=True)
     import_rows(db, case, [("w", DAY, case["shared"], 50), ("f", DAY, case["items"][0].code, 40)])
     allocations = []
-    credits, _ = produced_qty_map(db, as_of=DAY, mes_allocations=allocations)
+    credits, _ = produced_qty_map(db, include_mes=True, as_of=DAY, mes_allocations=allocations)
     assert credits[(case["orders"][0].id, case["ops"][0][1].id)] == 40
     assert sum(a["quantity"] for a in allocations) == 10
     assert allocations[0]["finished_item_code"] == case["items"][1].code
@@ -219,7 +219,7 @@ def test_batch_credits_whole_batch_not_only_anchor_order(db, case):
     db.commit()
     import_rows(db, case, [("a", DAY, case["shared"], 150)])
     allocations = []
-    credits, _ = produced_qty_map(db, as_of=DAY, mes_allocations=allocations)
+    credits, _ = produced_qty_map(db, include_mes=True, as_of=DAY, mes_allocations=allocations)
     assert credits[(first.id, case["ops"][0][0].id)] == 150
     assert sum(a["quantity"] for a in allocations) == 150
 
@@ -267,3 +267,307 @@ def test_sunday_included_and_missing_capacity_has_no_fake_percentage(db, case):
     r = mes_progress.progress(db, sunday)
     assert r["daily"][6]["hours"] == 2
     assert r["summary"]["output_vs_plan_pct"] is None
+
+
+@pytest.mark.parametrize("unknown_machine", [False, True])
+def test_mes_outside_route_credits_planned_center_once(db, case, unknown_machine, monkeypatch):
+    from app.core.config import get_settings
+    from app.services.mes_actuals import measure, weekly_kpis
+    monkeypatch.setattr(get_settings(), "production_source", "mes")
+    actual_wc = WorkCenter(code="ACTUAL-"+uuid4().hex[:7], name="Actual", is_planned=True)
+    db.add(actual_wc); db.flush()
+    if unknown_machine:
+        case["machine"].code="UNKNOWN-"+uuid4().hex[:7]
+        code=case["machine"].code
+        db.delete(case["machine"])
+    else:
+        case["machine"].work_center_id=actual_wc.id
+        code=case["machine"].code
+    db.commit()
+    slot=plan(db,case,0,DAY,100)
+    plan(db,case,0,DAY,100,final=True)
+    content=workbook([["outside",DAY,case["shared"],30,code]])
+    preview=mes.preview(db,content)
+    mapping=preview["rows"][0]["mapping"]
+    assert preview["counts"]["unresolved"]==0
+    assert mapping["resource_deviation"] is True
+    assert mapping["work_center_id"]==case["wc"].id
+    assert preview["standard_hours"]==30
+    mes.apply_import(db,content,preview["token"],"test");db.commit()
+    assert mes.preview(db,content)["counts"]["unchanged"]==1
+    assert measure(db,DAY)["matches"][slot.id]["qty"]==30
+    kpis=weekly_kpis(db,[case["wc"].id,actual_wc.id],DAY,DAY,DAY)
+    assert kpis[(case["wc"].id,DAY)]["plan_adherence_remaining_hours"]==120
+    assert (actual_wc.id,DAY) not in kpis
+    assert produced_qty_map(db,as_of=DAY)[0][(case["orders"][0].id,case["ops"][0][0].id)]==30
+    assert case["ops"][0][0].work_center_id==case["wc"].id
+
+
+def test_outside_route_does_not_guess_conflicting_standard_times(db,case):
+    case["ops"][1][0].cycle_time_sec=7200
+    db.commit()
+    content=workbook([["ambiguous-outside",DAY,case["shared"],20,"UNKNOWN"]])
+    result=mes.preview(db,content)
+    assert result["counts"]["free_stock"]==1
+    assert "standart süre" in result["rows"][0]["mapping"]["reason"]
+    assert result["standard_hours"]==0
+
+
+def test_outside_route_finished_goods_still_create_single_receipt(db,case):
+    content=workbook([["outside-fg",DAY,case["items"][0].code,12,"UNLISTED"]])
+    result=mes.preview(db,content)
+    assert result["counts"]["unresolved"]==0
+    mes.apply_import(db,content,result["token"],"test");db.commit()
+    again=mes.preview(db,content)
+    mes.apply_import(db,content,again["token"],"test");db.commit()
+    receipts=db.query(StockReceipt).filter_by(source="mes").all()
+    assert len(receipts)==1 and receipts[0].quantity==12
+
+
+@pytest.mark.parametrize("conflicting_parent", [False, True])
+def test_wip_route_uses_parent_bom_without_orders(db, conflicting_parent):
+    token=str(int(uuid4().hex[:8],16))
+    wc=WorkCenter(code="PARENT-"+token,name="Weld",is_planned=True)
+    wip=Item(code="5"+token+"-15",name="WIP")
+    parents=[Item(code="6"+token+str(i),name="FG") for i in range(2)]
+    db.add_all([wc,wip,*parents]);db.flush()
+    machine=Machine(code="PARENT-M-"+token,work_center_id=wc.id)
+    code="5"+token+"-23"
+    previous="5"+token+"-22"
+    op=RoutingOperation(item_id=wip.id,seq=20,operation_name="Weld",semi_finished_code=code,
+                        work_center_id=wc.id,cycle_time_sec=900)
+    db.add_all([machine,op])
+    for i,parent in enumerate(parents):
+        db.add_all([BomLine(item_id=parent.id,component_code=previous,source_wip=wip.code,recipe_seq=10,quantity=3 if conflicting_parent and i else 2),
+                    BomLine(item_id=parent.id,component_code=code,source_wip=wip.code,recipe_seq=20,quantity=1)])
+    db.commit()
+    assert not wip.bom_lines
+    content=workbook([["parent-"+token,DAY,code,4,machine.code]])
+    result=mes.preview(db,content)
+    mapping=result["rows"][0]["mapping"]
+    if conflicting_parent:
+        assert result["counts"]["pending_consumption"]==1
+        assert result["rows"][0]["preview_category"] == "pending"
+        assert mapping["status"] == "mapped" and mapping["inputs"] == {}
+        assert mapping["input_candidates"] == [{previous: 2}, {previous: 3}]
+        assert result["standard_hours"] == 1
+        assert "tüketim" in mapping["reason"]
+        return
+    assert mapping["status"]=="mapped"
+    assert mapping["inputs"]=={previous:2}
+    assert mapping["candidates"]==sorted(p.code for p in parents)
+    assert result["standard_hours"]==1
+    mes.apply_import(db,content,result["token"],"test");db.commit()
+    assert mes.preview(db,content)["counts"]["unchanged"]==1
+    pool=mes.balances([mes.detail_dict(d) for d in db.query(MesDetail).all()])
+    assert pool[code]==4 and pool[previous]==-8
+
+
+def test_first_wip_operation_uses_parent_bom_without_fake_predecessor(db):
+    token=str(int(uuid4().hex[:8],16))
+    wc=WorkCenter(code="FIRST-"+token,name="Weld")
+    wip=Item(code="5"+token+"-15",name="WIP")
+    fg=Item(code="6"+token,name="FG")
+    db.add_all([wc,wip,fg]);db.flush()
+    code="5"+token+"-23"
+    db.add(BomLine(item_id=fg.id,component_code=code,source_wip=wip.code,recipe_seq=10,quantity=1))
+    db.add(RoutingOperation(item_id=wip.id,seq=10,operation_name="Weld",semi_finished_code=code,work_center_id=wc.id,cycle_time_sec=904.32))
+    db.commit()
+    result=mes.preview(db,workbook([["first-"+token,DAY,code,5,"UNLISTED"]]))
+    assert result["counts"]["unresolved"]==0
+    assert result["rows"][0]["mapping"]["inputs"]=={}
+    assert result["standard_hours"]==pytest.approx(1.256)
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_successive_wip_route_preserves_pieces_despite_parent_component_ratios(db,conflict):
+    token=str(int(uuid4().hex[:8],16))
+    wc=WorkCenter(code="ASM-"+token,name="Press")
+    wip=Item(code="5"+token+"-11",name="Assembly WIP")
+    parents=[Item(code="6"+token+str(i),name="FG") for i in range(2)]
+    db.add_all([wc,wip,*parents]);db.flush()
+    previous="5"+token+"-03"
+    db.add_all([RoutingOperation(item_id=wip.id,seq=10,operation_name="Forma",semi_finished_code=previous,work_center_id=wc.id,cycle_time_sec=76.8),
+                RoutingOperation(item_id=wip.id,seq=20,operation_name="Etek Kesme",semi_finished_code=wip.code,work_center_id=wc.id,cycle_time_sec=48)])
+    for i,parent in enumerate(parents):
+        quantity=(i+1)*2
+        db.add_all([BomLine(item_id=parent.id,component_code=wip.code,source_wip=wip.code,recipe_seq=0,quantity=quantity),
+                    BomLine(item_id=parent.id,component_code=previous,source_wip=wip.code,recipe_seq=10,quantity=quantity*(3 if conflict and i else 2))])
+    db.commit()
+    content=workbook([["asm-"+token,DAY,wip.code,10,"UNLISTED"]])
+    result=mes.preview(db,content)
+    mapping=result["rows"][0]["mapping"]
+    assert mapping["status"]=="mapped"
+    assert mapping["inputs"]=={previous:1}
+    assert result["standard_hours"]==pytest.approx(10*48/3600)
+    assert mapping["candidates"]==sorted(p.code for p in parents)
+    mes.apply_import(db,content,result["token"],"test");db.commit()
+    pool=mes.balances([mes.detail_dict(d) for d in db.query(MesDetail).all()])
+    assert pool[wip.code]==10 and pool[previous]==-10
+    assert mes.preview(db,content)["counts"]["unchanged"]==1
+
+
+
+def test_preview_maps_repeated_material_machine_once_but_refreshes_next_request(db,case,monkeypatch):
+    original=mes.Mapper.map
+    calls=[]
+    def counted(self,row):
+        calls.append((row["material_code"],row["machine_code"]))
+        return original(self,row)
+    monkeypatch.setattr(mes.Mapper,"map",counted)
+    content=workbook([[f"repeat-{i}",DAY,case["shared"],1,case["machine"].code] for i in range(50)])
+    first=mes.preview(db,content)
+    assert len(calls)==1 and first["standard_hours"]==50
+    for op,_ in case["ops"]:op.cycle_time_sec=1800
+    db.commit()
+    second=mes.preview(db,content)
+    assert len(calls)==2 and second["standard_hours"]==25
+    assert first["token"]!=second["token"]
+
+
+def test_scoped_mapper_preserves_indirect_parents_and_ignores_unrelated_catalog(db):
+    token=str(int(uuid4().hex[:8],16))
+    wc=WorkCenter(code="SCOPE-"+token,name="Scope")
+    wip=Item(code="5"+token+"-11",name="WIP")
+    fg=Item(code="6"+token,name="FG")
+    unrelated=Item(code="6"+token+"9",name="Unrelated")
+    db.add_all([wc,wip,fg,unrelated]);db.flush()
+    code="5"+token+"-03"
+    db.add_all([BomLine(item_id=fg.id,component_code=wip.code,source_wip=wip.code,recipe_seq=0,quantity=1),
+        BomLine(item_id=wip.id,component_code="100-test",source_wip=wip.code,recipe_seq=11,quantity=1),
+        RoutingOperation(item_id=wip.id,seq=10,operation_name="Forma",semi_finished_code=code,work_center_id=wc.id,cycle_time_sec=60)])
+    db.commit()
+    row={"material_code":code,"machine_code":"UNLISTED"}
+    full=mes.Mapper(db)
+    scoped=mes.Mapper(db,{code},{"UNLISTED"})
+    assert unrelated.code not in scoped.items
+    assert scoped.map(row)==full.map(row)
+    assert scoped.map(row)["candidates"]==[fg.code]
+
+
+
+def test_unknown_material_is_free_stock_without_production_credit_and_idempotent(db,case,client,auth):
+    code="5"+str(int(uuid4().hex[:8],16))+"-13"
+    content=workbook([["free-a",DAY,code,6,case["machine"].code],["free-b",DAY,code,7,case["machine"].code]])
+    p=mes.preview(db,content)
+    assert p["counts"]["free_stock"]==2 and p["counts"]["unresolved"]==0
+    assert p["standard_hours"]==0 and mes.free_stock_rows(db)==[]
+    mes.apply_import(db,content,p["token"],"test");db.commit()
+    again=mes.preview(db,content)
+    mes.apply_import(db,content,again["token"],"test");db.commit()
+    rows=client.get("/api/mes/free-stock",headers=auth).json()
+    assert len(rows)==1 and rows[0]["quantity"]==13
+    assert db.query(StockReceipt).filter_by(source="mes").count()==0
+    assert produced_qty_map(db,include_mes=True)[0]=={}
+    report=mes_progress.progress(db,DAY)
+    assert report["summary"]["actual_hours"]==0 and report["unresolved"]==[]
+    assert report["free_stock"][0]["quantity"]==13
+    changed=workbook([["free-a",DAY,code,2,case["machine"].code]])
+    mes.apply_import(db,changed,mes.preview(db,changed)["token"],"test");db.commit()
+    assert mes.free_stock_rows(db)[0]["quantity"]==9
+    assert mes.free_stock_rows(db,DAY-timedelta(days=1))==[]
+    from app.services.mes_export import export_report
+    from openpyxl import load_workbook
+    wb=load_workbook(BytesIO(export_report(mes_progress.progress(db,DAY))))
+    assert wb["Tanım bekleyen serbest stok"]["B2"].value==9
+
+
+def test_free_stock_moves_to_mapped_pool_once_only_after_definition_and_reimport(db,case):
+    code="5"+str(int(uuid4().hex[:8],16))+"-13"
+    content=workbook([["free-remap",DAY,code,6,case["machine"].code]])
+    mes.apply_import(db,content,mes.preview(db,content)["token"],"test");db.commit()
+    item=Item(code=code,name="Now defined")
+    db.add(item);db.commit()
+    # Partially created master data must not lose already accepted free stock.
+    mes.apply_import(db,content,mes.preview(db,content)["token"],"test");db.commit()
+    assert mes.free_stock_rows(db)[0]["quantity"]==6
+    db.add_all([BomLine(item_id=case["items"][0].id,component_code=code,source_wip=code,recipe_seq=10,quantity=1),
+                RoutingOperation(item_id=item.id,seq=10,operation_name="New",semi_finished_code=code,work_center_id=case["wc"].id,cycle_time_sec=60)])
+    db.commit()
+    db.expire_all()  # Import preview is a new request after master-data edits.
+    p=mes.preview(db,content)
+    assert p["rows"][0]["mapping"]["status"]=="mapped"
+    assert mes.free_stock_rows(db)[0]["quantity"]==6
+    mes.apply_import(db,content,p["token"],"test");db.commit()
+    assert mes.free_stock_rows(db)==[]
+    assert mes.balances([mes.detail_dict(d) for d in db.query(MesDetail).all()])[code]==6
+
+
+def test_known_wip_with_missing_route_preserves_output_in_free_stock(db,case):
+    code="5"+str(int(uuid4().hex[:8],16))+"-13"
+    db.add(Item(code=code,name="Known but incomplete"));db.commit()
+    p=mes.preview(db,workbook([["known-no-route",DAY,code,6,"UNKNOWN"]]))
+    assert p["counts"]["unresolved"]==0 and p["counts"]["free_stock"]==1
+
+
+
+def test_wip_route_predecessor_wins_over_later_bom_component_and_nested_use(db):
+    token=str(int(uuid4().hex[:8],16))
+    wc=WorkCenter(code="PIECES-"+token,name="Heat")
+    code="5"+token+"-02";previous="5"+token+"-01";component="5"+token+"-19"
+    wip=Item(code=code,name="WIP");fg=Item(code="6"+token,name="FG")
+    db.add_all([wc,wip,fg]);db.flush()
+    db.add_all([RoutingOperation(item_id=wip.id,seq=10,operation_name="Form",semi_finished_code=previous,work_center_id=wc.id,cycle_time_sec=60),
+        RoutingOperation(item_id=wip.id,seq=20,operation_name="Heat",semi_finished_code=code,work_center_id=wc.id,cycle_time_sec=186.24),
+        BomLine(item_id=fg.id,component_code=code,source_wip=code,recipe_seq=0,quantity=2),
+        BomLine(item_id=fg.id,component_code=previous,source_wip=code,recipe_seq=10,quantity=2),
+        BomLine(item_id=fg.id,component_code=component,source_wip=code,recipe_seq=21,quantity=3),
+        BomLine(item_id=fg.id,component_code=code,source_wip="5999999-23",recipe_seq=11,quantity=1)])
+    db.commit()
+    content=workbook([["pieces-in",DAY,previous,4,"UNLISTED"],["pieces-out",DAY,code,4,"UNLISTED"]])
+    p=mes.preview(db,content)
+    output=next(r for r in p["rows"] if r["material_code"]==code)
+    assert output["mapping"]["status"]=="mapped"
+    assert output["mapping"]["inputs"]=={previous:1}
+    assert output["mapping"]["standard_unit_hours"]==pytest.approx(186.24/3600)
+    pool=mes.balances(p["rows"])
+    assert pool[previous]==0 and pool[code]==4
+    assert component not in output["mapping"]["inputs"]
+
+
+@pytest.mark.parametrize("qty", [0, 7])
+def test_preview_free_stock_is_not_consumption_reconciliation(db, case, qty):
+    code = "5" + str(int(uuid4().hex[:8], 16)) + "-13"
+    content = workbook([["unknown-review", DAY, code, qty, "UNKNOWN"],
+                        ["normal-review", DAY, case["shared"], 2, case["machine"].code]])
+    result = mes.preview(db, content)
+    assert result["counts"]["free_stock"] == 1
+    assert result["counts"]["pending_consumption"] == 0
+    assert [r["preview_category"] for r in result["rows"]] == ["free_stock", "mapped"]
+    assert result["rows"][0]["mapping"]["consumption_status"] == "pending"
+    mes.apply_import(db, content, result["token"], "test"); db.commit()
+    assert mes.preview(db, content)["counts"]["unchanged"] == 2
+
+
+def test_preview_categories_separate_conflicting_time_and_consumption():
+    assert mes.preview_category({"status":"mapped", "consumption_status":"pending"}) == "pending"
+    assert mes.preview_category({"status":"free_stock", "consumption_status":"pending",
+                                 "input_candidates":[{"A":1},{"B":1}]}) == "free_stock"
+    assert mes.preview_category({"status":"unresolved", "consumption_status":"pending"}) == "unresolved"
+    assert mes.preview_category({"status":"mapped"}) == "mapped"
+
+
+@pytest.mark.parametrize("referenced", [False, True])
+def test_unlinked_erp_root_cannot_shadow_linked_output_route(db, case, referenced):
+    token = str(int(uuid4().hex[:8], 16))
+    root = Item(code="5"+token, name="Old root", product_group="ERP")
+    output = root.code+"-02"
+    real = Item(code=output, name="Actual output", product_group="ERP")
+    db.add_all([root, real]); db.flush()
+    for item, previous in [(root,root.code+"-01"),(real,root.code+"-19")]:
+        db.add_all([RoutingOperation(item_id=item.id,seq=10,operation_name="Before",semi_finished_code=previous,work_center_id=case["wc"].id,cycle_time_sec=60),
+                    RoutingOperation(item_id=item.id,seq=20,operation_name="Heat",semi_finished_code=output,work_center_id=case["wc"].id,cycle_time_sec=120),
+                    BomLine(item_id=item.id,component_code="1000000",source_wip=item.code,quantity=1)])
+    db.add(BomLine(item_id=case["items"][0].id,component_code=output,source_wip=output,quantity=1,recipe_seq=0))
+    if referenced:
+        db.add(BomLine(item_id=case["items"][1].id,component_code=root.code,source_wip=root.code,quantity=1,recipe_seq=0))
+    db.commit()
+    result=mes.preview(db,workbook([["root-check",DAY,output,9,case["machine"].code]]))
+    mapping=result["rows"][0]["mapping"]
+    assert mapping["status"]=="mapped"
+    assert mapping["consumption_status"] == ("pending" if referenced else "known")
+    if not referenced:
+        assert mapping["inputs"]=={root.code+"-19":1}
+        assert root.code in mapping["reason"]
+    assert db.get(Item,root.id) is not None
+    assert len(db.get(Item,root.id).operations)==2

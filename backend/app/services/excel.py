@@ -10,6 +10,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, Callable
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.comments import Comment
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 from sqlalchemy.orm import Session, joinedload
@@ -100,6 +101,17 @@ TEMPLATES: dict[str, dict] = {
         "example": [],
         "required": [],
     },
+    "laser_times": {
+        "title": "Lazer Süre Standardı",
+        "columns": [
+            ("semi_finished_code", "Yarımamül Op. Kodu", ["yarimamulopkodu", "yarimamulopkodustokkodu", "yarimamulkodu", "stokkodu", "semifinishedcode"]),
+            ("cycle_time_sec", "Çevrim Süresi (sn)", ["cevrimsuresi", "yenictsnadet", "yenict", "ct"]),
+            ("setup_time_min", "Setup (dk)", ["setup", "yenisetupdkis", "yenisetup"]),
+            ("note", "Not", ["aciklama", "kaynak", "enyidayanakguven"]),
+        ],
+        "example": ["5909828-12", 260, 45, "Olculmus"],
+        "required": ["semi_finished_code", "cycle_time_sec"],
+    },
     "shifts": {
         "title": "Vardiyalar",
         "columns": [
@@ -135,8 +147,10 @@ TEMPLATES: dict[str, dict] = {
             ("sub_group", "Alt Grup", ["altgrup"]),
             ("product_group", "Ürün Grubu", ["grup", "urungrubu"]),
             ("unit", "Birim", []),
+            ("max_wip_qty", "Azami Ara Stok (adet)", ["azamiarastok", "arastokadet", "maxwip"]),
+            ("max_wip_days", "Azami Ara Stok (gün)", ["arastokgun", "maxwipdays"]),
         ],
-        "example": ["MAM-0001", "Endüstriyel Ocak 4 Gözlü", "MUTFAK", "OCAK", "OCAK", "AD"],
+        "example": ["MAM-0001", "Endüstriyel Ocak 4 Gözlü", "MUTFAK", "OCAK", "OCAK", "AD", "", ""],
         "required": ["code"],
     },
     "bom": {
@@ -241,8 +255,14 @@ TEMPLATES: dict[str, dict] = {
             ("efficient_hours_per_person", "Kişi Başı Verimli Saat", ["verimlisaat", "verimlisure"]),
             ("working_days", "Çalışma Günü", ["gun", "gunsayisi", "calismagunu"]),
             ("note", "Not", ["aciklama"]),
+            ("overtime_headcount", "Fazla Mesai Kişi", ["fazlamesaikisi", "fmkisi", "mesaikisi"]),
+            ("overtime_days", "Fazla Mesai Gün", ["fazlamesaigun", "fmgun", "mesaigun"]),
+            ("overtime_hours_per_person", "Fazla Mesai Saat (kişi/gün, ≤2,5)", ["fazlamesaisaat", "fmsaat", "mesaisaat"]),
+            ("weekend_overtime_headcount", "Hafta Sonu FM Kişi", ["haftasonufmkisi", "hsfmkisi", "haftasonukisi"]),
+            ("weekend_overtime_days", "Hafta Sonu FM Gün (0-2)", ["haftasonufmgun", "hsfmgun", "haftasonugun"]),
+            ("weekend_overtime_hours_per_person", "Hafta Sonu FM Saat (kişi/gün, ≤8,5)", ["haftasonufmsaat", "hsfmsaat", "haftasonusaat"]),
         ],
-        "example": ["PRESHANE 3", "2026-09-07", 8, 4.5, 5, "1 kişi izinli"],
+        "example": ["PRESHANE 3", "2026-09-07", 8, 4.5, 5, "1 kişi izinli", 4, 3, 2.5, 4, 1, 8.5],
         "required": ["wc_code", "week_start"],
     },
     "op_rules": {
@@ -315,6 +335,13 @@ def build_template(kind: str) -> bytes:
     ws.title = sheet_title(t["title"])
     ws.append([c[1] for c in t["columns"]])
     ws.append(t["example"])
+    for index, (key, _, _) in enumerate(t["columns"], 1):
+        if kind == "workcenters" and key == "capacity_source":
+            ws.cell(1, index).comment = Comment("Eski uyumluluk alanı; iş gücü kapasitesi haftalık kişi girişinden hesaplanır.", "Bilge İnox")
+        elif kind == "shifts" and key == "headcount":
+            ws.cell(1, index).comment = Comment("Eski uyumluluk alanı; kişi sayısını Haftalık İş Gücü şablonundan girin.", "Bilge İnox")
+        elif kind == "wc_weeks" and key == "headcount":
+            ws.cell(1, index).comment = Comment("Tüm vardiyaların toplam kişi sayısı. Boş giriş planlama öncesi düzeltme veya sıfır kapasite onayı gerektirir.", "Bilge İnox")
     _style_header(ws)
     _autosize(ws)
     buf = io.BytesIO()
@@ -503,6 +530,17 @@ def _item_lookup(db: Session) -> dict[str, Item]:
     return {i.code.upper(): i for i in db.query(Item).all()}
 
 
+def _assert_routing_for_order(db: Session, item: Item, cache: dict[int, str | None]) -> None:
+    """Siparis giris kapisi: urunun rota tanimi eksikse satir hata ile reddedilir (istek boyunca onbellekli)."""
+    from app.services.order_routing_gate import routing_gap
+
+    if item.id not in cache:
+        cache[item.id] = routing_gap(db, item)
+    gap = cache[item.id]
+    if gap:
+        raise ValueError(f"Rota tanimi eksik — siparis aktarilmadi: {gap}")
+
+
 def _get_or_create_item(db: Session, items: dict[str, Item], code: str) -> Item:
     key = code.upper()
     if key not in items:
@@ -684,6 +722,17 @@ def import_items(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
             it.sub_group = _str(r.get("sub_group")) or it.sub_group
             it.product_group = _str(r.get("product_group")) or it.product_group
             it.unit = _str(r.get("unit")) or it.unit or "AD"
+            # Ara stok siniri: bos sutun mevcut degeri korur; 0 siniri kaldirir
+            if r.get("max_wip_qty") not in (None, ""):
+                q = _float(r.get("max_wip_qty"))
+                if q is not None and q < 0:
+                    raise ValueError("Azami ara stok (adet) negatif olamaz")
+                it.max_wip_qty = q if q else None
+            if r.get("max_wip_days") not in (None, ""):
+                d = _float(r.get("max_wip_days"))
+                if d is not None and (d < 0 or not d.is_integer()):
+                    raise ValueError("Azami ara stok (gün) 0 veya pozitif tam sayı olmalı")
+                it.max_wip_days = int(d) if d else None
         except Exception as e:  # noqa: BLE001
             errs.append(f"Satir {r['_row']}: {e}")
     return ins, upd, errs
@@ -726,6 +775,7 @@ def import_bom(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
 
 
 def import_routing(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
+    import math
     ins = upd = 0
     errs = []
     from app.models import Machine, RoutingOperationStation
@@ -735,6 +785,9 @@ def import_routing(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
     machines = {m.code.upper(): m for m in db.query(Machine).all()}
     for r in rows:
         try:
+            raw_units = _float(r.get("units_per_cycle"), None)
+            if raw_units is not None and (not math.isfinite(raw_units) or raw_units < 1 or not raw_units.is_integer()):
+                raise ValueError("Çevrim başına adet pozitif tam sayı olmalı")
             item = _get_or_create_item(db, items, _str(r.get("item_code")))
             seq = _int(r.get("seq"))
             if seq is None:
@@ -852,6 +905,8 @@ def preview_orders_import(db: Session, rows: list[dict]) -> OrderImportPreview:
     parse_errors: list[str] = []
     error_rows: list[OrderImportErrorRow] = []
     file_keys: dict[tuple, OrderImportRowPreview] = {}
+    routing_ok: dict[int, str | None] = {}
+    no_routing_codes: list[str] = []
 
     for r in rows:
         try:
@@ -863,6 +918,12 @@ def preview_orders_import(db: Session, rows: list[dict]) -> OrderImportPreview:
             item = items.get(code.upper())
             if not item:
                 raise ValueError(f"Stok kodu bulunamadi: {code}")
+            try:
+                _assert_routing_for_order(db, item, routing_ok)
+            except ValueError:
+                if item.code not in no_routing_codes:
+                    no_routing_codes.append(item.code)
+                raise
             if _float(r.get("quantity")) is None:
                 raise ValueError("Miktar bos")
             _date(r.get("due_date"))
@@ -958,6 +1019,7 @@ def preview_orders_import(db: Session, rows: list[dict]) -> OrderImportPreview:
         file_row_count=len(rows),
         system_open_count=len(open_orders),
         missing_item_codes=missing_codes,
+        no_routing_item_codes=no_routing_codes,
     )
 
 
@@ -968,15 +1030,31 @@ def import_orders(db: Session, rows: list[dict], remove_missing: bool = False) -
     ins = upd = removed = 0
     errs = []
     items = _item_lookup(db)
+    routing_ok: dict[int, str | None] = {}  # item_id -> rota eksik aciklamasi (None = tam); dosya boyunca tek kontrol
+    from app.services.order_routing_gate import routing_gaps_bulk
+    file_items = [items[c] for c in {_str(r.get("item_code")).upper() for r in rows} if c in items]
+    routing_ok.update(routing_gaps_bulk(db, file_items))  # toplu kapı: 4k satırlık dosyada tek tek kontrol yerine tek sorgu seti
     existing = _index_orders(db.query(Order).filter(Order.status != "merged").all())
     file_keys: set[tuple] = set()
     for r in rows:
         try:
+            # Validate material fields before creating or changing any row data.
+            from app.services.orders import normalize_material_status, validate_material_fields
+            ms = _str(r.get("material_status"))
+            if ms:
+                st = normalize_material_status(ms)
+                mrd = _date(r.get("material_ready_date")) if r.get("material_ready_date") not in (None, "") else None
+                validate_material_fields(st, mrd)
             order_no = _str(r.get("order_no"))
             if not order_no:
                 raise ValueError("Siparis no bos")
             pos = _str(r.get("position_no"))
-            item = _get_or_create_item(db, items, _str(r.get("item_code")))
+            code = _str(r.get("item_code"))
+            item = items.get(code.upper())
+            if not item:
+                # Siparis aktarimi artik stok karti acmaz: rotasiz/tanimsiz urun siparisi kabul edilmez.
+                raise ValueError(f"Stok kodu bulunamadi: {code} — rota tanimi olmadan siparis aktarilamaz")
+            _assert_routing_for_order(db, item, routing_ok)
             qty = _float(r.get("quantity"))
             if qty is None:
                 raise ValueError("Miktar bos")
@@ -1019,11 +1097,6 @@ def import_orders(db: Session, rows: list[dict], remove_missing: bool = False) -
             o.status = "open"
             ms = _str(r.get("material_status"))
             if ms:
-                from app.services.orders import normalize_material_status, validate_material_fields
-
-                st = normalize_material_status(ms)
-                mrd = _date(r.get("material_ready_date")) if r.get("material_ready_date") not in (None, "") else None
-                validate_material_fields(st, mrd)
                 o.material_status = st
                 o.material_ready_date = mrd if st == "expected" else (mrd if st == "ready" else None)
             mn = _str(r.get("material_note"))
@@ -1289,31 +1362,75 @@ def import_wc_weeks(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]
             if days is not None and (not days.is_integer() or not 0 <= days <= 7):
                 raise ValueError("Çalışma günü 0–7 arasında tam sayı olmalı")
             note = _str(r.get("note"))
+            # Fazla mesai (18:00-21:00): kisi, gun, kisi basi saat (<= 2.5)
+            ot_hc = _float(r.get("overtime_headcount"))
+            ot_days = _float(r.get("overtime_days"))
+            ot_hours = _float(r.get("overtime_hours_per_person"))
+            if ot_hc is not None and (not ot_hc.is_integer() or ot_hc < 0):
+                raise ValueError("Fazla mesai kişi sayısı 0 veya pozitif tam sayı olmalı")
+            if ot_days is not None and (not ot_days.is_integer() or not 0 <= ot_days <= 7):
+                raise ValueError("Fazla mesai gün sayısı 0–7 arasında tam sayı olmalı")
+            if ot_hours is not None and not 0 <= ot_hours <= 2.5:
+                raise ValueError("Kişi başı fazla mesai saati 0–2,5 arasında olmalı (18:00-21:00)")
+            ot_hc_i = int(ot_hc) if ot_hc else None
+            ot_days_i = int(ot_days) if (ot_days is not None and ot_hc_i) else None
+            ot_hours_f = ot_hours if (ot_hours is not None and ot_hc_i) else None
+            we_hc = _float(r.get("weekend_overtime_headcount"))
+            we_days = _float(r.get("weekend_overtime_days"))
+            we_hours = _float(r.get("weekend_overtime_hours_per_person"))
+            if we_hc is not None and (not we_hc.is_integer() or we_hc < 0):
+                raise ValueError("Hafta sonu fazla mesai kişi sayısı 0 veya pozitif tam sayı olmalı")
+            if we_days is not None and (not we_days.is_integer() or not 0 <= we_days <= 2):
+                raise ValueError("Hafta sonu fazla mesai gün sayısı 0–2 arasında olmalı (Cmt, Paz)")
+            if we_hours is not None and not 0 <= we_hours <= 8.5:
+                raise ValueError("Kişi başı hafta sonu fazla mesai saati 0–8,5 arasında olmalı (08:00-18:00)")
+            we_hc_i = int(we_hc) if we_hc else None
+            we_days_i = int(we_days) if (we_days is not None and we_hc_i) else None
+            we_hours_f = we_hours if (we_hours is not None and we_hc_i) else None
+            if ot_hc_i or we_hc_i:
+                from app.services import capacity as _cap
+
+                probe = WorkCenterWeek(work_center_id=wc.id, week_start=wk, headcount=int(hc) if hc is not None else None,
+                                       efficient_hours_per_person=eff, working_days=int(days) if days is not None else None,
+                                       overtime_headcount=ot_hc_i, overtime_days=ot_days_i, overtime_hours_per_person=ot_hours_f,
+                                       weekend_overtime_headcount=we_hc_i, weekend_overtime_days=we_days_i, weekend_overtime_hours_per_person=we_hours_f)
+                problem = _cap.overtime_violation(wc, probe, overtime_headcount=ot_hc_i, overtime_days=ot_days_i,
+                                                  overtime_hours=ot_hours_f, emp_count=_cap.employee_count(db, wc),
+                                                  weekend_headcount=we_hc_i, weekend_days=we_days_i, weekend_hours=we_hours_f, db=db)
+                if problem:
+                    raise ValueError(problem)
             key = (wc.id, wk)
             if key in seen:
                 raise ValueError("Aynı iş merkezi ve hafta dosyada birden fazla kez bulunuyor")
             seen.add(key)
-            validated.append((wc, wk, int(hc) if hc is not None else None, eff, int(days) if days is not None else None, note))
+            validated.append((wc, wk, int(hc) if hc is not None else None, eff, int(days) if days is not None else None, note,
+                              ot_hc_i, ot_days_i, ot_hours_f, we_hc_i, we_days_i, we_hours_f))
         except Exception as e:  # noqa: BLE001
             errs.append(f"Satir {r['_row']}: {e}")
     if errs:
         return 0, 0, errs  # Validate the entire file before changing any weekly capacity.
-    for wc, wk, hc, eff, days, note in validated:
+    for wc, wk, hc, eff, days, note, ot_hc_i, ot_days_i, ot_hours_f, we_hc_i, we_days_i, we_hours_f in validated:
         row = db.query(WorkCenterWeek).filter(WorkCenterWeek.work_center_id == wc.id, WorkCenterWeek.week_start == wk).first()
-        if hc is None and eff is None and days is None and not note:
+        if hc is None and eff is None and days is None and not note and not ot_hc_i and not we_hc_i:
             if row:
                 db.delete(row)
                 upd += 1
             continue
+        target = (hc, eff, days, note, ot_hc_i, ot_days_i, ot_hours_f, we_hc_i, we_days_i, we_hours_f)
         if row:
-            if (row.headcount, row.efficient_hours_per_person, row.working_days, row.note) == (hc, eff, days, note):
+            if (row.headcount, row.efficient_hours_per_person, row.working_days, row.note,
+                    row.overtime_headcount, row.overtime_days, row.overtime_hours_per_person,
+                    row.weekend_overtime_headcount, row.weekend_overtime_days, row.weekend_overtime_hours_per_person) == target:
                 continue
             upd += 1
         else:
             row = WorkCenterWeek(work_center_id=wc.id, week_start=wk)
             db.add(row)
             ins += 1
-        row.headcount, row.efficient_hours_per_person, row.working_days, row.note = hc, eff, days, note
+        (row.headcount, row.efficient_hours_per_person, row.working_days, row.note,
+         row.overtime_headcount, row.overtime_days, row.overtime_hours_per_person,
+         row.weekend_overtime_headcount, row.weekend_overtime_days, row.weekend_overtime_hours_per_person) = target
+        row.overtime_proposed = False  # Excel ile girilen fazla mesai onaylı sayılır
     return ins, upd, errs
 
 
@@ -1374,6 +1491,12 @@ def import_istasyonlar(db: Session, rows: list[dict]) -> tuple[int, int, list[st
     return ins, upd + deactivated, errs
 
 
+def import_laser_times_kind(db: Session, rows: list[dict]) -> tuple[int, int, list[str]]:
+    from app.services.laser_times import import_laser_times
+
+    return import_laser_times(db, rows)
+
+
 def import_production_bom_kind(db: Session, _rows: list[dict]) -> tuple[int, int, list[str]]:
     raise ValueError("production_bom satir okuma ile calismaz; run_import_raw kullanin")
 
@@ -1399,6 +1522,7 @@ IMPORTERS: dict[str, Callable[[Session, list[dict]], tuple[int, int, list[str]]]
     "items": import_items,
     "bom": import_bom,
     "routing": import_routing,
+    "laser_times": import_laser_times_kind,
     "op_rules": import_op_rules,
     "orders": import_orders,
     "production": import_production,
@@ -1461,7 +1585,6 @@ def build_missing_routing_xlsx(check) -> bytes:
     return workbook_bytes(wb)
 
 def build_wc_weeks_xlsx(db: Session, start: date, weeks: int, work_center_ids: list[int] | None = None) -> bytes:
-    from openpyxl.comments import Comment
     from openpyxl.styles import Protection
     from openpyxl.worksheet.datavalidation import DataValidation
     from app.services.capacity import week_start
@@ -1483,24 +1606,30 @@ def build_wc_weeks_xlsx(db: Session, start: date, weeks: int, work_center_ids: l
             ov = overrides.get((wc.id, wk))
             ws.append([wc.code, wk, ov.headcount if ov else None,
                        ov.efficient_hours_per_person if ov else None,
-                       ov.working_days if ov else None, ov.note if ov else "", wc.name])
+                       ov.working_days if ov else None, ov.note if ov else "",
+                       ov.overtime_headcount if ov else None, ov.overtime_days if ov else None,
+                       ov.overtime_hours_per_person if ov else None,
+                       ov.weekend_overtime_headcount if ov else None, ov.weekend_overtime_days if ov else None,
+                       ov.weekend_overtime_hours_per_person if ov else None, wc.name])
             for cell in ws[ws.max_row]:
                 if isinstance(cell.value, str):
                     cell.data_type = "s"
-                if 3 <= cell.column <= 6:
+                if 3 <= cell.column <= 9:
                     cell.protection = Protection(locked=False)
                     cell.fill = PatternFill("solid", fgColor="EFF6FF")
                     cell.font = Font(color="1D4ED8")
             ws.cell(ws.max_row, 2).number_format = "dd.mm.yyyy"
             ws.cell(ws.max_row, 4).number_format = "0.##"
+            ws.cell(ws.max_row, 9).number_format = "0.##"
     _style_header(ws)
-    for col, width in zip("ABCDEFG", [25, 35, 18, 25, 18, 40, 35]):
+    for col, width in zip("ABCDEFGHIJ", [25, 35, 18, 25, 18, 40, 18, 18, 30, 35]):
         ws.column_dimensions[col].width = width
     ws.freeze_panes = "C2"
     ws.auto_filter.ref = ws.dimensions
     ws.protection.sheet = True
     ws.protection.autoFilter = False
-    for col, typ, maximum in [("C", "whole", 1000000), ("D", "decimal", 24), ("E", "whole", 7)]:
+    for col, typ, maximum in [("C", "whole", 1000000), ("D", "decimal", 24), ("E", "whole", 7),
+                              ("G", "whole", 1000000), ("H", "whole", 7), ("I", "decimal", 2.5)]:
         rule = DataValidation(type=typ, operator="between", formula1=0, formula2=maximum, allow_blank=True)
         rule.showErrorMessage = True
         rule.errorTitle = "Geçersiz değer"
@@ -1508,10 +1637,12 @@ def build_wc_weeks_xlsx(db: Session, start: date, weeks: int, work_center_ids: l
         ws.add_data_validation(rule)
         if ws.max_row > 1:
             rule.add(f"{col}2:{col}{ws.max_row}")
-        ws[f"{col}1"].comment = Comment("Boş = vardiya/personel/makine varsayılanı. 0 = sıfır. Formül yerine sayı girin.", "Bilge İnox")
+        ws[f"{col}1"].comment = Comment("Boş kişi = eksik giriş; saat/gün boşsa varsayılan. 0 = açık sıfır. Formül yerine sayı girin.", "Bilge İnox")
     notes = wb.create_sheet("Kullanım")
-    for line in ["Yalnızca mavi hücreleri doldurun: kişi, kişi başı günlük verimli saat, çalışma günü ve not.",
-                 "Dosya mevcut haftalık istisnaları içerir. Boş sayısal hücreler varsayılan vardiya/personel/makine değerlerini kullanır.",
+    for line in ["Yalnızca mavi hücreleri doldurun: kişi, kişi başı günlük verimli saat, çalışma günü, not ve fazla mesai (kişi / gün / kişi başı saat ≤ 2,5).",
+                 "Fazla mesai 18:00-21:00 penceresidir: kişi sayısı haftanın kişi sayısını, gün sayısı çalışma gününü aşamaz; kapasiteye vardiya verim oranıyla eklenir.",
+                 "Kişi ve günlük verimli saat tüm vardiyaların ortak toplamıdır; vardiya sayısıyla tekrar çarpılmaz.",
+                 "Boş kişi sayısı eksik giriştir; planlamadan önce düzeltin veya sıfır kapasiteyi onaylayın. Boş saat/gün varsayılanı kullanır.",
                  "0 gerçek sıfırdır. Bir satırın tüm düzenlenebilir alanlarını boşaltmak o haftayı varsayılana döndürür.",
                  "İş merkezi kodu ve hafta eşleşirse güncellenir; eşleşmezse mevcut iş merkezi için haftalık kayıt eklenir.",
                  "Yeni iş merkezi oluşturulmaz. Dosyada olmayan iş merkezleri/haftalar değiştirilmez.",
@@ -1524,6 +1655,36 @@ def build_wc_weeks_xlsx(db: Session, start: date, weeks: int, work_center_ids: l
 
 def _ws_from_rows(wb: Workbook, title: str, header: list[str], rows: list[list[Any]]) -> None:
     ws = wb.create_sheet(sheet_title(title))
+    if getattr(wb, "write_only", False):
+        # Akış (write-only) modu: büyük yedeklerde hücre nesnesi tutulmaz, yazım kat kat hızlıdır.
+        # Sütun genişliği ve başlık biçimi normal modla aynı kurala göre üretilir.
+        from openpyxl.cell import WriteOnlyCell
+
+        widths = [len(str(h)) if h is not None else 0 for h in header]
+        materialized: list[list[Any]] = []
+        for r in rows:
+            vals = [_export_cell(v) for v in r]
+            for i, v in enumerate(vals):
+                if v is None:
+                    continue
+                n = len(str(v))
+                if i >= len(widths):
+                    widths.extend([0] * (i + 1 - len(widths)))
+                if n > widths[i]:
+                    widths[i] = n
+            materialized.append(vals)
+        for i, w in enumerate(widths, start=1):
+            ws.column_dimensions[get_column_letter(i)].width = min(max(w + 2, 10), 60)
+        head_cells = []
+        for h in header:
+            c = WriteOnlyCell(ws, value=h)
+            c.font = Font(bold=True, color="FFFFFF")
+            c.fill = PatternFill("solid", fgColor="1F4E78")
+            head_cells.append(c)
+        ws.append(head_cells)
+        for vals in materialized:
+            ws.append(vals)
+        return
     ws.append(header)
     for r in rows:
         ws.append([_export_cell(v) for v in r])
@@ -1544,7 +1705,7 @@ def build_backup(db: Session) -> bytes:
 
     Tam PostgreSQL geri donusu degildir; ic kimlikli yapilar (parti, revizyon) otomatik geri yuklenmez.
     """
-    wb = Workbook()
+    wb = Workbook(write_only=True)  # buyuk yedeklerde akis modu: ayni sayfalar/bicim, cok daha hizli yazim
     wc_code = {w.id: w.code for w in db.query(WorkCenter).all()}
     item_code = {i.id: i.code for i in db.query(Item).all()}
 
@@ -1649,8 +1810,9 @@ def build_backup(db: Session) -> bytes:
     _ws_from_rows(wb, "Rota İstasyonları", ["Stok Kodu", "Operasyon Sıra", "Makine Kodu", "Birincil (E/H)"], station_rows)
     _ws_from_rows(wb, "Siparişler", [c[1] for c in TEMPLATES["orders"]["columns"]] + ["Durum"],
                   [[o.order_no, o.position_no or "", o.customer, o.order_date, o.due_date, o.revised_due_date, _market_cell(o.market), item_code.get(o.item_id), o.quantity, o.unit_price, o.material_status or "unknown", o.material_ready_date or "", o.material_note or "", o.status] for o in db.query(Order).order_by(Order.due_date, Order.order_no, Order.position_no)])
-    _ws_from_rows(wb, "Plan", ["Hafta", "İş Merkezi Kodu", "Sipariş No", "Stok Kodu", "Operasyon Id", "Planlanan Saat", "Planlanan Miktar", "Mod", "Oluşturan"],
-                  [[p.week_start, wc_code.get(p.work_center_id), p.order.order_no, item_code.get(p.order.item_id), p.operation_id, p.planned_hours, p.planned_qty, p.mode, p.created_by] for p in db.query(PlanLine).order_by(PlanLine.week_start, PlanLine.work_center_id)])
+    from app.services.material_schedule import recorded_material_note
+    _ws_from_rows(wb, "Plan", ["Hafta", "İş Merkezi Kodu", "Sipariş No", "Stok Kodu", "Operasyon Id", "Planlanan Saat", "Planlanan Miktar", "Mod", "Oluşturan", "Plan oluşturulurken malzeme koşulu"],
+                  [[p.week_start, wc_code.get(p.work_center_id), p.order.order_no, item_code.get(p.order.item_id), p.operation_id, p.planned_hours, p.planned_qty, p.mode, p.created_by, recorded_material_note(p.material_unverified)] for p in db.query(PlanLine).options(joinedload(PlanLine.order)).order_by(PlanLine.week_start, PlanLine.work_center_id)])
     _ws_from_rows(
         wb,
         "Günlük Üretim",
@@ -1697,7 +1859,9 @@ def build_backup(db: Session) -> bytes:
         ],
     )
     _ws_from_rows(wb, "Haftalık İş Gücü", [c[1] for c in TEMPLATES["wc_weeks"]["columns"]],
-                  [[wc_code.get(w.work_center_id), w.week_start, w.headcount, w.efficient_hours_per_person, w.working_days, w.note] for w in db.query(WorkCenterWeek).order_by(WorkCenterWeek.work_center_id, WorkCenterWeek.week_start)])
+                  [[wc_code.get(w.work_center_id), w.week_start, w.headcount, w.efficient_hours_per_person, w.working_days, w.note,
+                    w.overtime_headcount, w.overtime_days, w.overtime_hours_per_person,
+                    w.weekend_overtime_headcount, w.weekend_overtime_days, w.weekend_overtime_hours_per_person] for w in db.query(WorkCenterWeek).order_by(WorkCenterWeek.work_center_id, WorkCenterWeek.week_start)])
     _ws_from_rows(wb, "Senaryo Kuralları", [c[1] for c in TEMPLATES["op_rules"]["columns"]],
                   [[r.product_group, item_code.get(r.item_id) if r.item_id else "", r.from_op, r.to_op, r.from_wip_code, r.to_wip_code, "Çevrim" if r.rule == "cycles" else "Bitiş", r.lag_cycles, r.wait_minutes, r.note] for r in db.query(OpTransitionRule).order_by(OpTransitionRule.product_group, OpTransitionRule.scope, OpTransitionRule.id)])
     _ws_from_rows(wb, "Depo Girişi", [c[1] for c in TEMPLATES["stock_receipts"]["columns"]],
@@ -2001,3 +2165,18 @@ def build_weekly_output_xlsx(out) -> bytes:
         "Yarımamül Özet": (summary_hdr, summary_rows),
         "Üretim Detay": (detail_hdr, detail_rows),
     })
+
+
+def order_schedule_sheet(rows):
+    """Shared columns for standalone and full-plan schedule exports."""
+    labels = {"finish_unknown": "Bitiş tarihi belirsiz", "covered": "Üretim ihtiyacı kalmadı", "on_time": "Termine uygun", "late": "Geç kalacak", "partial": "Kısmi plan", "unplanned": "Planlanmadı", "no_ops": "Rota yok"}
+    header = ["Sipariş No", "Poz", "Müşteri", "Stok Kodu", "Stok Adı", "Miktar", "Birim Fiyat", "Ciro", "Termin", "Kalan ihtiyaç (saat)", "Planlanan (saat)", "Kapsam %", "Plan Başlangıç", "Tahmini Bitiş", "Son İş Merkezi", "Sapma (gün)", "Durum"]
+    header.append("Plan oluşturulurken malzeme koşulu")
+    return header, [[r.order_no, r.position_no, r.customer, r.item_code, r.item_name, r.quantity, r.unit_price, r.revenue, r.due_date, r.required_hours, r.planned_hours, r.coverage_pct, r.planned_start, r.planned_end, r.last_work_center_code, r.lateness_days, labels.get(r.plan_status, r.plan_status), r.material_note] for r in rows]
+
+
+def completion_schedule_sheet(rows):
+    return (["Sipariş No", "Poz", "Müşteri", "Mamul", "Hafta", "Yaklaşık son operasyon bitişi", "Planlanan mamul adedi", "Plan durumu", "Açıklama"],
+            [[r.order_no, r.position_no, r.customer, r.item_code, w.week_start, w.planned_end, w.quantity, r.plan_status,
+              "Son operasyon planı; gerçek stok girişi değildir. Kısmi planda tamamlanma koşulludur. " + r.material_note]
+             for r in rows for w in r.completion_weeks])

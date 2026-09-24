@@ -38,7 +38,7 @@ export default function WcWeeksExcel({ start, ids, canEdit, onImported }: {
         <button onClick={importFile} disabled={busy || !file}>Excel’i içe aktar</button>
       </>}
     </div>
-    <p className="muted">{start} haftasından başlayarak listedeki {ids.length} iş merkezi dışa aktarılır. Mavi alanları doldurun: kişi, verimli saat/kişi, çalışma günü ve not. Boş = varsayılan; 0 = sıfır.</p>
+    <p className="muted">{start} haftasından başlayarak listedeki {ids.length} iş merkezi dışa aktarılır. Mavi alanları doldurun: kişi, verimli saat/kişi, çalışma günü ve not. Kişi sayısı tüm vardiyaların toplamıdır. Boş kişi = eksik giriş; boş saat/gün = varsayılan; 0 = sıfır.</p>
     <p className="muted">İçe aktarma dosyadaki iş merkezi ve haftaları günceller; ekran filtresiyle sınırlanmaz. Dosyada olmayan haftalar korunur. Yeni iş merkezi oluşturulmaz.</p>
     {busy && <p role="status">Excel işleniyor…</p>}
     <ErrorText err={error} />

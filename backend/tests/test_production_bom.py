@@ -51,6 +51,8 @@ def test_wip_planning_parallel(client, auth, db):
     db.flush()
     db.add(WorkCenterShift(work_center_id=wc.id, name="Gunduz", weekdays="0,1,2,3,4", start_time=time(8, 0), end_time=time(18, 0), headcount=10, efficient_hours_per_person=8))
     db.flush()
+    from tests.test_capacity_flow import _staff_db
+    _staff_db(db, wc.id, 10, 8)
     fg = Item(code="6999999", name="Test FG", product_group="T")
     wip_a = Item(code="5999991", name="WIP A", product_group="T")
     wip_b = Item(code="5999992", name="WIP B", product_group="T")
@@ -67,7 +69,7 @@ def test_wip_planning_parallel(client, auth, db):
 
     _upload(client, auth, "orders", ["Sipariş No", "Termin", "Stok Kodu", "Miktar"], [["S-WIP-1", "2026-12-01", "6999999", 1]])
     wk = _monday()
-    plan = client.post(
+    plan = _plan_with_ack(client,
         "/api/plan/auto",
         headers=auth,
         json={"start_week": wk, "weeks": 4, "mode": "due_date", "replace_existing": True},
@@ -81,3 +83,5 @@ def test_wip_planning_parallel(client, auth, db):
         finish_week = min(l["week_start"] for l in finish)
         wip_last = max(l["week_start"] for l in wip_lines)
         assert finish_week >= wip_last
+
+from tests.test_capacity_flow import _plan_with_ack

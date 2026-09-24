@@ -36,6 +36,10 @@ from app.schemas import (
     PlanSegmentOut,
     PlanRevisionChangeIn,
     PlanRevisionChangesBulkIn,
+    PlanRevisionChangesRemoveIn,
+    OvertimeSuggestionOut,
+    IdleSuggestionOut,
+    PullForwardPlanOut,
     PlanRevisionCreate,
     PlanRevisionOut,
     ProgressOut,
@@ -111,11 +115,70 @@ def missing_routing_xlsx(req: AutoPlanRequest, db: Session = Depends(get_db), _=
 
 @router.post("/plan/auto", response_model=dict)
 def run_auto_plan(req: AutoPlanRequest, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
+    return execute_auto_plan(req, db, user.username)
+
+
+def execute_auto_plan(req: AutoPlanRequest, db: Session, username: str, *, commit: bool = True):
     check = preflight_svc.plan_preflight(db, req)
+    if check.missing_headcount_token and req.missing_headcount_ack != check.missing_headcount_token:
+        raise HTTPException(409, "Haftalık kişi sayısı eksik. Eksik girişleri tamamlayıp yeniden kontrol edin veya bu haftalarda sıfır kapasiteyle devam etmeyi onaylayın.")
     if not check.can_plan:
         codes = ", ".join(r.item_code for r in check.no_routing[:10])
         raise HTTPException(400, f"Acik siparislerde rotasi olmayan stok kodlari var; planlama yapilamaz: {codes}")
-    return planning.auto_plan(db, req, user.username)
+    result = planning.auto_plan(db, req, username, commit=commit)
+    if isinstance(result, dict) and result.get("created"):
+        from app.services import plan_report as report_svc
+        try:
+            row = report_svc.generate_and_store(db, req, result, kind="auto", username=username)
+            if commit:
+                db.commit()
+            result["report_id"] = row.id
+        except Exception as exc:  # rapor plan sonucunu engellemez
+            db.rollback()
+            result["report_error"] = str(exc)
+    return result
+
+
+@router.get("/plan/reports")
+def list_plan_reports(limit: int = Query(10, ge=1, le=30), db: Session = Depends(get_db), user: User = Depends(require_user)):
+    from app.services import plan_report as report_svc
+    return report_svc.list_reports(db, limit)
+
+
+@router.get("/plan/reports/{report_id}.xlsx")
+def export_plan_report(report_id: int, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    from app.services import plan_report as report_svc
+    row = report_svc.get_report(db, report_id)
+    if not row:
+        raise HTTPException(404, "Rapor bulunamadi")
+    return _xlsx(report_svc.report_xlsx(row.payload), f"plan-raporu-{report_id}.xlsx")
+
+
+@router.get("/plan/reports/{report_id}")
+def get_plan_report(report_id: int, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    from app.services import plan_report as report_svc
+    row = report_svc.get_report(db, report_id)
+    if not row:
+        raise HTTPException(404, "Rapor bulunamadi")
+    return {"id": row.id, "created_at": row.created_at.isoformat() if row.created_at else None, **row.payload}
+
+
+@router.post("/plan/auto/jobs")
+def start_auto_plan_job(req: AutoPlanRequest, request_id: str | None = Query(None, pattern="^[a-f0-9]{32}$"), user: User = Depends(require_poweruser)):
+    from app.services import auto_plan_jobs
+    try:
+        return auto_plan_jobs.start(user.id, user.username, req, request_id=request_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+
+
+@router.get("/plan/auto/jobs/{job_id}")
+def get_auto_plan_job(job_id: str, user: User = Depends(require_poweruser)):
+    from app.services import auto_plan_jobs
+    result = auto_plan_jobs.get(user.id, job_id)
+    if result is None:
+        raise HTTPException(404, "Bu kullanıcı için kalıcı planlama kaydı bulunamadı. İstek sunucuya ulaşmamış veya eski sürümde başlatılmış olabilir.")
+    return result
 
 
 def _revision_error(exc: Exception):
@@ -193,6 +256,20 @@ def add_plan_revision_changes_bulk(
         _revision_error(e)
 
 
+@router.post("/plan/revisions/{revision_id}/changes/remove", response_model=PlanRevisionOut)
+def remove_plan_revision_changes(
+    revision_id: int,
+    body: PlanRevisionChangesRemoveIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_poweruser),
+):
+    """Toplu girdi geri çekme — ör. karşılanamayan termin taleplerini taslaktan çıkarmak."""
+    try:
+        return revisions_svc.delete_changes(db, revision_id, body.change_ids, user.username)
+    except ValueError as e:
+        _revision_error(e)
+
+
 @router.delete("/plan/revisions/{revision_id}/changes/{change_id}", response_model=PlanRevisionOut)
 def delete_plan_revision_change(
     revision_id: int,
@@ -214,10 +291,89 @@ def calculate_plan_revision(revision_id: int, db: Session = Depends(get_db), use
         _revision_error(e)
 
 
-@router.post("/plan/revisions/{revision_id}/approve", response_model=PlanRevisionOut)
-def approve_plan_revision(revision_id: int, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
+@router.post("/plan/pull-forward/preview", response_model=PullForwardPlanOut)
+def preview_pull_forward(req: AutoPlanRequest, db: Session = Depends(get_db), _=Depends(require_user)):
+    """Tum ufuk: atil haftalara sigan uygun isleri (siparis basina tek tasima) listeler; yazmaz."""
+    from app.services.pull_forward import plan_pull_forward
+
+    return plan_pull_forward(db, req)
+
+
+@router.post("/plan/pull-forward/draft", response_model=PlanRevisionOut)
+def create_pull_forward_draft(req: AutoPlanRequest, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
+    """Tum ufuk one cekme: tek revizyon taslagi (job_move'lar). Hesapla -> onayla akisi canlida degisiklik yapar."""
+    from app.services.pull_forward import create_pull_forward_draft as _draft
+
     try:
-        return revisions_svc.approve_and_apply(db, revision_id, user.username)
+        rev, _plan = _draft(db, req, user.username)
+        return rev
+    except ValueError as e:
+        _revision_error(e)
+
+
+@router.get("/plan/idle-suggestions", response_model=IdleSuggestionOut)
+def get_idle_suggestions(work_center_id: int, week_start: date, db: Session = Depends(get_db), _=Depends(require_user)):
+    """Atil haftaya one cekilebilir isler (salt hesap). Secilenler is tasima revizyonuna girilir."""
+    from app.services.idle_suggestions import suggest_pull_forward
+
+    try:
+        return suggest_pull_forward(db, work_center_id, week_start)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.get("/plan/revisions/{revision_id}/overtime-suggestions", response_model=OvertimeSuggestionOut)
+def get_overtime_suggestions(revision_id: int, db: Session = Depends(get_db), _=Depends(require_user)):
+    """Hesaplanmis revizyonun kapasite acigina karsi 18:00-21:00 fazla mesai onerisi (salt hesap, yazmaz)."""
+    from app.services.overtime_suggestions import suggest_for_revision
+
+    try:
+        return suggest_for_revision(db, revisions_svc._get(db, revision_id))
+    except ValueError as e:
+        _revision_error(e)
+
+
+@router.post("/plan/revisions/{revision_id}/calculate/jobs")
+def start_revision_calculate_job(
+    revision_id: int,
+    request_id: str | None = Query(None, pattern="^[a-f0-9]{32}$"),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_poweruser),
+):
+    """Uzun suren yeniden hesabi arka planda baslatir; durum /calculate/jobs/{job_id} ile izlenir."""
+    from app.services import revision_calc_jobs
+
+    try:
+        rev = revisions_svc._get(db, revision_id)
+        if rev.status not in ("draft", "calculated"):
+            raise ValueError("Bu revizyon hesaplanamaz")
+        return revision_calc_jobs.start(user.id, user.username, revision_id, request_id=request_id)
+    except ValueError as e:
+        _revision_error(e)
+
+
+@router.get("/plan/revisions/{revision_id}/calculate/jobs/{job_id}")
+def get_revision_calculate_job(revision_id: int, job_id: str, user: User = Depends(require_poweruser)):
+    from app.services import revision_calc_jobs
+
+    job = revision_calc_jobs.get(user.id, job_id)
+    if job is None:
+        raise HTTPException(404, "İş kaydı bulunamadı")
+    return job
+
+
+@router.post("/plan/revisions/{revision_id}/preflight", response_model=PlanPreflightOut)
+def revision_preflight(revision_id: int, db: Session = Depends(get_db), _=Depends(require_poweruser)):
+    try:
+        return revisions_svc.revision_preflight(db, revision_id)
+    except (ValueError, revisions_svc.RevisionConflictError) as e:
+        _revision_error(e)
+
+
+@router.post("/plan/revisions/{revision_id}/approve", response_model=PlanRevisionOut)
+def approve_plan_revision(revision_id: int, missing_headcount_ack: str | None = None, db: Session = Depends(get_db), user: User = Depends(require_poweruser)):
+    try:
+        return revisions_svc.approve_and_apply(db, revision_id, user.username, missing_headcount_ack)
     except (ValueError, revisions_svc.RevisionConflictError) as e:
         _revision_error(e)
 
@@ -309,11 +465,13 @@ def get_gantt(
     start: date = Query(...),
     end: date = Query(...),
     as_of: date | None = Query(None),
+    selection_kind: str | None = Query(None),
+    selection_codes: list[str] | None = Query(None),
     db: Session = Depends(get_db),
     _=Depends(require_user),
 ):
     try:
-        return gantt.plan_gantt(db, work_center_id, start, end, as_of)
+        return gantt.plan_gantt(db, work_center_id, start, end, as_of, selection_kind, selection_codes)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -503,6 +661,25 @@ def plan_evaluation(req: PlanEvaluationRequest, db: Session = Depends(get_db), _
 
 
 # ---- Siparis bazli plan sonucu (bitis tarihleri) ----
+@router.get("/plan/orders.xlsx")
+def order_schedule_xlsx(
+    work_center_ids: list[int] | None = Query(None),
+    plan_status: str | None = Query(None, pattern="^(on_time|late|partial|unplanned|no_ops|covered|finish_unknown)$"),
+    sort: str = Query("due", pattern="^(due|end|late)$"),
+    db: Session = Depends(get_db), _=Depends(require_user),
+):
+    rows = orders_svc.order_schedule(db, work_center_ids)
+    if plan_status:
+        rows = [r for r in rows if r.plan_status == plan_status]
+    if sort == "end":
+        rows.sort(key=lambda r: r.planned_end or date.max)
+    elif sort == "late":
+        rows.sort(key=lambda r: r.lateness_days if r.lateness_days is not None else -9999, reverse=True)
+    else:
+        rows.sort(key=lambda r: r.due_date)
+    return _xlsx(excel.build_report({"Sipariş Bitiş Tarihleri": excel.order_schedule_sheet(rows), "Mamul Tamamlanma Planı": excel.completion_schedule_sheet(rows)}), "siparis_bitis_tarihleri.xlsx")
+
+
 @router.get("/plan/orders", response_model=list[OrderScheduleOut])
 def get_order_schedule(work_center_ids: list[int] | None = Query(None), db: Session = Depends(get_db), _=Depends(require_user)):
     return orders_svc.order_schedule(db, work_center_ids)
@@ -532,6 +709,24 @@ def preview_merge_impact(req: MergeImpactRequest, db: Session = Depends(get_db),
         return merge_impact_svc.preview_merge_impact(db, req.merge_groups, auto)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@router.post("/plan/merge/impact-jobs", status_code=202)
+def start_merge_impact_job(req: MergeImpactRequest, request_id: str | None = Query(None, pattern="^[a-f0-9]{32}$"), user: User = Depends(require_user)):
+    from app.services import merge_impact_jobs
+    try:
+        return merge_impact_jobs.start(user.id, req, request_id=request_id)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
+
+
+@router.get("/plan/merge/impact-jobs/{job_id}")
+def get_merge_impact_job(job_id: str, user: User = Depends(require_user)):
+    from app.services import merge_impact_jobs
+    job = merge_impact_jobs.get(user.id, job_id)
+    if job is None:
+        raise HTTPException(404, "Bu kullanıcı için kalıcı analiz kaydı bulunamadı. Analizi yeniden başlatabilirsiniz.")
+    return job
 
 
 @router.post("/plan/merge", response_model=ProductionBatchOut, status_code=201)
@@ -572,13 +767,14 @@ def order_progress_xlsx(as_of: date | None = None, work_center_ids: list[int] | 
     rows = orders_svc.order_progress(db, work_center_ids, as_of)
     content = excel.build_report(
         {
+            "Ölçüm açıklaması": (["Açıklama"], [["MES modunda çıkan miktar/kazanılan saat güncel planla eşleşmedir; müşteri tahsisi değildir. İlerleme ve durum güncel rezervasyon/sevke dayanır. Rezervasyon tarihsel snapshot değildir. Legacy modunda eski üretim raporu korunur."]]),
             "Sipariş İlerleme": (
-                ["Sipariş No", "Poz No", "Müşteri", "Stok Kodu", "Miktar", "Termin", "İhtiyaç (saat)", "Kazanılan (saat)", "Çıkan Miktar", "İlerleme %", "Durum", "İlk Üretim", "Son Üretim"],
-                [[r.order_no, r.position_no, r.customer, r.item_code, r.quantity, r.due_date, r.required_hours, r.earned_hours, r.produced_qty, r.pct, r.status, r.first_prod_date, r.last_prod_date] for r in rows],
+                ["Sipariş No", "Poz No", "Müşteri", "Stok Kodu", "Miktar", "Termin", "İhtiyaç (saat)", "Kazanılan (saat)", "Çıkan Miktar", "İlerleme %", "Durum", "İlk Üretim", "Son Üretim", "Kaynak", "Rezerve", "Sevk", "Karşılanmayan", "Planlama amacı (adet)", "Kalan işçilik (saat)"],
+                [[r.order_no, r.position_no, r.customer, r.item_code, r.quantity, r.due_date, r.required_hours, r.earned_hours, r.produced_qty, r.pct, r.status, r.first_prod_date, r.last_prod_date, r.production_source, r.reserved_qty, r.shipped_qty, r.unfulfilled_qty, r.planned_share_qty, r.remaining_hours] for r in rows],
             ),
             "Operasyon Detayı": (
-                ["Sipariş No", "Poz No", "Stok Kodu", "Op. Sıra", "Operasyon", "İş Merkezi", "İhtiyaç (saat)", "Planlanan (saat)", "Üretilen Miktar", "Kazanılan (saat)", "İlerleme %"],
-                [[r.order_no, r.position_no, r.item_code, o.operation_seq, o.operation_name, o.work_center_code, o.required_hours, o.planned_hours, o.produced_qty, o.earned_hours, o.pct] for r in rows for o in r.ops],
+                ["Sipariş No", "Poz No", "Stok Kodu", "Op. Sıra", "Operasyon", "İş Merkezi", "İhtiyaç (saat)", "Planlanan (saat)", "Üretilen Miktar", "Kazanılan (saat)", "İlerleme %", "Operasyon Stok Kodu", "Operasyon İhtiyacı", "Kalan Miktar"],
+                [[r.order_no, r.position_no, r.item_code, o.operation_seq, o.operation_name, o.work_center_code, o.required_hours, o.planned_hours, o.produced_qty, o.earned_hours, o.pct, o.item_code, o.required_qty, o.remaining_qty] for r in rows for o in r.ops],
             ),
         }
     )
@@ -661,13 +857,17 @@ def plan_xlsx(start: date, weeks: int = 12, work_center_ids: list[int] | None = 
     content = excel.build_report(
         {
             "Haftalık Yük": (["İş Merkezi", "Hafta", "Kapasite (saat)", "Planlanan (saat)", "Doluluk %", "Kapasite (birim)", "Planlanan (birim)"], [[l.work_center_code, w.week_start, w.capacity_hours, w.planned_hours, round(w.utilization * 100, 1), w.capacity_units, w.planned_units] for l in loads for w in l.weeks]),
-            "Sipariş Bitiş Tarihleri": (
-                ["Sipariş No", "Müşteri", "Stok Kodu", "Miktar", "Birim Fiyat", "Ciro", "Termin", "İhtiyaç (saat)", "Planlanan (saat)", "Kapsam %", "Plan Başlangıç Haftası", "Tahmini Bitiş", "Son İş Merkezi", "Sapma (gün)", "Durum"],
-                [[s.order_no, s.customer, s.item_code, s.quantity, s.unit_price, s.revenue, s.due_date, s.required_hours, s.planned_hours, s.coverage_pct, s.planned_start, s.planned_end, s.last_work_center_code, s.lateness_days, s.plan_status] for s in sched],
-            ),
+            "Sipariş Bitiş Tarihleri": excel.order_schedule_sheet(sched),
+            "Plan Koşulları": (["Kapsam", "Açıklama"], [
+                ["Ciro ve bitiş tahminleri", "Plan tahminidir; kesin üretim, teslimat veya fatura değildir."],
+                ["Malzemesi doğrulanmamış plan", f"{rev.conditional_orders} sipariş pozisyonu"],
+                ["Geçmiş malzeme koşulu kaydedilmemiş", f"{rev.unknown_material_orders} sipariş pozisyonu"],
+                ["Sayım kapsamı", "Seçili iş merkezlerindeki açık sipariş planları; iki grup örtüşebilir. Ayrıntılar Sipariş Bitiş Tarihleri sayfasındadır."],
+            ]),
+            "Mamul Tamamlanma Planı": excel.completion_schedule_sheet(sched),
             "Ciro (Haftalık)": (["Hafta", "Tamamlanan Ciro", "Tamamlanan Sipariş", "Oransal Ciro", "Kümülatif Tamamlanan", "Kümülatif Oransal"], [[w.period, w.completed_revenue, w.completed_orders, w.earned_revenue, w.cumulative_completed, w.cumulative_earned] for w in rev.weeks]),
             "Ciro (Aylık)": (["Ay", "Tamamlanan Ciro", "Tamamlanan Sipariş", "Oransal Ciro", "Kümülatif Tamamlanan", "Kümülatif Oransal"], [[m.period, m.completed_revenue, m.completed_orders, m.earned_revenue, m.cumulative_completed, m.cumulative_earned] for m in rev.months]),
-            "Plan Satırları": (["Hafta", "İş Merkezi", "Sipariş No", "Müşteri", "Termin", "Stok Kodu", "Op. Sıra", "Planlanan Saat", "Planlanan Miktar", "Mod"], [[p.week_start, p.work_center_code, p.order_no, p.customer, p.due_date, p.item_code, p.operation_seq, p.planned_hours, p.planned_qty, p.mode] for p in lines]),
+            "Plan Satırları": (["Hafta", "İş Merkezi", "Sipariş No", "Müşteri", "Termin", "Stok Kodu", "Op. Sıra", "Planlanan Saat", "Planlanan Miktar", "Mod", "Plan oluşturulurken malzeme koşulu"], [[p.week_start, p.work_center_code, p.order_no, p.customer, p.due_date, p.item_code, p.operation_seq, p.planned_hours, p.planned_qty, p.mode, p.material_note] for p in lines]),
         }
     )
     return _xlsx(content, f"plan_{capacity.week_start(start)}.xlsx")

@@ -4,7 +4,7 @@ from datetime import date
 
 from app.services import planning
 from app.schemas import AutoPlanRequest
-from tests.test_capacity_flow import _upload
+from tests.test_capacity_flow import _upload, _weekly_staffing
 from tests.test_revenue_modes import WEEK, _setup
 
 START = date(2026, 9, 7)
@@ -30,6 +30,7 @@ def _setup_40h(client, auth):
         ["İş Merkezi Kodu", "Vardiya", "Günler (Pzt=0..Paz=6)", "Başlangıç", "Bitiş", "Kişi Sayısı", "Kişi Başı Verimli Saat"],
         [["PRIO-1", "G", "0,1,2,3,4", "08:00", "18:00", 2, 4]],
     )
+    _weekly_staffing(client, auth, [['PRIO-1', 2, 4, 5]])
     _upload(client, auth, "items", ["Stok Kodu", "Stok Adı", "Ürün Grubu"], [["PRIO-A", "A", "G"], ["PRIO-B", "B", "G"]])
     _upload(
         client,

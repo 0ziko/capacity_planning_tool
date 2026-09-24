@@ -2,7 +2,7 @@
 
 from datetime import date, timedelta
 
-from tests.test_capacity_flow import _upload
+from tests.test_capacity_flow import _upload, _weekly_staffing
 
 WEEK = date(2026, 9, 7)
 DUE = date(2026, 9, 28)  # Pazar -> termin haftasi 28 Eylul civari
@@ -23,6 +23,7 @@ def _seed_wc(client, auth, code: str = "CS-WC"):
         ["İş Merkezi Kodu", "Vardiya", "Günler (Pzt=0..Paz=6)", "Başlangıç", "Bitiş", "Kişi Sayısı", "Kişi Başı Verimli Saat"],
         [[code, "G", "0,1,2,3,4", "08:00", "18:00", 5, 4]],
     )
+    _weekly_staffing(client, auth, [[code, 5, 4, 5]])
     return next(w for w in client.get("/api/workcenters", headers=auth).json() if w["code"] == code)
 
 
@@ -56,8 +57,8 @@ def test_co_shipment_disabled_unchanged(client, auth):
     _upload(client, auth, "routing", ["Stok Kodu", "Sıra", "Operasyon", "İş Merkezi Kodu", "Çevrim Süresi (sn)"], [["CS-M", 10, "Op", "CS-0", 3600]])
     _upload(client, auth, "orders", ["Sipariş No", "Termin", "Stok Kodu", "Miktar"], [["CS-N1", DUE.isoformat(), "CS-M", 1]])
 
-    base = client.post("/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 4, "work_center_ids": [wc["id"]]}).json()
-    with_flag = client.post(
+    base = _plan_with_ack(client, "/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 4, "work_center_ids": [wc["id"]]}).json()
+    with_flag = _plan_with_ack(client,
         "/api/plan/auto",
         headers=auth,
         json={
@@ -76,7 +77,7 @@ def test_co_shipment_same_week_and_target(client, auth):
     _seed_three_positions(client, auth, "CS-1", "CS-1001")
     _upload(client, auth, "orders", ["Sipariş No", "Termin", "Stok Kodu", "Miktar"], [["CS-OTHER", DUE.isoformat(), "CS-P10", 1]])
 
-    r = client.post(
+    r = _plan_with_ack(client,
         "/api/plan/auto",
         headers=auth,
         json={
@@ -106,7 +107,7 @@ def test_co_shipment_same_week_and_target(client, auth):
 def test_co_shipment_partial_positions(client, auth):
     wc = _seed_wc(client, auth, "CS-2")
     _seed_three_positions(client, auth, "CS-2", "CS-2001")
-    r = client.post(
+    r = _plan_with_ack(client,
         "/api/plan/auto",
         headers=auth,
         json={
@@ -147,7 +148,7 @@ def test_co_shipment_capacity_exception(client, auth):
             ["CS-3001", "30", "ABC", DUE.isoformat(), "CS3-P30", 1],
         ],
     )
-    r = client.post(
+    r = _plan_with_ack(client,
         "/api/plan/auto",
         headers=auth,
         json={
@@ -162,3 +163,5 @@ def test_co_shipment_capacity_exception(client, auth):
         },
     ).json()
     assert any(e["code"] == "CAPACITY_SAME_WEEK" for e in r["co_shipment_exceptions"])
+
+from tests.test_capacity_flow import _plan_with_ack

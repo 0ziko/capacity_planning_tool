@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, fmt, type AutoPlanRequest, type PlanPreflight } from "../../api";
+import WcWeeksPanel from "../WcWeeksPanel";
+import { api, fmt, weekLabel, type AutoPlanRequest, type PlanPreflight } from "../../api";
+
+const laborLabels: Record<string, string> = { headcount: "Kişi", efficient_hours_per_person: "Verimli saat / kişi", working_days: "Çalışma günü", line_hours_per_day: "Günlük hat saati" };
 
 function fmtDt(iso: string | null) {
   if (!iso) return "—";
@@ -14,10 +17,14 @@ export default function PlanPreflightModal({
   req,
   onClose,
   onConfirm,
+  preflightUrl = "/api/plan/auto/preflight",
+  revision = false,
 }: {
   req: AutoPlanRequest;
   onClose: () => void;
-  onConfirm: () => void;
+  onConfirm: (missingHeadcountAck: string | null) => void;
+  preflightUrl?: string;
+  revision?: boolean;
 }) {
   const [data, setData] = useState<PlanPreflight | null>(null);
   const [err, setErr] = useState("");
@@ -25,6 +32,11 @@ export default function PlanPreflightModal({
   const [capAck, setCapAck] = useState(false);
   const [dailyAck, setDailyAck] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [checkVersion, setCheckVersion] = useState(0);
+  const [editing, setEditing] = useState<{ id: number; code: string; week: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const editorRef = useRef<HTMLElement>(null);
+  useEffect(() => { editorRef.current?.scrollIntoView({ block: "nearest" }); }, [editing]);
   const exportRoutes = async () => {
     setExporting(true); setErr("");
     try { await api.download("/api/plan/auto/preflight/no-routing.xlsx", "eksik_rotalar.xlsx", req); }
@@ -33,18 +45,23 @@ export default function PlanPreflightModal({
   };
 
   useEffect(() => {
+    let active = true;
     setBusy(true);
     setErr("");
-    api.post<PlanPreflight>("/api/plan/auto/preflight", req)
-      .then(setData)
-      .catch((e) => setErr((e as Error).message))
-      .finally(() => setBusy(false));
-  }, [JSON.stringify(req)]);
+    setData(null);
+    setCapAck(false);
+    setDailyAck(false);
+    api.post<PlanPreflight>(preflightUrl, req)
+      .then((result) => { if (active) setData(result); })
+      .catch((e) => { if (active) setErr((e as Error).message); })
+      .finally(() => { if (active) setBusy(false); });
+    return () => { active = false; };
+  }, [JSON.stringify(req), checkVersion, preflightUrl]);
 
   const staleDaily = data?.daily_data.filter((d) => d.status !== "ok") ?? [];
   const allDailyOk = staleDaily.length === 0;
 
-  const canProceed = data?.can_plan
+  const canProceed = !busy && !editing && !saving && data?.can_plan
     && (!data.needs_capacity_ack || capAck)
     && (!data.needs_daily_data_ack || dailyAck);
 
@@ -52,19 +69,29 @@ export default function PlanPreflightModal({
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal panel" style={{ maxWidth: 720, width: "96vw" }} onClick={(e) => e.stopPropagation()}>
         <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
-          <h2 style={{ margin: 0 }}>Seçili ufku yeniden planla</h2>
+          <h2 style={{ margin: 0 }}>{revision ? "Revizyon onay ön kontrolü" : "Seçili ufku yeniden planla"}</h2>
           <button className="secondary small" onClick={onClose}>Kapat</button>
         </div>
         <p className="muted" style={{ marginTop: 4 }}>
-          Yalnızca seçili tarih aralığındaki otomatik plan satırları yenilenir; ufuk dışındaki planlar korunur. Ön kontrol tamamlandıktan sonra onayınızla uygulanır.
+          {revision ? "Kontrol taslak değişikliklerini içerir. İş gücü girişlerini burada değiştirirseniz revizyonu yeniden hesaplamanız gerekir." : "Yalnızca seçili tarih aralığındaki otomatik plan satırları yenilenir; ufuk dışındaki planlar korunur. Ön kontrol tamamlandıktan sonra onayınızla uygulanır."}
         </p>
 
         {busy && <p className="muted">Kontroller çalışıyor…</p>}
         {err && <div className="error">{err}</div>}
+        {editing && (
+          <section ref={editorRef}>
+            <h3>Eksik haftalık iş gücünü tamamla</h3>
+            <WcWeeksPanel wcId={editing.id} wcCode={editing.code} start={editing.week} weeks={1} canEdit
+              onSavingChange={setSaving} onChanged={() => { setCapAck(false); }} />
+            <button disabled={saving} onClick={() => { setEditing(null); setCheckVersion((v) => v + 1); }}>
+              {saving ? "Kaydediliyor…" : "Düzenlemeyi bitir ve yeniden kontrol et"}
+            </button>
+          </section>
+        )}
 
         {data && (
           <>
-            <section style={{ marginBottom: 14, padding: "10px 12px", background: "var(--panel-alt, rgba(0,0,0,0.04))", borderRadius: 8 }}>
+            {!revision && <section style={{ marginBottom: 14, padding: "10px 12px", background: "var(--panel-alt, rgba(0,0,0,0.04))", borderRadius: 8 }}>
               <h3 style={{ margin: "0 0 8px" }}>Yeniden planlama kapsamı</h3>
               <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px", fontSize: "0.95em" }}>
                 <span className="muted">Tarih aralığı</span>
@@ -80,7 +107,7 @@ export default function PlanPreflightModal({
                 <span className="muted">Etkilenecek satır</span>
                 <span><b>{data.replace_scope.lines_to_replace}</b> plan satırı silinip yeniden yazılacak</span>
               </div>
-            </section>
+            </section>}
 
             <p style={{ margin: "8px 0" }}>
               <b>{data.order_count}</b> açık sipariş / parti plan kapsamında.
@@ -120,20 +147,21 @@ export default function PlanPreflightModal({
             </section>
 
             <section style={{ marginBottom: 14 }}>
-              <h3 style={{ margin: "0 0 6px", color: data.no_capacity.length ? "var(--warn)" : "var(--ok)" }}>
-                2. İş merkezi kapasitesi {data.no_capacity.length ? `— ${data.no_capacity.length} uyarı` : "— tamam"}
+              <h3 style={{ margin: "0 0 6px", color: data.needs_capacity_ack ? "var(--warn)" : "var(--ok)" }}>
+                2. İş merkezi kapasitesi {data.needs_capacity_ack ? "— kontrol edilmeli" : "— tamam"}
               </h3>
               {data.no_capacity.length === 0 ? (
-                <p className="muted" style={{ margin: 0 }}>İhtiyaç duyulan iş merkezlerinde planlanabilir kapasite var.</p>
+                <p className="muted" style={{ margin: 0 }}>İhtiyaç duyulan iş merkezlerinde seçili haftaların tamamında kapasite var. Bu kontrol tüm ihtiyacın sığacağını garanti etmez.</p>
               ) : (
                 <>
                   <div className="table-wrap" style={{ maxHeight: 160 }}>
                     <table>
-                      <thead><tr><th>İş merkezi</th><th className="num">İhtiyaç (sa)</th><th className="num">Kapasite (sa)</th><th className="num">Kişi</th><th>Açıklama</th></tr></thead>
+                      <thead><tr><th>İş merkezi</th><th>Hafta</th><th className="num">Toplam brüt ihtiyaç (sa)</th><th className="num">Hafta kapasitesi (sa)</th><th className="num">Kişi</th><th>Açıklama</th></tr></thead>
                       <tbody>
                         {data.no_capacity.map((r) => (
-                          <tr key={r.work_center_id}>
+                          <tr key={`${r.work_center_id}-${r.week_start}`}>
                             <td><b>{r.work_center_code}</b></td>
+                            <td>{r.week_start ? weekLabel(r.week_start) : "—"}</td>
                             <td className="num">{fmt(r.needed_hours, 0)}</td>
                             <td className="num">{fmt(r.capacity_hours, 0)}</td>
                             <td className="num">{r.headcount}</td>
@@ -143,11 +171,31 @@ export default function PlanPreflightModal({
                       </tbody>
                     </table>
                   </div>
-                  <label style={{ display: "flex", gap: 8, alignItems: "flex-start", marginTop: 8, cursor: "pointer" }}>
-                    <input type="checkbox" checked={capAck} onChange={(e) => setCapAck(e.target.checked)} />
-                    <span>Kapasite atanmamış iş merkezlerini biliyorum; plan çıktısını bu eksiklikleri göz önünde bulundurarak onaylayacağım.</span>
-                  </label>
                 </>
+              )}
+              {(data.missing_labor_weeks ?? []).length > 0 && (
+                <>
+                  <p className="muted">Önce eksik girişleri düzeltebilirsiniz. Kişi sayısı boş kalan haftalar yalnızca aşağıdaki onayınızı verirseniz sıfır kapasiteyle planlanır; boş kayıtlar sıfır olarak kaydedilmez. Saat ve gün boşsa mevcut varsayılanları kullanılır.</p>
+                  <div className="table-wrap" style={{ maxHeight: 180 }}>
+                    <table>
+                      <thead><tr><th>İş merkezi</th><th>Hafta</th><th>Eksik alanlar</th><th className="num">Devam edilirse kapasite (sa)</th><th></th></tr></thead>
+                      <tbody>{data.missing_labor_weeks.map((r) => (
+                        <tr key={`${r.work_center_id}-${r.week_start}`}>
+                          <td>{r.work_center_code}</td><td>{weekLabel(r.week_start)}</td>
+                          <td>{r.missing_fields.map((field) => laborLabels[field] ?? field).join(", ")}</td>
+                          <td className="num">{fmt(r.capacity_hours, 1)}</td>
+                          <td><button className="secondary small" disabled={!!editing} onClick={() => { setCapAck(false); setEditing({ id: r.work_center_id, code: r.work_center_code, week: r.week_start }); }}>Düzelt</button></td>
+                        </tr>
+                      ))}</tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+              {data.needs_capacity_ack && (
+                <label style={{ display: "flex", gap: 8, alignItems: "flex-start", marginTop: 8, cursor: "pointer" }}>
+                  <input type="checkbox" checked={capAck} disabled={!!editing || saving} onChange={(e) => setCapAck(e.target.checked)} />
+                  <span>Eksikleri gördüm. Kişi sayısı boş kalan haftalarda kapasitenin sıfır kabul edilmesini ve diğer kapasite uyarılarıyla devam etmeyi onaylıyorum.</span>
+                </label>
               )}
             </section>
 
@@ -204,8 +252,8 @@ export default function PlanPreflightModal({
 
             <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
               <button className="secondary" onClick={onClose}>Vazgeç</button>
-              <button onClick={onConfirm} disabled={!canProceed}>
-                {data.can_plan ? "Seçili ufku yeniden planla" : "Planlama yapılamaz"}
+              <button onClick={() => onConfirm(data.missing_headcount_token)} disabled={!canProceed}>
+                {data.can_plan ? (revision ? "Revizyonu onayla ve devreye al" : "Seçili ufku yeniden planla") : "Planlama yapılamaz"}
               </button>
             </div>
           </>

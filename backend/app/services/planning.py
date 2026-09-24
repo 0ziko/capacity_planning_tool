@@ -2,14 +2,17 @@
 
 from collections import defaultdict
 from dataclasses import dataclass
+from app.services.station_capacity import load_budgets, station_room
+from app.services.routing_resource import is_line_operation, planning_unit_hours, line_run_hours, line_quantity_for_hours
 from datetime import date, datetime, timedelta
 
 from sqlalchemy import func
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models import Item, Order, PlanLine, ProductionBatch, ProductionBatchOrder, RoutingOperation, WorkCenter
 from app.services import production_batches as pbatches
 from app.services.orders import effective_due, plan_line_priority_key
+from app.services.material_schedule import recorded_material_note
 from app.schemas import (
     AutoPlanRequest,
     ForecastFromLeadTimeIn,
@@ -86,6 +89,8 @@ class Simulation:
     co_shipment_exceptions: list[dict] | None = None
     material_unverified: bool = False
     material_unverified_order_ids: list[int] | None = None
+    placement_notes: list[dict] | None = None  # JIT kaydirma / ara stok siniri / kayan adet notlari
+    overtime_proposals: list[dict] | None = None  # fazla mesai önerileri (iş merkezi × hafta)
 
     @property
     def planned_hours(self) -> float:
@@ -156,7 +161,7 @@ def _open_orders_with_ops(db: Session) -> list[Order]:
     in_batch = pbatches.batched_order_ids(db)
     rows = (
         db.query(Order)
-        .options(joinedload(Order.item).joinedload(Item.operations), joinedload(Order.item).joinedload(Item.bom_lines))
+        .options(selectinload(Order.item).selectinload(Item.operations), selectinload(Order.item).selectinload(Item.bom_lines))
         .filter(Order.status == "open")
         .order_by(func.coalesce(Order.revised_due_date, Order.due_date), Order.order_no, Order.id)
         .all()
@@ -210,11 +215,24 @@ def _place_quantity(
         op_qty = qty_map.get(op.id, quantity)
         if op_qty <= 1e-6:
             continue
+        from app.services.routing_resource import planning_unit_hours, planning_setup_hours
+        if planning_unit_hours(op) <= 0:
+            unplanned.append(opcon.unplanned_entry(
+                order_no=label or anchor.order_no, item_code=route_item.code,
+                semi_finished_code=semi_finished_code or op.semi_finished_code or "",
+                operation_seq=op.seq, work_center_code=wc_by_id[op.work_center_id].code,
+                hours=0, reason="operasyon_suresi_eksik"))
+            prev_op = op
+            continue
         setup = setup_by_op.get(op.id, True) if setup_by_op is not None else True
         setup_left = setup
-        hours_per_unit = op.cycle_time_sec / 3600.0
-        pred_required = qty_map.get(prev_op.id, 0.0) if prev_op else 0.0
-        pred_week_map = pred_cum_by_week.get(prev_op.id, {}) if prev_op else {}
+        hours_per_unit = planning_unit_hours(op)
+        pred_completed = completed_by_op.get(prev_op.id, 0.0) if prev_op else 0.0
+        succ_completed = completed_by_op.get(op.id, 0.0)
+        pred_required = qty_map.get(prev_op.id, 0.0) + pred_completed if prev_op else 0.0
+        pred_week_map = dict(pred_cum_by_week.get(prev_op.id, {})) if prev_op else {}
+        if pred_completed > 0:
+            pred_week_map[0] = pred_week_map.get(0, 0.0) + pred_completed
 
         idx, wait_reason = opcon.resolve_min_start_for_op(
             op, route_item, prev_op, rules, pred_required, pred_week_map, weeks, min_start_idx
@@ -234,7 +252,7 @@ def _place_quantity(
                     semi_finished_code=semi_finished_code,
                     operation_seq=op.seq,
                     work_center_code=wc_by_id[op.work_center_id].code,
-                    hours=round(operation_run_hours(op, op_qty - cum_planned.get(op.id, 0.0), setup_required=setup_left and cum_planned.get(op.id, 0) <= 1e-6), 2),
+                    hours=round(operation_run_hours(op, op_qty - cum_planned.get(op.id, 0.0), setup_required=setup_left and cum_planned.get(op.id, 0) <= 1e-6), 8),
                     reason=block_reason,
                 )
             )
@@ -247,13 +265,14 @@ def _place_quantity(
 
         while qty_left > 1e-6 and idx <= week_limit:
             rule = rules.get(route_item, prev_op, op) if rules and prev_op else scen.Rule()
-            pred_avail = opcon.predecessor_available(prev_op.id, completed_by_op, cum_planned) if prev_op else op_qty
+            # Only output available by this week can feed the successor.
+            pred_avail = opcon.cumulative_by_week(pred_week_map, idx) if prev_op else op_qty
             qty_cap = opcon.max_successor_qty(
                 rule,
                 pred_required,
                 pred_avail,
-                op_qty,
-                cum_planned.get(op.id, 0.0),
+                op_qty + succ_completed,
+                cum_planned.get(op.id, 0.0) + succ_completed,
             )
             if assembly_outputs is not None and assembly_wip_req:
                 qty_cap = min(
@@ -262,7 +281,7 @@ def _place_quantity(
                 )
             if qty_cap <= 1e-6:
                 if idx >= week_limit:
-                    reason: opcon.BlockReason = "oncul_eksik" if prev_op and pred_avail + 1e-6 < pred_required else "kapasite_yetersiz"
+                    reason: opcon.BlockReason = "yarimamul_eksik" if assembly_outputs is not None and assembly_wip_req and opcon.assembly_cap_qty(assembly_outputs, assembly_wip_req, op_qty) <= cum_planned.get(op.id, 0.0) + 1e-6 else "oncul_eksik" if prev_op and pred_avail + 1e-6 < pred_required else "kapasite_yetersiz"
                     if wait_reason:
                         reason = wait_reason
                     unplanned.append(
@@ -272,7 +291,7 @@ def _place_quantity(
                             semi_finished_code=semi_finished_code,
                             operation_seq=op.seq,
                             work_center_code=wc_by_id[op.work_center_id].code,
-                            hours=round(qty_left * hours_per_unit + (op.setup_time_min / 60.0 if setup_left else 0), 2),
+                            hours=round(operation_run_hours(op, qty_left, setup_required=setup_left), 8),
                             reason=reason,
                         )
                     )
@@ -283,10 +302,15 @@ def _place_quantity(
             week_qty_budget = min(qty_left, qty_cap)
             run_hours = week_qty_budget * hours_per_unit
             if setup_left and cum_planned.get(op.id, 0.0) <= 1e-6:
-                run_hours += op.setup_time_min / 60.0
+                run_hours += planning_setup_hours(op)
+            if is_line_operation(op):
+                run_hours = line_run_hours(op, week_qty_budget)
 
             wk = weeks[idx]
             avail = remaining[(op.work_center_id, wk)]
+            machine_id = None
+            if is_line_operation(op):
+                machine_id, avail = station_room(op, wk, remaining)
             if avail <= 1e-6:
                 if idx >= week_limit:
                     unplanned.append(
@@ -296,7 +320,7 @@ def _place_quantity(
                             semi_finished_code=semi_finished_code,
                             operation_seq=op.seq,
                             work_center_code=wc_by_id[op.work_center_id].code,
-                            hours=round(run_hours, 2),
+                            hours=round(run_hours, 8),
                             reason="kapasite_yetersiz",
                         )
                     )
@@ -304,9 +328,16 @@ def _place_quantity(
                 idx += 1
                 continue
 
-            if run_hours > avail + 1e-6:
+            if is_line_operation(op):
+                from app.services.routing_resource import station_units
+
+                su = station_units(op, machine_id)  # seçilen istasyonun konveyör dizilimi
+                placed_qty = min(week_qty_budget, line_quantity_for_hours(op, avail, units=su))
+                take = line_run_hours(op, placed_qty, units=su)
+                setup_left = False
+            elif run_hours > avail + 1e-6:
                 if setup_left and cum_planned.get(op.id, 0.0) <= 1e-6:
-                    setup_h = op.setup_time_min / 60.0
+                    setup_h = planning_setup_hours(op)
                     if avail <= setup_h + 1e-6:
                         idx += 1
                         continue
@@ -333,7 +364,8 @@ def _place_quantity(
                     operation_id=op.id,
                     work_center_id=op.work_center_id,
                     week_start=wk,
-                    planned_hours=round(take, 3),
+                    machine_id=machine_id,
+                    planned_hours=round(take, 10),
                     planned_qty=round(placed_qty, 2),
                     production_batch_id=production_batch_id,
                     label=label or anchor.order_no,
@@ -341,7 +373,9 @@ def _place_quantity(
                     material_unverified=material_unverified,
                 )
             )
-            remaining[(op.work_center_id, wk)] = avail - take
+            remaining[(op.work_center_id, wk)] -= take
+            if machine_id is not None:
+                remaining[("machine", machine_id, wk)] -= take
             cum_planned[op.id] = cum_planned.get(op.id, 0.0) + placed_qty
             pred_cum_by_week.setdefault(op.id, {})[idx] = pred_cum_by_week.get(op.id, {}).get(idx, 0.0) + placed_qty
             qty_left -= placed_qty
@@ -349,7 +383,7 @@ def _place_quantity(
                 first_idx = idx
             op_last_idx = idx
             last_idx = max(last_idx, idx)
-            if qty_left > 1e-6:
+            if qty_left > 1e-6 and (not is_line_operation(op) or station_room(op, wk, remaining)[1] <= 1e-6):
                 idx += 1
 
         if qty_left > 1e-6 and not any(u.get("operation_seq") == op.seq for u in unplanned):
@@ -366,7 +400,7 @@ def _place_quantity(
                     semi_finished_code=semi_finished_code,
                     operation_seq=op.seq,
                     work_center_code=wc_by_id[op.work_center_id].code,
-                    hours=round(qty_left * hours_per_unit, 2),
+                    hours=round(operation_run_hours(op, qty_left, setup_required=setup_left), 8),
                     reason=tail_reason,
                 )
             )
@@ -394,6 +428,9 @@ def _place_order(
     produced_map: dict | None = None,
     material_min_idx: int = 0,
     material_unverified: bool = False,
+    qty_factor: float = 1.0,
+    max_week_idx: int | None = None,
+    prep: bool = False,
 ) -> tuple[list[DraftLine], list[dict]]:
     if sched_ctx is None:
         sched_ctx = SchedulingContext(horizon_start=weeks[0], horizon_end_exclusive=weeks[-1] + timedelta(days=7))
@@ -405,7 +442,7 @@ def _place_order(
         setup: dict[int, bool] = {}
         for op in ops:
             q, s = qty_and_setup_for_placement(work_map, op)
-            qty[op.id] = q
+            qty[op.id] = q * qty_factor if qty_factor < 1.0 else q
             setup[op.id] = s
         return qty, setup
 
@@ -426,7 +463,7 @@ def _place_order(
             lbl = f"{o.order_no}/{job.label_suffix}" if job.label_suffix else o.order_no
             ls, un, end_idx = _place_quantity(
                 o,
-                job.quantity,
+                job.quantity * qty_factor,
                 lbl,
                 None,
                 wc_by_id,
@@ -441,6 +478,7 @@ def _place_order(
                 setup_by_op=setup_by_op,
                 completed_by_op=completed,
                 material_unverified=material_unverified,
+                max_week_idx=max_week_idx,
             )
             all_lines.extend(ls)
             all_unplanned.extend(un)
@@ -449,6 +487,8 @@ def _place_order(
             wip_end = max(wip_end, end_idx)
         if jobs.finish_job:
             rem_ops = [op for op in sorted(jobs.finish_job.item.operations or [], key=lambda x: x.seq) if op.work_center_id in wc_by_id]
+            if prep:
+                rem_ops = rem_ops[:-1]  # hazırlık: bitmiş ürün adımı yazılmaz
             if rem_ops:
                 qty_by_op, setup_by_op = _maps_for_ops(rem_ops)
                 if sum(qty_by_op.values()) > 1e-6:
@@ -460,10 +500,10 @@ def _place_order(
                             continue
                         last_op = wops[-1]
                         assembly_outputs[job.semi_finished_code] = completed.get(last_op.id, 0.0) + wip_placed.get(last_op.id, 0.0)
-                        wip_req.append((job.semi_finished_code, job.quantity))
+                        wip_req.append((job.semi_finished_code, job.quantity * qty_factor))
                     ls, un, _ = _place_quantity(
                         o,
-                        jobs.finish_job.quantity,
+                        jobs.finish_job.quantity * qty_factor,
                         o.order_no,
                         None,
                         wc_by_id,
@@ -480,11 +520,14 @@ def _place_order(
                         assembly_outputs=assembly_outputs,
                         assembly_wip_req=wip_req,
                         material_unverified=material_unverified,
+                        max_week_idx=max_week_idx,
                     )
                     all_lines.extend(ls)
                     all_unplanned.extend(un)
         return all_lines, all_unplanned
     rem_ops = [op for op in sorted(o.item.operations or [], key=lambda x: x.seq) if op.work_center_id in wc_by_id]
+    if prep:
+        rem_ops = rem_ops[:-1]  # hazırlık: son operasyon (bitmiş ürün) yazılmaz
     if not rem_ops:
         return [], []
     qty_by_op, setup_by_op = _maps_for_ops(rem_ops)
@@ -492,7 +535,7 @@ def _place_order(
         return [], []
     ls, un, _ = _place_quantity(
         o,
-        o.quantity,
+        o.quantity * qty_factor,
         o.order_no,
         None,
         wc_by_id,
@@ -505,6 +548,7 @@ def _place_order(
         completed_by_op=completed,
         min_start_idx=material_min_idx,
         material_unverified=material_unverified,
+        max_week_idx=max_week_idx,
     )
     return ls, un
 
@@ -534,6 +578,7 @@ def _place_batch(
     *,
     material_min_idx: int = 0,
     material_unverified: bool = False,
+    max_week_idx: int | None = None,
 ) -> tuple[list[DraftLine], list[dict], int]:
     if not batch.item:
         return [], [], 0
@@ -582,6 +627,7 @@ def _place_batch(
                 setup_by_op=setup_by_op,
                 completed_by_op=completed,
                 material_unverified=material_unverified,
+                max_week_idx=max_week_idx,
             )
             all_lines.extend(ls)
             all_unplanned.extend(un)
@@ -621,6 +667,7 @@ def _place_batch(
                         assembly_outputs=assembly_outputs,
                         assembly_wip_req=wip_req,
                         material_unverified=material_unverified,
+                        max_week_idx=max_week_idx,
                     )
                     all_lines.extend(ls)
                     all_unplanned.extend(un)
@@ -649,6 +696,7 @@ def _place_batch(
         completed_by_op=completed,
         min_start_idx=material_min_idx,
         material_unverified=material_unverified,
+        max_week_idx=max_week_idx,
     )
 
 
@@ -680,8 +728,8 @@ def _material_context(
             {
                 "order_no": candidate.display_code,
                 "item_code": item_code,
-                "reason": "malzeme_unknown_strict",
-                "detail": "Malzeme durumu bilinmiyor; strict modda planlanmaz.",
+                "reason": "material_date_missing" if gate.status == "expected" else "malzeme_unknown_strict",
+                "detail": "Beklenen malzemenin hazır olacağı tarih girilmemiş." if gate.status == "expected" else "Malzeme durumu bilinmiyor; strict modda planlanmaz.",
             },
         )
     idx = week_index(weeks, gate.earliest_week) if gate.earliest_week else 0
@@ -699,6 +747,9 @@ def _place_candidate(
     produced_map: dict,
     *,
     material_policy: str = "conditional",
+    qty_factor: float = 1.0,
+    max_week_idx: int | None = None,
+    prep: bool = False,
 ) -> tuple[list[DraftLine], list[dict]]:
     min_idx, m_unv, blocked = _material_context(candidate, weeks, material_policy)
     if blocked:
@@ -717,8 +768,13 @@ def _place_candidate(
             produced_map=produced_map,
             material_min_idx=min_idx,
             material_unverified=m_unv,
+            qty_factor=qty_factor,
+            max_week_idx=max_week_idx,
+            prep=prep,
         )
     if candidate.batch and candidate.anchor_order:
+        if prep:
+            return [], []  # üretim partileri için hazırlık dolgusu yok
         ls, un, _ = _place_batch(
             db,
             candidate.batch,
@@ -731,9 +787,257 @@ def _place_candidate(
             produced_map,
             material_min_idx=min_idx,
             material_unverified=m_unv,
+            max_week_idx=max_week_idx,
         )
         return ls, un
     return [], []
+
+
+def _finish_ops(order: Order, wc_by_id: dict[int, WorkCenter]) -> list[RoutingOperation]:
+    ops = (order.item.operations if order.item is not None else None) or []
+    return [op for op in sorted(ops, key=lambda x: x.seq) if op.work_center_id in wc_by_id]
+
+
+def _finish_output_qty(order: Order, wc_by_id: dict[int, WorkCenter], lines: list[DraftLine]) -> float:
+    """Yerleşen satırlardan bitmiş ürün (rota son operasyonu) adedi."""
+    ops = _finish_ops(order, wc_by_id)
+    if not ops:
+        return 0.0
+    last_id = ops[-1].id
+    return sum(l.planned_qty for l in lines if l.operation_id == last_id and l.order_id == order.id)
+
+
+def _finish_remaining_qty(db: Session, order: Order, wc_by_id: dict[int, WorkCenter], sched_ctx: SchedulingContext, produced_map: dict) -> float:
+    ops = _finish_ops(order, wc_by_id)
+    if not ops:
+        return 0.0
+    wm = build_work_map_for_order(db, order, sched_ctx, produced=produced_map)
+    q, _ = qty_and_setup_for_placement(wm, ops[-1])
+    return float(q or 0.0)
+
+
+_PASS_THROUGH_REASONS = {"operasyon_suresi_eksik", "rota_dongusu", "material_date_missing", "malzeme_unknown_strict"}
+
+
+def _candidate_full_hours(db: Session, o: Order, wc_by_id: dict[int, WorkCenter], sched_ctx: SchedulingContext, produced_map: dict) -> tuple[dict[int, float], dict[int, RoutingOperation]]:
+    """Siparişin (parçalar + bitiş rotası) kalan işinin operasyon bazında tam saati; plansız muhasebesi için."""
+    from app.services.routing_resource import planning_setup_hours
+
+    wm = build_work_map_for_order(db, o, sched_ctx, produced=produced_map)
+    if has_wip_structure(o):
+        jobs = explode_order(db, o)
+        items = [j.item for j in jobs.wip_jobs] + ([jobs.finish_job.item] if jobs.finish_job else [])
+    else:
+        items = [o.item]
+    full: dict[int, float] = {}
+    ops_by_id: dict[int, RoutingOperation] = {}
+    for it in items:
+        for op in sorted((it.operations if it is not None else None) or [], key=lambda x: x.seq):
+            if op.work_center_id not in wc_by_id:
+                continue
+            q, setup = qty_and_setup_for_placement(wm, op)
+            if q <= 1e-6 or planning_unit_hours(op) <= 0:
+                continue
+            h = line_run_hours(op, q) if is_line_operation(op) else q * planning_unit_hours(op) + (planning_setup_hours(op) if setup else 0.0)
+            full[op.id] = full.get(op.id, 0.0) + h
+            ops_by_id[op.id] = op
+    return full, ops_by_id
+
+
+def _place_candidate_balanced(
+    db: Session,
+    c: PlanningCandidate,
+    wc_by_id: dict[int, WorkCenter],
+    weeks: list[date],
+    remaining: dict,
+    pool,
+    rules: scen.RuleLookup | None,
+    sched_ctx: SchedulingContext,
+    produced_map: dict,
+    *,
+    material_policy: str,
+    slip_mode: str,
+    use_overtime: bool,
+) -> tuple[list[DraftLine], list[dict], dict, list[dict]]:
+    """Dengeli yerleşim (Aşama 2).
+
+    1. Hedef haftaya (etkin termin − teslim tamponu) kadar normal kapasiteyle çıkabilecek bitmiş ürün adedi
+       deneme yerleşimiyle bulunur; tüm parça ve operasyonlar o adette yerleşir (yetim parça üretilmez).
+    2. Kalan adet için fazla mesai havuzu açılır (aynı hedef hafta); kullanılan saat öneri olur.
+    3. Hâlâ kalan adet: chain ⇒ hedef sonrasına dengeli yerleşir (satır etiketi slip, zincir etkisi görünür);
+       defer ⇒ plana yazılmaz, tahmini bitişle plansız (termin_kaydi) raporlanır.
+    Termini ufuk başından önce olan sipariş: hedef yok; ufuk içinde dengeli ASAP, fazla mesai kullanılmaz
+    (önce revize termin girilmeli). Üretim partileri eski yoldan yerleşir.
+    Döner: satırlar, plansız, yeni normal kalan kapasite, notlar (kind=slip)."""
+    from dataclasses import replace as _replace
+
+    from app.services import overtime_pool as otp
+
+    def _place(rem: dict, factor: float, max_idx: int | None):
+        return _place_candidate(db, c, wc_by_id, weeks, rem, rules, sched_ctx, produced_map,
+                                material_policy=material_policy, qty_factor=factor, max_week_idx=max_idx)
+
+    o = c.order
+    if c.kind != "order" or o is None or o.item is None:
+        ls, un = _place(remaining, 1.0, None)
+        return ls, un, remaining, []
+    F = _finish_remaining_qty(db, o, wc_by_id, sched_ctx, produced_map)
+    if F <= otp.EPS:
+        ls, un = _place(remaining, 1.0, None)
+        return ls, un, remaining, []
+    tgt = otp.target_week_index(weeks, c.effective_due_date)
+    limit = 0 if tgt < 0 else tgt  # termini geçmiş: hedef = en erken hafta; sığmayan kalan (mesai dahil) aşağıda ele alınır
+    lines: list[DraftLine] = []
+    unplanned: list[dict] = []
+
+    trial = dict(remaining)
+    ls_a, un_a = _place(trial, 1.0, limit)
+    A = _finish_output_qty(o, wc_by_id, ls_a)
+    if A >= F - otp.EPS or any(u.get("reason") in _PASS_THROUGH_REASONS and not u.get("operation_seq") for u in un_a):
+        return ls_a, un_a, trial, []  # tam yerleşti veya aday düzeyinde engel (malzeme / rota döngüsü)
+    bottleneck = next((u.get("work_center_code") for u in un_a if u.get("reason") == "kapasite_yetersiz"), None) \
+        or (un_a[0].get("work_center_code") if un_a else None)
+    if A > otp.EPS:
+        ls, _un = _place(remaining, A / F, limit)
+        lines.extend(ls)
+    rem_f = max(0.0, 1.0 - A / F)
+
+    B = 0.0
+    if tgt >= 0 and use_overtime and rem_f > otp.EPS and pool is not None and pool.has_capacity():
+        merged = pool.merged(remaining)
+        trial = dict(merged)
+        ls_b, _ = _place(trial, rem_f, limit)
+        B = _finish_output_qty(o, wc_by_id, ls_b)
+        if B > otp.EPS:
+            if B < rem_f * F - otp.EPS:
+                trial = dict(merged)
+                ls_b, _ = _place(trial, B / F, limit)
+            remaining, ot_cells = pool.split_usage(remaining, merged, trial)
+            lines.extend(_replace(l, tag="overtime") if (l.work_center_id, l.week_start) in ot_cells else l for l in ls_b)
+            rem_f = max(0.0, rem_f - B / F)
+
+    slip_qty = rem_f * F
+    est_week: date | None = None
+    slip_hours = 0.0
+    ot_saved_weeks = 0
+    ot_extra_qty = 0.0
+    if rem_f > otp.EPS:
+        # Kalan adet de dengeli: ufuk içinde normal kapasiteyle çıkabilecek adet (C) ve bitiş haftası deneme ile bulunur.
+        # Termini geçmiş siparişte de aynı yol (hedef = en erken). Sığmayan kısım kök neden kayıtlarıyla plansız kalır.
+        trial = dict(remaining)
+        ls_t, un_t = _place(trial, rem_f, None)
+        C = _finish_output_qty(o, wc_by_id, ls_t)
+        est_n = max((l.week_start for l in ls_t), default=None)
+        merged = None
+        # Fazla mesai: hedefi tam kurtarmasa da gecikmeyi azaltıyorsa (daha çok bitmiş adet ya da daha erken bitiş) kabul.
+        # Termini geçmiş siparişler termin sırasında en önde olduğu için havuzdan ilk onlar yararlanır. 'Komple kaydır' modunda
+        # kalan adet plana yazılmadığı için mesai de değerlendirilmez.
+        if use_overtime and (slip_mode == "chain" or tgt < 0) and pool is not None and pool.has_capacity():
+            m_try = pool.merged(remaining)
+            trial_o = dict(m_try)
+            ls_o, un_o = _place(trial_o, rem_f, None)
+            Co = _finish_output_qty(o, wc_by_id, ls_o)
+            est_o = max((l.week_start for l in ls_o), default=None)
+            improves = Co > C + otp.EPS or (Co >= C - otp.EPS and est_o is not None and est_n is not None and est_o < est_n)
+            if improves:
+                ot_extra_qty = max(0.0, Co - C)
+                ot_saved_weeks = ((est_n - est_o).days // 7) if (est_n and est_o and est_o < est_n) else 0
+                ls_t, un_t, trial, C, merged = ls_o, un_o, trial_o, Co, m_try
+        ot_cells2: set = set()
+        if C >= rem_f * F - otp.EPS:
+            ls_c, un_c, after = ls_t, un_t, trial
+        elif C > otp.EPS:
+            after = dict(merged if merged is not None else remaining)
+            ls_c, _ = _place(after, C / F, None)
+            un_c = un_t
+        else:
+            ls_c, un_c, after = [], un_t, dict(remaining)
+        if merged is not None and ls_c:
+            after, ot_cells2 = pool.split_usage(remaining, merged, after)
+        slip_hours = sum(l.planned_hours for l in ls_c)
+        est_week = max((l.week_start for l in ls_c), default=None)
+        if (slip_mode == "chain" or tgt < 0) and ls_c:
+            remaining = after
+            lines.extend(_replace(l, tag=("overtime" if (l.work_center_id, l.week_start) in ot_cells2 else ("slip" if tgt >= 0 else ""))) for l in ls_c)
+        # Plansız muhasebesi: tam ihtiyaç − yerleşen. Kök neden (kapasite/yarımamül/bekleme) deneme kayıtlarından,
+        # geri kalanı 'darboğaz bekliyor' (tek sayım; her operasyonun saati bir kez yazılır).
+        deferred: dict[int, float] = defaultdict(float)
+        if tgt >= 0 and slip_mode != "chain":
+            for l in ls_c:
+                deferred[l.operation_id] += l.planned_hours
+        root: dict[tuple[int, str], str] = {}
+        seen_pt: set = set()
+        for u in list(un_t) + list(un_a):  # veri eksiği kayıtları (süre 0, döngü) aynen aktarılır
+            if u.get("reason") in _PASS_THROUGH_REASONS:
+                k = (u.get("operation_seq"), u.get("work_center_code"), u.get("reason"))
+                if k not in seen_pt:
+                    seen_pt.add(k)
+                    unplanned.append(u)
+        for u in list(un_a) + list(un_t):
+            root[(int(u.get("operation_seq") or 0), u.get("work_center_code") or "")] = u.get("reason") or "kapasite_yetersiz"
+        full, ops_by_id = _candidate_full_hours(db, o, wc_by_id, sched_ctx, produced_map)
+        placed: dict[int, float] = defaultdict(float)
+        for l in lines:
+            placed[l.operation_id] += l.planned_hours
+        for op_id, fh in full.items():
+            cut = fh - placed.get(op_id, 0.0)
+            if cut <= 0.01:  # yuvarlama artığı (36 sn altı) plansız sayılmaz
+                continue
+            op = ops_by_id[op_id]
+            wc_code = wc_by_id[op.work_center_id].code
+            common = dict(order_no=c.display_code, item_code=c.route_item.code if c.route_item else "", semi_finished_code=op.semi_finished_code or "",
+                          operation_seq=op.seq, work_center_code=wc_code)
+            d = min(cut, deferred.get(op_id, 0.0))
+            if d > 1e-6:
+                entry = opcon.unplanned_entry(hours=round(d, 8), reason="termin_kaydi", **common)  # type: ignore[arg-type]
+                entry["detail"] = f"Hedef tarihe sığmayan {slip_qty:.0f} adet plana yazılmadı; tahmini bitiş haftası {est_week.isoformat() if est_week else '-'}; darboğaz {bottleneck or '-'}"
+                unplanned.append(entry)
+                cut -= d
+            if cut > 1e-6:
+                reason = root.get((op.seq, wc_code)) or "darbogaz_bekliyor"
+                entry = opcon.unplanned_entry(hours=round(cut, 8), reason=reason, **common)  # type: ignore[arg-type]
+                if reason == "darbogaz_bekliyor":
+                    entry["detail"] = f"{bottleneck or 'darboğaz'} yetişmediği için bu adım dengeli olarak kısıldı"
+                    entry["blocked_by"] = bottleneck
+                unplanned.append(entry)
+    note = {
+        "kind": "slip", "label": c.display_code, "order_id": o.id,
+        "detail": (f"Hedefte {A:.0f}/{F:.0f} adet" + (f", fazla mesaiyle +{B:.0f}" if B > otp.EPS else "")
+                   + (f"; kalan {slip_qty:.0f} adet " + ("ufka sığmadı" if tgt < 0 else ("hedef sonrasına yerleşti" if slip_mode == "chain" else "plana yazılmadı"))
+                      + (f" (tahmini bitiş {est_week.isoformat()})" if est_week else "") if slip_qty > otp.EPS else "")
+                   + (f"; darboğaz {bottleneck}" if bottleneck else "")),
+        "hours": round(slip_hours, 2), "qty": round(slip_qty, 2),
+        "target_qty": round(A, 2), "overtime_qty": round(B, 2), "remaining_qty": round(F, 2),
+        "bottleneck": bottleneck, "est_finish_week": est_week.isoformat() if est_week else None,
+        "overdue": tgt < 0, "slip_mode": slip_mode,
+        "unplaced_qty": round(max(F - _finish_output_qty(o, wc_by_id, lines), 0.0), 2),  # hazırlık dolgusu adayı
+        "overtime_saved_weeks": ot_saved_weeks, "overtime_extra_qty": round(ot_extra_qty, 2),
+    }
+    return lines, unplanned, remaining, [note]
+
+
+def _note_prep(prep_todo: list, c: PlanningCandidate, notes_: list[dict]) -> None:
+    for n in notes_:
+        if n.get("kind") == "slip" and (n.get("unplaced_qty") or 0) > 1e-6 and (n.get("remaining_qty") or 0) > 1e-6:
+            prep_todo.append((c, min(1.0, float(n["unplaced_qty"]) / float(n["remaining_qty"]))))
+
+
+def _reduce_unplanned(unplanned: list[dict], order_no: str, prep_lines: list[DraftLine], wc_by_id: dict[int, WorkCenter]) -> None:
+    """Hazırlıkta yerleşen saat, aynı siparişin plansız kayıtlarından (aynı iş merkezi) düşülür; tek sayım korunur."""
+    placed: dict[str, float] = defaultdict(float)
+    for l in prep_lines:
+        placed[wc_by_id[l.work_center_id].code] += l.planned_hours
+    for u in unplanned:
+        if u.get("order_no") != order_no or u.get("reason") in _PASS_THROUGH_REASONS:
+            continue
+        wc = u.get("work_center_code") or ""
+        left = placed.get(wc, 0.0)
+        if left <= 1e-6:
+            continue
+        take = min(left, float(u.get("hours") or 0))
+        u["hours"] = round(float(u.get("hours") or 0) - take, 8)
+        placed[wc] = left - take
+    unplanned[:] = [u for u in unplanned if float(u.get("hours") or 0) > 1e-6 or u.get("reason") in _PASS_THROUGH_REASONS]
 
 
 def _try_place_candidate(
@@ -778,7 +1082,7 @@ def simulate(
     batches = list(pbatches.open_batches_with_ops(db)) + list(extra_batches)
     all_orders = (
         db.query(Order)
-        .options(joinedload(Order.item).joinedload(Item.operations), joinedload(Order.item).joinedload(Item.bom_lines))
+        .options(selectinload(Order.item).selectinload(Item.operations), selectinload(Order.item).selectinload(Item.bom_lines))
         .filter(Order.status == "open")
         .order_by(func.coalesce(Order.revised_due_date, Order.due_date), Order.order_no, Order.id)
         .all()
@@ -810,7 +1114,20 @@ def simulate(
             if not req.replace_existing:
                 used += auto.get((w.id, wk), 0.0)
             remaining[(w.id, wk)] = max(plan_cap - used, 0.0)
+    from app.services import overtime_pool as otp
+
+    pool = otp.build_pool(db, wcs, weeks)
+    if req.replace_existing:
+        for k, h in pool.proposed_base.items():  # eski plandan kalan 'onay bekliyor' fazla mesaisi taban kapasite değildir
+            remaining[k] = max(remaining.get(k, 0.0) - h, 0.0)
+    if not bool(getattr(req, "use_overtime", True)):
+        pool.potential = {}
+    slip_mode = str(getattr(req, "slip_mode", "chain") or "chain")
+    use_ot = bool(getattr(req, "use_overtime", True))
+    slip_notes: list[dict] = []
+    prep_todo: list[tuple[PlanningCandidate, float]] = []  # (aday, yerleşmeyen adet oranı)
     capacity_total = sum(remaining.values())
+    load_budgets(db, wcs, weeks, remaining, replace_auto=req.replace_existing)
 
     lines: list[DraftLine] = []
     unplanned: list[dict] = []
@@ -840,6 +1157,20 @@ def simulate(
             if ln.material_unverified:
                 mat_unverified_ids.add(ln.order_id)
 
+    flow_mode = str(getattr(req, "placement", "flow") or "flow") == "flow"
+    flow_notes: list[dict] = []
+
+    def _flow_align(new_lines: list[DraftLine]) -> list[DraftLine]:
+        """Akis modu: aday yerlesir yerlesmez onculleri ardilina yaslanir; boşalan erken kapasite sonraki
+        adaylara acilir (toplam kapasite kullanimi artar, ara stok dusuk kalir, bitis erken kalir)."""
+        if not flow_mode or not new_lines:
+            return new_lines
+        from app.services.jit_placement import apply_placement_pass as _pass
+
+        aligned, notes_ = _pass(db, new_lines, weeks, remaining, mode="flow", buffer_days=0)
+        flow_notes.extend(notes_)
+        return aligned
+
     if req.mode == "revenue":
         ranked = sort_candidates(candidates, "revenue")
         leftover: list[PlanningCandidate] = []
@@ -854,9 +1185,13 @@ def simulate(
             else:
                 leftover.append(c)
         for c in sort_candidates(leftover, "due_date"):
-            ls, un = _place_candidate(
-                db, c, wc_by_id, weeks, remaining, rules, sched_ctx, produced_map, material_policy=mat_policy
+            ls, un, remaining, notes_ = _place_candidate_balanced(
+                db, c, wc_by_id, weeks, remaining, pool, rules, sched_ctx, produced_map,
+                material_policy=mat_policy, slip_mode=slip_mode, use_overtime=use_ot,
             )
+            slip_notes.extend(notes_)
+            _note_prep(prep_todo, c, notes_)
+            ls = _flow_align(ls)
             lines.extend(ls)
             unplanned.extend(un)
             _collect_lines(ls)
@@ -864,13 +1199,45 @@ def simulate(
                 skipped.append(candidate_skipped_record(c))
     else:
         for c in sort_candidates(candidates, "due_date"):
-            ls, un = _place_candidate(
-                db, c, wc_by_id, weeks, remaining, rules, sched_ctx, produced_map, material_policy=mat_policy
+            ls, un, remaining, notes_ = _place_candidate_balanced(
+                db, c, wc_by_id, weeks, remaining, pool, rules, sched_ctx, produced_map,
+                material_policy=mat_policy, slip_mode=slip_mode, use_overtime=use_ot,
             )
+            slip_notes.extend(notes_)
+            _note_prep(prep_todo, c, notes_)
+            ls = _flow_align(ls)
             lines.extend(ls)
             unplanned.extend(un)
             _collect_lines(ls)
 
+    # Aşama 4: hazırlık dolgusu. Termin işleri yerleştikten sonra kalan NORMAL kapasiteye (fazla mesai yok),
+    # termin sırasıyla, bitmiş ürüne dönüşemeyen adedin yarımamülleri (son operasyon hariç) 'prep' etiketiyle yazılır.
+    if bool(getattr(req, "prep_fill", True)) and prep_todo:
+        from dataclasses import replace as _replace_line
+
+        for c, frac in prep_todo:
+            ls, _un = _place_candidate(db, c, wc_by_id, weeks, remaining, rules, sched_ctx, produced_map,
+                                       material_policy=mat_policy, qty_factor=frac, max_week_idx=None, prep=True)
+            if not ls:
+                continue
+            ls = _flow_align([_replace_line(l, tag="prep") for l in ls])
+            lines.extend(ls)
+            _collect_lines(ls)
+            _reduce_unplanned(unplanned, c.display_code, ls, wc_by_id)
+            slip_notes.append({"kind": "prep", "label": c.display_code, "order_id": c.order.id if c.order else None,
+                               "hours": round(sum(l.planned_hours for l in ls), 2), "qty": round(max((l.planned_qty for l in ls), default=0.0), 2),
+                               "detail": f"{round(sum(l.planned_hours for l in ls), 1)} sa hazırlık: bitmiş ürüne dönüşemeyen %{frac * 100:.0f} için yarımamül atıl kapasitede üretildi (fazla mesai yok)"})
+
+    # Son gecis: termine yakin (JIT) kaydirma ve/veya yarimamul ara stok siniri; satirlar yalnizca daha gece kayar.
+    from app.services.jit_placement import apply_placement_pass
+
+    lines, placement_notes = apply_placement_pass(
+        db, lines, weeks, remaining,
+        mode=str(getattr(req, "placement", "flow") or "flow"),
+        buffer_days=int(getattr(req, "jit_buffer_days", 2) or 0),
+        skip_order_ids=set(co_handled),
+    )
+    placement_notes = slip_notes + flow_notes + placement_notes
     return Simulation(
         req.mode,
         start,
@@ -885,6 +1252,8 @@ def simulate(
         co_exceptions,
         material_unverified=bool(mat_unverified_ids),
         material_unverified_order_ids=sorted(mat_unverified_ids),
+        placement_notes=placement_notes,
+        overtime_proposals=otp.proposals(pool),
     )
 
 
@@ -894,11 +1263,14 @@ def draft_line_to_dict(line: DraftLine) -> dict:
         "production_batch_id": line.production_batch_id,
         "operation_id": line.operation_id,
         "work_center_id": line.work_center_id,
+        "machine_id": line.machine_id,
         "week_start": line.week_start.isoformat(),
         "planned_hours": round(float(line.planned_hours or 0), 6),
         "planned_qty": round(float(line.planned_qty or 0), 6),
         "mode": line.mode or "auto",
+        "material_unverified": line.material_unverified,
         "semi_finished_code": line.semi_finished_code or "",
+        "tag": line.tag or "",
     }
 
 
@@ -912,6 +1284,7 @@ def apply_plan_snapshot(
     replace_manual: bool,
     keep_line_mode: bool = False,
     message_tag: str = "revizyon snapshot",
+    overtime_proposals: list[dict] | None = None,
 ) -> dict:
     """Onayda kayitli plan satirlarini aynen yazar (yeniden simulate etmez).
 
@@ -924,6 +1297,9 @@ def apply_plan_snapshot(
     modes = replace_scope_modes(replace_manual=replace_manual)
     delete_lines_in_replace_scope(db, wc_ids, scope, modes)
     db.flush()
+    from app.services import overtime_pool as otp
+
+    otp.apply_proposals(db, overtime_proposals or [], wc_ids, [scope.start + timedelta(weeks=i) for i in range(req.weeks)], clear_existing=True)
     for row in plan_lines:
         mode = row.get("mode") or "auto"
         if not keep_line_mode:
@@ -931,15 +1307,18 @@ def apply_plan_snapshot(
         db.add(
             PlanLine(
                 order_id=int(row["order_id"]),
+                material_unverified=row.get("material_unverified"),
                 production_batch_id=row.get("production_batch_id"),
                 operation_id=int(row["operation_id"]),
                 work_center_id=int(row["work_center_id"]),
+                machine_id=row.get("machine_id"),
                 week_start=date.fromisoformat(str(row["week_start"])[:10]),
                 planned_hours=float(row["planned_hours"]),
                 planned_qty=float(row.get("planned_qty") or 0),
                 semi_finished_code=row.get("semi_finished_code") or "",
                 mode=mode if mode in ("auto", "manual") else "auto",
                 strategy=req.mode,
+                tag=row.get("tag") or "",
                 revision_id=revision_id,
                 created_by=username,
             )
@@ -988,19 +1367,25 @@ def write_simulation(
             modes = replace_scope_modes(replace_manual=replace_manual)
             delete_lines_in_replace_scope(db, wc_ids, scope, modes)
             db.flush()
+        from app.services import overtime_pool as otp
+
+        otp.apply_proposals(db, sim.overtime_proposals or [], wc_ids, sim.weeks, clear_existing=bool(req.replace_existing))
         for l in sim.lines:
             db.add(
                 PlanLine(
                     order_id=l.order_id,
+                    material_unverified=l.material_unverified,
                     production_batch_id=l.production_batch_id,
                     operation_id=l.operation_id,
                     work_center_id=l.work_center_id,
+                    machine_id=l.machine_id,
                     week_start=l.week_start,
                     planned_hours=l.planned_hours,
                     planned_qty=l.planned_qty,
                     semi_finished_code=l.semi_finished_code or "",
                     mode=l.mode if keep_line_mode and l.mode in ("auto", "manual") else "auto",
                     strategy=req.mode,
+                    tag=l.tag or "",
                     revision_id=revision_id,
                     created_by=username,
                 )
@@ -1024,6 +1409,11 @@ def write_simulation(
         "co_shipment_exceptions": sim.co_shipment_exceptions or [],
         "material_unverified": bool(sim.material_unverified),
         "material_unverified_order_ids": sim.material_unverified_order_ids or [],
+        "placement": getattr(req, "placement", "flow"),
+        "placement_notes": sim.placement_notes or [],
+        "overtime_proposals": sim.overtime_proposals or [],
+        "slip_mode": getattr(req, "slip_mode", "chain"),
+        "prep_hours": round(sum(l.planned_hours for l in sim.lines if (l.tag or "") == "prep"), 1),
     }
     if sim.material_unverified:
         out["message"] += " Malzeme dogrulanmadi (kosullu plan)."
@@ -1040,19 +1430,26 @@ def auto_plan(
     replace_manual: bool = False,
 ) -> dict:
     sim = simulate(db, req)
-    out = write_simulation(db, req, sim, username, revision_id=revision_id, commit=commit, replace_manual=replace_manual)
-    if req.planning_granularity == "daily_detailed":
-        from app.services.daily_scheduler import build_daily_schedule
+    try:
+        # Weekly replacement and daily schedule are one transaction. A failed
+        # daily calculation must not leave a newly committed weekly plan.
+        out = write_simulation(db, req, sim, username, revision_id=revision_id, commit=False, replace_manual=replace_manual)
+        if req.planning_granularity == "daily_detailed":
+            from app.services.daily_scheduler import build_daily_schedule
 
-        dr = build_daily_schedule(db, req, username=username, plan_lines=sim.lines)
+            dr = build_daily_schedule(db, req, username=username, plan_lines=sim.lines)
+            out["daily_schedule"] = {
+                "version_id": dr.version_id,
+                "segments_created": dr.segments_created,
+                "skipped": dr.skipped,
+                "remaining_qty": dr.remaining_qty,
+            }
         if commit:
             db.commit()
-        out["daily_schedule"] = {
-            "version_id": dr.version_id,
-            "segments_created": dr.segments_created,
-            "skipped": dr.skipped,
-            "remaining_qty": dr.remaining_qty,
-        }
+    except Exception:
+        if commit:
+            db.rollback()
+        raise
     return out
 
 
@@ -1064,12 +1461,33 @@ def add_manual_line(db: Session, line: ManualPlanLineIn, username: str) -> PlanL
     total = op.hours_for(order.quantity)
     hours = line.planned_hours if line.planned_hours is not None else total
     qty = line.planned_qty if line.planned_qty is not None else (order.quantity * hours / total if total > 0 else 0)
+    machine_id = None
+    if is_line_operation(op):
+        week = cap.week_start(line.week_start)
+        hours = line_run_hours(op, qty)
+        if hours <= 0:
+            raise ValueError("Hat ilerleme süresi ve miktar pozitif olmalı")
+        used = planned_hours_by_week(db, [op.work_center_id], week, week)
+        remaining = {(op.work_center_id, week): max(0, cap.planning_capacity_hours(db, op.work_center, week) - used.get((op.work_center_id, week), 0))}
+        load_budgets(db, [op.work_center], [week], remaining)
+        if line.machine_id is not None:
+            for m in op.work_center.machines:
+                if m.id != line.machine_id:
+                    remaining[("machine", m.id, week)] = 0
+        machine_id, room = station_room(op, week, remaining)
+        while machine_id is not None and room + 1e-6 < hours:
+            remaining[("machine", machine_id, week)] = 0
+            machine_id, room = station_room(op, week, remaining)
+        if room + 1e-6 < hours or machine_id is None:
+            raise ValueError("Uygun istasyonda yeterli haftalık hat saati yok; istasyon saatlerini ve ekiplerini kontrol edin")
     pl = PlanLine(
+        machine_id=machine_id,
+        material_unverified=(order.material_status or "unknown") == "unknown",
         order_id=order.id,
         operation_id=op.id,
         work_center_id=op.work_center_id,
         week_start=cap.week_start(line.week_start),
-        planned_hours=round(hours, 3),
+        planned_hours=round(hours, 10),
         planned_qty=round(qty, 2),
         mode="manual",
         created_by=username,
@@ -1096,13 +1514,21 @@ def plan_lines(db: Session, wc_ids: list[int] | None, start: date | None, end: d
     if mode:
         q = q.filter(PlanLine.mode == mode)
     out = []
-    for pl in q.order_by(PlanLine.week_start, PlanLine.work_center_id, PlanLine.id).all():
+    rows = q.order_by(PlanLine.week_start, PlanLine.work_center_id, PlanLine.id).all()
+    codes = {pl.semi_finished_code or (pl.operation.semi_finished_code if pl.operation else "") for pl in rows}
+    names = dict(db.query(Item.code, Item.name).filter(Item.code.in_(codes - {"", None})).all()) if codes else {}
+    for pl in rows:
         if pl.order is None or pl.operation is None or pl.work_center is None:
             continue  # bagli kayit silinmis (yetim plan satiri)
+        members = []
         batch_nos: list[str] = []
         batch_no = ""
         batch_id = pl.production_batch_id
         if pl.production_batch:
+            members = [dict(order_id=link.order_id, order_no=link.order.order_no,
+                            position_no=link.order.position_no or "", customer=link.order.customer or "",
+                            quantity=link.quantity, due_date=effective_due(link.order))
+                       for link in sorted(pl.production_batch.orders, key=lambda link: link.order_id) if link.order]
             batch_no = pl.production_batch.batch_no
             batch_nos = [
                 f"{l.order.order_no}{f'/{l.order.position_no}' if l.order and l.order.position_no else ''}"
@@ -1111,26 +1537,34 @@ def plan_lines(db: Session, wc_ids: list[int] | None, start: date | None, end: d
             ]
         out.append(
             PlanLineOut(
+                material_unverified=pl.material_unverified,
+                material_note=recorded_material_note(pl.material_unverified),
                 id=pl.id,
+                machine_id=pl.machine_id,
+                machine_code=next((m.code for m in pl.work_center.machines if m.id == pl.machine_id), ""),
                 order_id=pl.order_id,
                 order_no=batch_no if batch_id else pl.order.order_no,
                 position_no="" if batch_id else (pl.order.position_no or ""),
                 production_batch_id=batch_id,
                 batch_no=batch_no,
                 batch_order_nos=batch_nos,
-                customer=pl.order.customer,
-                due_date=effective_due(pl.order) if pl.order else None,
+                batch_members=members,
+                customer=" / ".join(dict.fromkeys(m["customer"] for m in members)) if members else pl.order.customer,
+                due_date=min(m["due_date"] for m in members) if members else effective_due(pl.order),
                 item_code=pl.order.item.code,
                 operation_id=pl.operation_id,
                 operation_seq=pl.operation.seq,
+                operation_name=pl.operation.operation_name or "",
                 work_center_id=pl.work_center_id,
                 work_center_code=pl.work_center.code,
                 week_start=pl.week_start,
                 planned_hours=pl.planned_hours,
                 planned_qty=pl.planned_qty,
                 semi_finished_code=pl.semi_finished_code or (pl.operation.semi_finished_code if pl.operation else ""),
+                semi_finished_name=names.get(pl.semi_finished_code or pl.operation.semi_finished_code, ""),
                 mode=pl.mode,
                 strategy=pl.strategy or "",
+                tag=pl.tag or "",
                 revision_id=pl.revision_id,
             )
         )
@@ -1189,6 +1623,10 @@ def load(db: Session, wc_ids: list[int] | None, start: date, weeks: int) -> list
             std_out = kpis["standard_hour_equivalent_output"]
             plan_rem = kpis["plan_adherence_remaining_hours"]
             idle = max(c_plan - p, 0.0)
+            ot = sum(
+                cap.overtime_daily_capacity_hours(w, wk + timedelta(days=i), ovl.get(wk + timedelta(days=i)))
+                for i in range(7) if (wk + timedelta(days=i)) not in calendar.holidays
+            )
             n_days = len(cap.working_days(w, wk, wk + timedelta(days=6), ovl))
             daily_cap = c_raw / n_days if n_days else 0.0
             rem_days = plan_rem / daily_cap if daily_cap > 0 else 0.0
@@ -1210,13 +1648,44 @@ def load(db: Session, wc_ids: list[int] | None, start: date, weeks: int) -> list
                     plan_matched_output_hours=round(kpis["plan_matched_output_hours"], 2),
                     remaining_days=round(rem_days, 2),
                     idle_hours=round(idle, 2),
+                    overtime_hours=round(ot, 2),
                     capacity_units=round(c_raw / unit, 2),
                     planned_units=round(p / unit, 2),
                     actual_units=round(std_out / unit, 2),
                 )
             )
-        result.append(WorkCenterLoad(work_center_id=w.id, work_center_code=w.code, weeks=rows))
+        material_counts = dict(db.query(PlanLine.material_unverified, func.count(PlanLine.id)).filter(
+            PlanLine.work_center_id == w.id, PlanLine.week_start >= start, PlanLine.week_start <= wk_list[-1]
+        ).group_by(PlanLine.material_unverified).all())
+        result.append(WorkCenterLoad(work_center_id=w.id, work_center_code=w.code, weeks=rows,
+                                    machines=machine_loads(db, w, wk_list) if (w.planning_mode or "labor") == "line" else [],
+                                    conditional_line_count=material_counts.get(True, 0),
+                                    unknown_material_line_count=material_counts.get(None, 0)))
     return result
+
+
+def machine_loads(db: Session, w: WorkCenter, wk_list: list[date]) -> list:
+    """Hat merkezinde istasyon bazlı haftalık doluluk: kapasite = istasyon haftalık saati, plan = o istasyona yerleşen satırlar."""
+    from app.models import MachineWeek
+    from app.schemas import MachineLoad, MachineWeekLoad
+    from app.services.routing_resource import station_crew
+
+    machines = [m for m in w.machines if m.is_active]
+    if not machines:
+        return []
+    mids = [m.id for m in machines]
+    caps = {(mw.machine_id, mw.week_start): float(mw.working_hours or 0) for mw in db.query(MachineWeek).filter(MachineWeek.machine_id.in_(mids), MachineWeek.week_start >= wk_list[0], MachineWeek.week_start <= wk_list[-1]).all()}
+    used = {(mid, wk): float(h or 0) for mid, wk, h in db.query(PlanLine.machine_id, PlanLine.week_start, func.sum(PlanLine.planned_hours)).filter(
+        PlanLine.machine_id.in_(mids), PlanLine.week_start >= wk_list[0], PlanLine.week_start <= wk_list[-1], PlanLine.mode.in_(["auto", "manual"])).group_by(PlanLine.machine_id, PlanLine.week_start).all()}
+    out = []
+    for m in machines:
+        rows = []
+        for wk in wk_list:
+            c = caps.get((m.id, wk), 0.0) if station_crew(m) else 0.0
+            p = used.get((m.id, wk), 0.0)
+            rows.append(MachineWeekLoad(week_start=wk, capacity_hours=round(c, 2), planned_hours=round(p, 2), idle_hours=round(max(c - p, 0.0), 2), utilization=round(p / c, 3) if c > 0 else 0.0))
+        out.append(MachineLoad(machine_id=m.id, machine_code=m.code, machine_name=m.name or "", weeks=rows))
+    return out
 
 
 # ---------------- Terminleme (lead time) ----------------
@@ -1247,7 +1716,8 @@ def _week_room_hours(db: Session, wc: WorkCenter, wk: date, planned_week: dict[d
 
 
 def _daily_free_hours(db: Session, wc: WorkCenter, day: date, emp: int, planned_week: dict[date, float], wdays_cache: dict[date, int], ovl: cap.Overrides) -> float:
-    total = cap.daily_capacity_hours(wc, day, emp, ovl.get(day))
+    from app.services.calendar_capacity import daily_labor_capacity_hours
+    total = daily_labor_capacity_hours(db, wc, day, emp, ovl)
     if total <= 0:
         return 0.0
     wk = cap.week_start(day)
@@ -1258,6 +1728,38 @@ def _daily_free_hours(db: Session, wc: WorkCenter, day: date, emp: int, planned_
         wdays_cache[wk] = len(cap.working_days(wc, wk, wk + timedelta(days=6), ovl)) or 1
     used = planned_week.get(wk, 0.0) / wdays_cache[wk]
     return max(min(total - used, week_room), 0.0)
+
+
+def _schedule_line_op(op, hours, earliest, horizon_end, remaining, quantity=None):
+    """Weekly estimate: dates mark capacity weeks, not a shift commitment."""
+    from datetime import time
+    left = hours
+    qty_left = quantity
+    used_hours = 0.0
+    first = last = None
+    week = cap.week_start(earliest.date())
+    if hours <= _HOURS_LEFT_EPS:
+        return ScheduleOpResult("insufficient_capacity", 0, hours, None, None,
+                                "Hat ilerleme süresi eksik", horizon_end)
+    while left > _HOURS_LEFT_EPS and week <= horizon_end:
+        mid, room = station_room(op, week, remaining)
+        if room <= _HOURS_LEFT_EPS:
+            week += timedelta(weeks=1)
+            continue
+        take = min(left, room)
+        if qty_left is not None:
+            placed = min(qty_left, line_quantity_for_hours(op, room))
+            take = line_run_hours(op, placed)
+            qty_left -= placed
+        used_hours += take
+        first = first or max(earliest, datetime.combine(week, time(0)))
+        last = datetime.combine(min(week + timedelta(days=6), horizon_end), time(23, 59))
+        remaining[(op.work_center_id, week)] -= take
+        remaining[("machine", mid, week)] -= take
+        left = line_run_hours(op, qty_left) if qty_left is not None else left - take
+    return ScheduleOpResult("scheduled" if left <= _HOURS_LEFT_EPS else "insufficient_capacity",
+                            used_hours, max(left, 0), first, last,
+                            "" if left <= _HOURS_LEFT_EPS else "Uygun hat istasyonlarında haftalık kapasite yetersiz", horizon_end)
 
 
 def _schedule_op(
@@ -1278,6 +1780,13 @@ def _schedule_op(
     step_start: datetime | None = None
     step_end: datetime | None = None
     scheduled = 0.0
+    calendar = cap.LaborCapacityCalendar(db, wc, day, horizon_end)
+    if hours > _HOURS_LEFT_EPS and not calendar.capacity(day, horizon_end).days:
+        return ScheduleOpResult(
+            status="insufficient_capacity", scheduled_hours=0, remaining_hours=hours,
+            start=None, end=None, reason=f"İş merkezi '{wc.code}': seçili ufukta iş gücü kapasitesi yok.",
+            horizon_end=horizon_end,
+        )
 
     def _fail(status: str, reason: str) -> ScheduleOpResult:
         return ScheduleOpResult(
@@ -1299,11 +1808,9 @@ def _schedule_op(
         wk = cap.week_start(day)
         cap_h = cap.planning_capacity_hours(db, wc, wk)
         if cap_h <= _WEEK_FULL_EPS:
-            return _fail(
-                "insufficient_capacity",
-                f"Is merkezi '{wc.code}' icin planlanabilir kapasite tanimli degil (0 saat/hafta). "
-                "Personel ve calisma takvimini kontrol edin.",
-            )
+            day = wk + timedelta(days=7)
+            cursor = datetime.combine(day, cap.first_shift_start(wc, day, ovl.get(day)))
+            continue
         if _week_room_hours(db, wc, wk, planned_week) <= _WEEK_FULL_EPS:
             next_day = wk + timedelta(days=7)
             if next_day > horizon_end:
@@ -1363,6 +1870,10 @@ def _dt_str(dt: datetime | None) -> str | None:
 
 
 def lead_time(db: Session, req: LeadTimeRequest) -> LeadTimeOut:
+    from app.services.orders import validate_material_fields
+    from app.services.material_schedule import material_gate_for_order
+    validate_material_fields(req.material_status, req.material_ready_date)
+    material_gate = material_gate_for_order(req, policy=req.material_policy)
     item = (
         db.query(Item)
         .options(joinedload(Item.operations).joinedload(RoutingOperation.work_center))
@@ -1380,6 +1891,17 @@ def lead_time(db: Session, req: LeadTimeRequest) -> LeadTimeOut:
     if not ops:
         raise ValueError("Secime uyan operasyon yok")
 
+    material_fields = dict(material_status=req.material_status, material_ready_date=req.material_ready_date,
+                           material_policy=req.material_policy, material_unverified=material_gate.material_unverified,
+                           material_note="Malzeme doğrulanmadı; termin malzemenin başlangıçta hazır olması koşuluyla geçerlidir." if material_gate.material_unverified else "")
+    if material_gate.blocks_planning:
+        return LeadTimeOut(item_code=item.code, quantity=req.quantity,
+                           total_hours=round(sum(op.hours_for(req.quantity) for op in ops), 2),
+                           steps=[], status="infeasible", failure_reason="Malzeme durumu bilinmiyor; katı politikada termin hesaplanamaz.", **material_fields)
+    material_start = max(req.start, req.material_ready_date) if req.material_status == "expected" and req.material_ready_date else req.start
+    if req.material_status == "expected":
+        material_fields['material_note'] = f"Malzeme bekleniyor; {req.material_ready_date.isoformat()} tarihinden önce üretim başlamaz."
+
     horizon_days = max(int(req.horizon_days or LEADTIME_DEFAULT_HORIZON_DAYS), 7)
     horizon_end = req.start + timedelta(days=horizon_days)
     wc_ids = list({op.work_center_id for op in ops})
@@ -1388,10 +1910,19 @@ def lead_time(db: Session, req: LeadTimeRequest) -> LeadTimeOut:
     for (wc_id, wk), h in planned_all.items():
         planned_by_wc[wc_id][wk] = h
 
+    line_wcs = {op.work_center_id: op.work_center for op in ops if is_line_operation(op)}
+    line_weeks = []
+    week = cap.week_start(req.start)
+    while week <= horizon_end:
+        line_weeks.append(week)
+        week += timedelta(weeks=1)
+    line_remaining = {(wc.id, week): max(0, cap.planning_capacity_hours(db, wc, week) - planned_all.get((wc.id, week), 0))
+                      for wc in line_wcs.values() for week in line_weeks}
+    load_budgets(db, list(line_wcs.values()), line_weeks, line_remaining)
     rules = scen.RuleLookup(db)
     steps: list[LeadTimeStep] = []
     first_wc = ops[0].work_center
-    cursor = datetime.combine(req.start, cap.first_shift_start(first_wc, req.start, cap.Overrides(db, first_wc.id).get(req.start)))
+    cursor = datetime.combine(material_start, cap.first_shift_start(first_wc, material_start, cap.Overrides(db, first_wc.id).get(material_start)))
     overall_start: datetime | None = None
     overall_end: datetime | None = None
     prev_op: RoutingOperation | None = None
@@ -1411,11 +1942,16 @@ def lead_time(db: Session, req: LeadTimeRequest) -> LeadTimeOut:
             rule_desc = rule.describe() + ("" if rule.source == "default" else f" ({'stok' if rule.source == 'item' else 'grup'} kuralı)")
         else:
             earliest = cursor
-        sched = _schedule_op(db, wc, hours, earliest, planned_by_wc[wc.id], horizon_end)
+        if is_line_operation(op):
+            sched = _schedule_line_op(op, hours, earliest, horizon_end, line_remaining, req.quantity)
+            rule_desc += " · Haftalık istasyon kapasitesi; gün/saatler yaklaşık"
+        else:
+            sched = _schedule_op(db, wc, hours, earliest, planned_by_wc[wc.id], horizon_end)
         step_start = sched.start
         step_end = sched.end
         if sched.status == "scheduled" and prev_end is not None and step_end and step_end < prev_end:
-            step_end = prev_end + timedelta(seconds=op.cycle_time_sec or 0)
+            from app.services.routing_resource import planning_unit_hours
+            step_end = prev_end + timedelta(hours=planning_unit_hours(op))
         step = LeadTimeStep(
             operation_seq=op.seq,
             operation_name=op.operation_name,
@@ -1449,6 +1985,7 @@ def lead_time(db: Session, req: LeadTimeRequest) -> LeadTimeOut:
         total_remaining = 0.0
 
     return LeadTimeOut(
+        **material_fields,
         item_code=item.code,
         quantity=req.quantity,
         total_hours=round(sum(s.hours for s in steps), 2),
@@ -1481,10 +2018,11 @@ def load_detail(db: Session, work_center_id: int, week_start: date, *, firm_only
         pls = pls.filter(PlanLine.mode != "forecast")
     pls = pls.all()
     rows: list[LoadDetailRow] = []
+    window_cache: dict = {}  # hafta takvimi/kapasitesi bir kez hesaplanir (satir basina sorgu yok)
     for pl in sorted(pls, key=plan_line_priority_key):
         if pl.order is None or pl.operation is None:
             continue
-        ps, pe = _line_window_in_week(db, wc, wk, pl.id, pls)
+        ps, pe = _line_window_in_week(db, wc, wk, pl.id, pls, cache=window_cache)
         op = pl.operation
         item = pl.order.item
         batch_no = ""
@@ -1590,6 +2128,12 @@ def weekly_output(db: Session, week_start: date, work_center_ids: list[int] | No
 
 def add_forecast_from_leadtime(db: Session, req: ForecastFromLeadTimeIn, username: str) -> tuple[int, int]:
     """Terminleme sonucunu tahmin plan satirlari olarak kaydeder; kapasite asimi engellenir. (order_id, satir_sayisi)"""
+    from app.services.orders import validate_material_fields
+    from app.services.material_schedule import material_gate_for_order
+    validate_material_fields(req.material_status, req.material_ready_date)
+    gate = material_gate_for_order(req, policy=req.material_policy)
+    if gate.blocks_planning:
+        raise ValueError("Malzeme durumu bilinmiyor; katı politikada tahmin kaydedilemez.")
     item = (
         db.query(Item)
         .options(joinedload(Item.operations).joinedload(RoutingOperation.work_center))
@@ -1609,6 +2153,8 @@ def add_forecast_from_leadtime(db: Session, req: ForecastFromLeadTimeIn, usernam
             raise ValueError(f"Operasyon {s.operation_seq} baslangic/bitis eksik; tahmin kaydedilemez.")
 
     step_dates = [datetime.strptime(s.start[:10], "%Y-%m-%d").date() for s in req.steps]
+    if req.material_status == "expected" and req.material_ready_date and min(step_dates) < req.material_ready_date:
+        raise ValueError("Tahmin malzemenin hazır olacağı tarihten önce başlayamaz.")
     end_dt = datetime.strptime(req.steps[-1].end[:10], "%Y-%m-%d").date()
     horizon_start = cap.week_start(min(step_dates))
     horizon_end = cap.week_start(end_dt) + timedelta(weeks=16)
@@ -1630,6 +2176,8 @@ def add_forecast_from_leadtime(db: Session, req: ForecastFromLeadTimeIn, usernam
             used = existing.get((wc_id, week), 0.0)
             remaining[(wc_id, week)] = _week_room_hours(db, wc, week, {week: used})
 
+    load_budgets(db, list(wcs.values()), weeks, remaining)
+
     label = (req.label or "").strip() or f"TAH-{item.code}-{datetime.now():%m%d%H%M}"
     order = Order(
         order_no=label,
@@ -1638,7 +2186,9 @@ def add_forecast_from_leadtime(db: Session, req: ForecastFromLeadTimeIn, usernam
         item_id=item.id,
         quantity=req.quantity,
         status="forecast",
-        note="Yeni is terminleme tahmini",
+        note="Yeni iş terminleme tahmini" + (" — Malzeme doğrulanmadı; koşullu tahmin." if gate.material_unverified else ""),
+        material_status=req.material_status,
+        material_ready_date=req.material_ready_date,
     )
     db.add(order)
     db.flush()
@@ -1652,30 +2202,42 @@ def add_forecast_from_leadtime(db: Session, req: ForecastFromLeadTimeIn, usernam
         start_day = datetime.strptime(step.start[:10], "%Y-%m-%d").date()
         start_wk = cap.week_start(start_day)
         idx = weeks.index(start_wk) if start_wk in weeks else 0
-        hours_left = float(step.hours)
+        hours_left = op.hours_for(req.quantity) if is_line_operation(op) else float(step.hours)
         total_hours = hours_left
+        qty_left = req.quantity
         while hours_left > 1e-6 and idx < len(weeks):
             week = weeks[idx]
             avail = remaining.get((op.work_center_id, week), 0.0)
+            machine_id = None
+            if is_line_operation(op):
+                machine_id, avail = station_room(op, week, remaining)
             if avail > _WEEK_FULL_EPS:
                 take = min(avail, hours_left)
                 qty = req.quantity * (take / total_hours) if total_hours > 0 else 0.0
+                if is_line_operation(op):
+                    qty = min(qty_left, line_quantity_for_hours(op, avail))
+                    take = line_run_hours(op, qty)
+                    qty_left -= qty
                 db.add(
                     PlanLine(
                         order_id=order.id,
+                        material_unverified=gate.material_unverified,
                         operation_id=op.id,
                         work_center_id=op.work_center_id,
                         week_start=week,
-                        planned_hours=round(take, 3),
+                        machine_id=machine_id,
+                        planned_hours=round(take, 10),
                         planned_qty=round(qty, 2),
                         mode="forecast",
                         created_by=username,
                     )
                 )
-                remaining[(op.work_center_id, week)] = avail - take
-                hours_left -= take
+                remaining[(op.work_center_id, week)] -= take
+                if machine_id is not None:
+                    remaining[("machine", machine_id, week)] -= take
+                hours_left = line_run_hours(op, qty_left) if is_line_operation(op) else hours_left - take
                 created += 1
-            if hours_left > 1e-6:
+            if hours_left > 1e-6 and (not is_line_operation(op) or station_room(op, week, remaining)[1] <= 1e-6):
                 idx += 1
         if hours_left > _WEEK_FULL_EPS:
             wc = wcs.get(op.work_center_id)
@@ -1719,6 +2281,9 @@ def list_forecasts(db: Session) -> list[ForecastSummaryOut]:
         weeks = [p.week_start for p in pls]
         out.append(
             ForecastSummaryOut(
+                material_status=o.material_status or "unknown",
+                material_ready_date=o.material_ready_date,
+                material_note=o.note or "",
                 order_id=o.id,
                 order_no=o.order_no,
                 item_code=o.item.code if o.item else "",

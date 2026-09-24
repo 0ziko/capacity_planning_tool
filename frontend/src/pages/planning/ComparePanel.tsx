@@ -1,9 +1,11 @@
+import type { MaterialPolicy } from "../../api";
 import { useState } from "react";
 import { api, fmt, weekLong, type CompareDiff, type CompareRow, type PlanCompare, type PlanEvaluationReport, type PlanMode, type PlanScenario } from "../../api";
 import { useAuth } from "../../auth";
 import { ErrorText } from "../../components";
 import { PlanStatusBadge } from "./OrderSchedulePanel";
 import { RevenueTable, monthLabel } from "./RevenuePanel";
+import PlanPreflightModal from "./PlanPreflightModal";
 
 const DIFF: Record<CompareDiff, [string, string, string]> = {
   rev_misses_due: ["bad", "Ciro planında termin kaçar", "Termine göre planda zamanında biten sipariş, ciro öncelikli planda termin sonrasına kalıyor"],
@@ -46,34 +48,39 @@ function ScenarioCard({ s, other, onApply, busy }: { s: PlanScenario; other: Pla
 }
 
 /** İki plan modunu (termin / ciro öncelikli) kaydetmeden simüle eder ve karşılaştırır. */
-export default function ComparePanel({ start, weeks, wcIds, onApplied }: { start: string; weeks: number; wcIds: number[]; onApplied: () => void }) {
+export default function ComparePanel({ start, weeks, wcIds, materialPolicy, onApplied }: { start: string; weeks: number; wcIds: number[]; materialPolicy: MaterialPolicy; onApplied: () => void }) {
   const { can } = useAuth();
-  const [data, setData] = useState<PlanCompare | null>(null);
+  const [result, setResult] = useState<{ scope: string; data: PlanCompare } | null>(null);
+  const scope = JSON.stringify([start, weeks, wcIds, materialPolicy]);
+  const data = result?.scope === scope ? result.data : null;
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState<"" | "diff" | CompareDiff>("diff");
   const [gran, setGran] = useState<"week" | "month">("week");
   const [msg, setMsg] = useState("");
   const [evalR, setEvalR] = useState<PlanEvaluationReport | null>(null);
+  const [pendingMode, setPendingMode] = useState<PlanMode | null>(null);
 
   const runEval = async () => {
     setBusy(true); setErr("");
     try {
-      setEvalR(await api.post<PlanEvaluationReport>("/api/plan/evaluation", { start_week: start, weeks, work_center_ids: wcIds.length ? wcIds : null, benchmark_kind: "live" }));
+      setEvalR(await api.post<PlanEvaluationReport>("/api/plan/evaluation", { start_week: start, weeks, material_policy: materialPolicy, work_center_ids: wcIds.length ? wcIds : null, benchmark_kind: "live" }));
     } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
   };
 
   const run = async () => {
     setBusy(true); setErr(""); setMsg("");
-    try { setData(await api.post<PlanCompare>("/api/plan/compare", { start_week: start, weeks, work_center_ids: wcIds.length ? wcIds : null })); }
+    try { setResult({ scope, data: await api.post<PlanCompare>("/api/plan/compare", { start_week: start, weeks, material_policy: materialPolicy, work_center_ids: wcIds.length ? wcIds : null }) }); }
     catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
   };
-  const apply = async (mode: PlanMode) => {
-    const label = mode === "revenue" ? "CİRO ÖNCELİKLİ (SEZGİSEL)" : "TERMİNE GÖRE";
-    if (!confirm(`${label} planı uygulanacak: seçili iş merkezlerinde mevcut otomatik plan satırları silinip yeniden oluşturulur (manuel satırlar korunur). Devam?`)) return;
+  const apply = (mode: PlanMode) => setPendingMode(mode);
+  const confirmApply = async (missing_headcount_ack: string | null) => {
+    if (!data) { setPendingMode(null); setErr("Seçim değişti; karşılaştırmayı yeniden hesaplayın."); return; }
+    const mode = pendingMode!;
+    setPendingMode(null);
     setBusy(true); setErr("");
     try {
-      const r = await api.post<{ message: string }>("/api/plan/auto", { start_week: start, weeks, work_center_ids: wcIds.length ? wcIds : null, replace_existing: true, mode });
+      const r = await api.post<{ message: string }>("/api/plan/auto", { start_week: start, weeks, material_policy: materialPolicy, work_center_ids: wcIds.length ? wcIds : null, replace_existing: true, mode, missing_headcount_ack });
       setMsg(r.message); onApplied();
     } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
   };
@@ -88,6 +95,7 @@ export default function ComparePanel({ start, weeks, wcIds, onApplied }: { start
 
   return (
     <>
+      {pendingMode && <PlanPreflightModal req={{ start_week: start, weeks, material_policy: materialPolicy, work_center_ids: wcIds.length ? wcIds : null, replace_existing: true, mode: pendingMode }} onClose={() => setPendingMode(null)} onConfirm={confirmApply} />}
       <div className="row" style={{ marginBottom: 10 }}>
         <button onClick={run} disabled={busy}>⚖ İki planı hesapla ve karşılaştır</button>
         <button type="button" className="secondary" onClick={runEval} disabled={busy}>📊 Plan kalite raporu</button>

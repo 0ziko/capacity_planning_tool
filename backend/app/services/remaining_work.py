@@ -62,20 +62,30 @@ def _open_orders_for_production(db: Session) -> list[Order]:
     )
 
 
-def produced_qty_map(db: Session, *, as_of: date | None = None, mes_allocations: list | None = None, include_mes: bool = True) -> tuple[dict[WorkKey, float], list[str]]:
+def produced_qty_map(db: Session, *, as_of: date | None = None, mes_allocations: list | None = None, include_mes: bool | None = None) -> tuple[dict[WorkKey, float], list[str]]:
     """(order_id, operation_id) -> uretilen miktar; position_no belirsizliginde uyari."""
+    from app.core.config import get_settings
+    use_mes = get_settings().production_source == "mes" if include_mes is None else include_mes
     out: dict[WorkKey, float] = defaultdict(float)
     warnings: list[str] = []
+    if use_mes:
+        from app.models.mes import MesDetail
+        from app.services.mes_remaining import add_mes_credit
+        query = db.query(MesDetail.detail_id)
+        if as_of:
+            query = query.filter(MesDetail.prod_date <= as_of)
+        if query.first() is None:
+            return {}, ["MES verisi yok; eski üretim otomatik olarak kullanılmadı."]
+        allocations = add_mes_credit(db, out, _open_orders_for_production(db), as_of)
+        if mes_allocations is not None:
+            mes_allocations.extend(allocations or [])
+        return dict(out), warnings
     q = db.query(ProductionActual)
     if as_of:
         q = q.filter(ProductionActual.prod_date <= as_of)
     actuals = q.order_by(ProductionActual.prod_date, ProductionActual.id).all()
     if not actuals:
-        if not include_mes:
-            return dict(out), warnings
-        from app.models.mes import MesDetail
-        if db.query(MesDetail.detail_id).first() is None:
-            return dict(out), warnings
+        return {}, warnings
 
     open_orders = _open_orders_for_production(db)
     orders_by_no_item: dict[tuple[str, int], list[Order]] = defaultdict(list)
@@ -85,12 +95,15 @@ def produced_qty_map(db: Session, *, as_of: date | None = None, mes_allocations:
     for o in open_orders:
         orders_by_item[o.item_id].append(o)
 
-    idx = wip_index(db) if actuals else {}
+    idx = None
 
     def op_id_for(item: Item, seq: int | None, wc_id: int, wip_code: str) -> int | None:
+        nonlocal idx
         if not item:
             return None
         if wip_code:
+            if idx is None:
+                idx = wip_index(db)
             try:
                 return resolve_wip(db, wip_code, item.code, idx).id
             except ValueError:
@@ -139,11 +152,8 @@ def produced_qty_map(db: Session, *, as_of: date | None = None, mes_allocations:
             last = orders_by_item[a.item_id][-1]
             out[(last.id, op_id)] += qty_left
 
-    from app.services.mes_remaining import add_mes_credit
-    allocations = add_mes_credit(db, out, open_orders, as_of) if include_mes else []
-    if mes_allocations is not None:
-        mes_allocations.extend(allocations or [])
     return dict(out), warnings
+
 
 
 def required_qty_by_operation(
@@ -194,9 +204,19 @@ def required_qty_for_batch(
 ) -> dict[int, float]:
     if not batch.item or not anchor.quantity:
         return {}
-    ord_req = required_qty_by_operation(db, anchor, produced=produced, netting_cache=netting_cache)
-    ratio = float(batch.quantity or 0) / float(anchor.quantity)
-    return {op_id: q * ratio for op_id, q in ord_req.items()}
+    # Each customer's reservations/shipments reduce only that customer's share.
+    # The batch member quantity keeps the original production intent intact.
+    required = defaultdict(float)
+    for link in batch.orders:
+        member = link.order
+        if not member or member.status != "open" or not member.quantity:
+            continue
+        member_req = required_qty_by_operation(db, member, produced=produced, netting_cache=netting_cache)
+        share = min(max(float(link.quantity or 0), 0), float(member.quantity)) / member.quantity
+        for op_id, quantity in member_req.items():
+            required[op_id] += quantity * share
+    return dict(required)
+
 
 
 def _line_is_preserved(pl: PlanLine, ctx: SchedulingContext) -> bool:
@@ -279,7 +299,8 @@ def build_work_map_for_order(
         global_warnings = (global_warnings or []) + prod_warnings
     cache: dict[int, object] = {}
     req = required_qty_by_operation(db, order, produced=produced, netting_cache=cache)
-    all_lines = db.query(PlanLine).filter(PlanLine.order_id == order.id, PlanLine.mode.in_(["auto", "manual"])).all()
+    snapshot = db.info.get("_merge_read_snapshot")
+    all_lines = snapshot["by_order"].get(order.id, []) if snapshot is not None else db.query(PlanLine).filter(PlanLine.order_id == order.id, PlanLine.mode.in_(["auto", "manual"])).all()
     by_op: dict[int, list[PlanLine]] = defaultdict(list)
     for pl in all_lines:
         if pl.production_batch_id is None:
@@ -317,7 +338,11 @@ def build_work_map_for_batch(
     if produced is None:
         produced, _ = produced_qty_map(db)
     req = required_qty_for_batch(db, batch, anchor, produced=produced, netting_cache={})
-    all_lines = db.query(PlanLine).filter(
+    batch_produced = dict(produced)
+    for op_id in req:
+        batch_produced[(anchor.id, op_id)] = sum(float(produced.get((link.order_id, op_id), 0)) for link in batch.orders)
+    snapshot = db.info.get("_merge_read_snapshot")
+    all_lines = snapshot["by_batch"].get(batch.id, []) if snapshot is not None else db.query(PlanLine).filter(
         PlanLine.production_batch_id == batch.id,
         PlanLine.mode.in_(["auto", "manual"]),
     ).all()
@@ -333,7 +358,7 @@ def build_work_map_for_batch(
             rq,
             ctx,
             production_batch_id=batch.id,
-            produced=produced,
+            produced=batch_produced,
             plan_lines=by_op.get(op_id, []),
         )
     return out

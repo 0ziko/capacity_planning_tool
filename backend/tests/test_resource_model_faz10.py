@@ -35,6 +35,7 @@ def _wc(db, code: str = "PRS") -> WorkCenter:
             efficient_hours_per_person=4.0,
         )
     )
+    _staff_db(db, wc.id, 2, 4)
     db.commit()
     db.refresh(wc)
     return wc
@@ -119,3 +120,5 @@ def test_legacy_unchanged_and_missing_definition_warning(db):
     need = compute_operation_need(op, qty)
     assert "missing_resource_definition" in need.warnings
     assert missing_resource_definition(op)
+
+from tests.test_capacity_flow import _staff_db

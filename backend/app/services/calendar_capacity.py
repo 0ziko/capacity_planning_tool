@@ -63,7 +63,7 @@ def daily_labor_capacity_hours(
     from app.services import capacity
 
     ov = ovl.get(day) if ovl else None
-    if work_center_holiday(db, wc.id, day):
+    if getattr(wc, "planning_mode", "labor") != "line" and work_center_holiday(db, wc.id, day):
         return 0.0
     return capacity.daily_capacity_hours(wc, day, emp_count, ov)
 
@@ -77,6 +77,24 @@ def _default_machine_intervals(wc: WorkCenter, day: date, ov) -> list[TimeRange]
         vs = effective_shifts(wc)[0]
         if _shift_on_day(vs, day, ov):
             out.extend(expand_shift_to_ranges(day, vs.start_time, vs.end_time))
+    # Fazla mesai penceresi (18:00'dan itibaren, kisi basi <= 2.5 sa): gunluk cizelge bu araligi da kullanabilir.
+    from app.services import capacity as _cap
+
+    if not out and _cap.weekend_overtime_on_day(wc, day, ov):
+        hours = _cap.weekend_overtime_hours_per_person(ov)
+        if hours > 0:
+            start = datetime.combine(day, _cap.WEEKEND_OVERTIME_WINDOW[0])
+            end = min(start + timedelta(hours=hours), datetime.combine(day, _cap.WEEKEND_OVERTIME_WINDOW[1]))
+            if end > start:
+                out.append(TimeRange(start, end))
+        return out
+    if out and _cap.overtime_on_day(wc, day, ov):
+        hours = _cap.overtime_hours_per_person(ov)
+        if hours > 0:
+            start = datetime.combine(day, _cap.OVERTIME_WINDOW[0])
+            end = min(start + timedelta(hours=hours), datetime.combine(day, _cap.OVERTIME_WINDOW[1]))
+            if end > start:
+                out.append(TimeRange(start, end))
     return out
 
 
@@ -112,7 +130,7 @@ def machine_daily_capacity_hours(
     if wc is None or not machine.is_active:
         return 0.0
     ov = ovl.get(day) if ovl else None
-    if work_center_holiday(db, wc.id, day):
+    if getattr(wc, "planning_mode", "labor") != "line" and work_center_holiday(db, wc.id, day):
         return 0.0
     if not is_working_day(wc, day, ov):
         return 0.0
@@ -213,12 +231,9 @@ def machine_work_intervals(
 
 
 def work_center_crew_pool_size(wc: WorkCenter, day: date, ovl) -> int:
-    """Esanlamli is gucu havuzu: gunun vardiyalarindaki toplam kisi."""
+    """Weekly staffing is the shared total; shifts must not multiply it."""
     from app.services import capacity
 
-    total = 0
-    for shift in effective_shifts(wc):
-        if _shift_on_day(shift, day, ovl):
-            hc = shift.headcount if shift.headcount and shift.headcount > 0 else capacity.daily_headcount(wc, day, 0, ovl)
-            total += max(hc, 0)
-    return max(total, 1)
+    if not is_working_day(wc, day, ovl):
+        return 0
+    return max(capacity._headcount(effective_shifts(wc)[0], 0, wc, ovl), 0)

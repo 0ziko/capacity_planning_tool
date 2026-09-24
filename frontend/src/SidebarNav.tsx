@@ -44,7 +44,6 @@ export default function SidebarNav({ canAdmin, canOwner }: { canAdmin: boolean; 
       items: [
         { to: "/items", label: "Stok / BOM / Rota" },
         { to: "/workcenters", label: "İş Merkezleri" },
-        { to: "/employees", label: "Personel Tanımları" },
         { to: "/users", label: "Kullanıcılar", show: canAdmin },
         { to: "/owner", label: "Owner Panel", show: canOwner },
       ],
@@ -54,6 +53,7 @@ export default function SidebarNav({ canAdmin, canOwner }: { canAdmin: boolean; 
       title: "Planlama Süreç Yönetimi",
       items: [
         { to: "/planning", label: "Kapasite Planlama" },
+        { to: "/gantt", label: "Gantt" },
         { to: "/progress", label: "Günlük İlerleme" },
         { to: "/scenarios", label: "Senaryo Matrisi" },
         { to: "/orders", label: "Sipariş Yönetimi" },

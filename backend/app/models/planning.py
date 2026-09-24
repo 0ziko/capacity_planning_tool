@@ -75,6 +75,7 @@ class ProductionBatchOrder(Base):
 
 
 class PlanLine(Base):
+    machine_id: Mapped[int | None] = mapped_column(ForeignKey("machines.id", ondelete="SET NULL"), nullable=True, index=True)
     """Bir siparis veya uretim partisi operasyonunun belirli bir haftaya yerlestirilmis is gucu saati."""
 
     __tablename__ = "plan_lines"
@@ -91,6 +92,9 @@ class PlanLine(Base):
     mode: Mapped[str] = mapped_column(String(8), default="auto")  # auto / manual
     # otomatik planin stratejisi: due_date (termine gore) / revenue (maksimum ciro); manuelde bos
     strategy: Mapped[str] = mapped_column(String(16), default="")
+    tag: Mapped[str] = mapped_column(String(16), default="", server_default="")  # overtime | slip | prep
+    # None: legacy row whose planning-time material assumption was not recorded.
+    material_unverified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     revision_id: Mapped[int | None] = mapped_column(ForeignKey("plan_revisions.id", ondelete="SET NULL"), nullable=True, index=True)
     created_by: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -228,6 +232,7 @@ class ImportLog(Base):
     inserted: Mapped[int] = mapped_column(Integer, default=0)
     updated: Mapped[int] = mapped_column(Integer, default=0)
     errors: Mapped[str] = mapped_column(Text, default="")
+    warnings: Mapped[str] = mapped_column(Text, default="", server_default="")  # uygulandı; reddedilen/atlanan satır notları
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -257,6 +262,12 @@ class PlanRevision(Base):
     start_week: Mapped[date] = mapped_column(Date, index=True)
     weeks: Mapped[int] = mapped_column(Integer, default=8)
     mode: Mapped[str] = mapped_column(String(16), default="due_date")
+    material_policy: Mapped[str] = mapped_column(String(16), default="conditional")
+    placement: Mapped[str] = mapped_column(String(8), default="flow")  # flow (varsayilan: ardisik operasyonlar bekletilmez) | asap | jit
+    jit_buffer_days: Mapped[int] = mapped_column(Integer, default=2)
+    slip_mode: Mapped[str] = mapped_column(String(8), default="chain", server_default="chain")  # chain: kalan adet sonraya yerleşir | defer: yazılmaz
+    use_overtime: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    prep_fill: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")  # atıl kapasiteye hazırlık yarımamülü
     wc_ids_json: Mapped[str] = mapped_column(Text, default="[]")
     horizon_key: Mapped[str] = mapped_column(String(128), default="", index=True)
     replace_manual: Mapped[bool] = mapped_column(Boolean, default=False)

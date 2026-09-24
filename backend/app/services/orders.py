@@ -25,6 +25,9 @@ from app.services import capacity as cap
 
 # ---------------- Yardimcilar ----------------
 
+DELIVERY_BUFFER_DAYS = 2  # hedef: uretim terminden en gec 2 gun once tamamlanir
+
+
 def effective_due(o: Order) -> date:
     """Planlama ve gecikme hesabi icin: revize termin varsa o, yoksa ilk termin."""
     return o.revised_due_date or o.due_date
@@ -61,8 +64,8 @@ def validate_material_fields(status: str, ready_date: date | None) -> None:
     st = normalize_material_status(status)
     if st == MATERIAL_EXPECTED and not ready_date:
         raise ValueError("Malzeme durumu 'expected' icin hazir tarih zorunlu")
-    if st == MATERIAL_READY and ready_date:
-        pass  # tarih opsiyonel
+    if st == MATERIAL_READY and ready_date and ready_date > date.today():
+        raise ValueError("Malzeme 'Hazır' iken hazır olma tarihi gelecekte olamaz. Bu tarih için 'Bekleniyor' seçin.")
 
 
 def _log_material_change(db: Session, order_id: int, field: str, old: str, new: str, username: str) -> None:
@@ -168,7 +171,7 @@ def filter_enriched_orders(
 ) -> list[OrderOut]:
     if plan_status:
         if plan_status == "planned":
-            rows = [r for r in rows if r.plan_status in ("partial", "late", "on_time")]
+            rows = [r for r in rows if r.plan_status in ("partial", "late", "on_time", "finish_unknown")]
         elif plan_status == "forecast":
             rows = [r for r in rows if r.plan_status == "forecast"]
         else:
@@ -371,6 +374,9 @@ def create_order(db: Session, data: OrderIn) -> Order:
     st = normalize_material_status(getattr(data, "material_status", None))
     rd = getattr(data, "material_ready_date", None)
     validate_material_fields(st, rd)
+    from app.services.order_routing_gate import assert_orderable
+
+    assert_orderable(db, item)  # rota tanimi eksik urune siparis girilemez (alan dogrulamalarindan sonra)
     o = Order(
         order_no=data.order_no.strip(),
         position_no=pos,
@@ -399,6 +405,10 @@ def update_order(db: Session, o: Order, data: OrderIn, *, username: str = "api")
     if not item:
         raise ValueError(f"Stok kodu bulunamadi: {data.item_code}")
     item_changed = item.id != o.item_id
+    if item_changed:
+        from app.services.order_routing_gate import assert_orderable
+
+        assert_orderable(db, item)  # baska bir urune tasinirken de rota kapisi gecerli
     o.order_no = data.order_no.strip()
     o.position_no = (data.position_no or "").strip()
     o.customer = data.customer.strip()
@@ -425,36 +435,44 @@ def bulk_delete_orders(db: Session, order_ids: list[int]) -> int:
         return 0
     if db.query(Order).filter(Order.merged_into_id.in_(order_ids)).first():
         raise ValueError("Silinecek siparislerden biri birlesik siparis; once birlestirmeyi geri alin")
+    from app.models import ProductionBatchOrder
+    from app.services.production_batches import close_empty_batches
+    batch_ids = {bid for (bid,) in db.query(ProductionBatchOrder.batch_id).filter(ProductionBatchOrder.order_id.in_(order_ids)).all()}
     db.query(PlanLine).filter(PlanLine.order_id.in_(order_ids)).delete(synchronize_session=False)
     db.query(Reservation).filter(Reservation.order_id.in_(order_ids)).delete(synchronize_session=False)
     db.query(Shipment).filter(Shipment.order_id.in_(order_ids)).delete(synchronize_session=False)
     db.query(Order).filter(Order.merged_into_id.in_(order_ids)).update({Order.merged_into_id: None}, synchronize_session=False)
-    return db.query(Order).filter(Order.id.in_(order_ids)).delete(synchronize_session=False)
+    db.query(ProductionBatchOrder).filter(ProductionBatchOrder.order_id.in_(order_ids)).delete(synchronize_session=False)
+    count = db.query(Order).filter(Order.id.in_(order_ids)).delete(synchronize_session=False)
+    close_empty_batches(db, batch_ids)
+    return count
 
 
 # ---------------- Plan sonucu: siparis bitis tarihleri ----------------
 
-def _end_day_in_week(db: Session, wc: WorkCenter, wk: date, order_id: int, lines_in_week: list[PlanLine]) -> date:
-    """Haftadaki plan satirlari (termin sirasiyla) kumulatif doldurulur; bu siparisin
-    payi bittigi noktadaki calisma gununu dondurur."""
-    wdays = cap.working_days(wc, wk, wk + timedelta(days=6), cap.Overrides(db, wc.id))
-    if not wdays:
-        return wk + timedelta(days=4)
-    capacity = cap.week_capacity_hours(db, wc, wk)
-    ordered = sorted(lines_in_week, key=plan_line_priority_key)
-    cum = 0.0
-    reached = False
-    for p in ordered:
-        cum += p.planned_hours
-        if p.order_id == order_id:
-            reached = True
-        elif reached:
-            break
-    if capacity <= 0:
-        return wdays[-1]
-    frac = min(cum / capacity, 1.0)
-    idx = max(min(ceil(frac * len(wdays)) - 1, len(wdays) - 1), 0)
-    return wdays[idx]
+def plan_line_window(db, wc, wk, target, lines_in_week, *, cache=None):
+    """Shared weekly approximation for Gantt and final-operation completion."""
+    key = (wc.id, wk)
+    if cache is None or key not in cache:
+        days = cap.working_days(wc, wk, wk + timedelta(days=6), cap.Overrides(db, wc.id))
+        capacity = cap.week_capacity_hours(db, wc, wk) if days else 0
+        ordered = sorted(lines_in_week, key=plan_line_priority_key)
+        if cache is not None:
+            cache[key] = (days, capacity, ordered)
+    else:
+        days, capacity, ordered = cache[key]
+    if not days:
+        return wk, wk + timedelta(days=4)
+    used = 0.0
+    for line in ordered:
+        if line is target:
+            if capacity <= 0:
+                return days[0], days[-1]
+            first = max(0, min(int(used / capacity * len(days)), len(days)-1))
+            last = max(first, min(ceil(min((used + line.planned_hours) / capacity, 1) * len(days))-1, len(days)-1))
+            return days[first], days[last]
+        used += line.planned_hours
+    return days[0], days[-1]
 
 
 def order_schedule(
@@ -472,6 +490,7 @@ def order_schedule(
     orders = orders if orders is not None else _open_orders(db)
     if not orders:
         return []
+    saved_plan = lines is None
     if lines is None:
         lines = (
             db.query(PlanLine)
@@ -489,8 +508,14 @@ def order_schedule(
             )
             seen = {p.id for p in lines}
             lines = lines + [p for p in extra if p.id not in seen]
-    if wc_by_id:
-        lines = [p for p in lines if p.work_center_id in wc_by_id]
+    calendar_lines = lines
+    if saved_plan and lines:
+        calendar_lines = db.query(PlanLine).options(joinedload(PlanLine.order), joinedload(PlanLine.operation)).filter(
+            PlanLine.work_center_id.in_(wc_by_id),
+            PlanLine.week_start >= min(p.week_start for p in lines),
+            PlanLine.week_start <= max(p.week_start for p in lines),
+        ).all()
+    lines = [p for p in lines if p.work_center_id in wc_by_id and getattr(p, "mode", "auto") in ("auto", "manual")]
     from app.services import production_batches as pb
 
     order_batch = pb.batch_order_map(db)
@@ -507,12 +532,46 @@ def order_schedule(
             by_batch[p.production_batch_id].append(p)
         else:
             by_order[p.order_id].append(p)
+    for p in calendar_lines:
         by_wc_week[(p.work_center_id, p.week_start)].append(p)
 
+    from app.services.remaining_work import (
+        produced_qty_map, required_qty_by_operation, operation_remaining,
+        operation_run_hours, SchedulingContext,
+    )
+    produced, _ = produced_qty_map(db)
+    ctx = SchedulingContext(horizon_start=date.min, horizon_end_exclusive=date.max)
+    from app.services.order_finished_netting import compute_order_demand_netting
+    from app.services.bom_tree import _load_wip_items, is_wip_asm_link
+    from sqlalchemy import func
+    order_ids = [order.id for order in orders]
+    shipped = dict(db.query(Shipment.order_id, func.sum(Shipment.quantity)).filter(Shipment.order_id.in_(order_ids)).group_by(Shipment.order_id).all())
+    reservations = defaultdict(list)
+    for reservation in db.query(Reservation).filter(Reservation.order_id.in_(order_ids)).all():
+        reservations[reservation.order_id].append(reservation)
+    netting = {order.id: compute_order_demand_netting(db, order, produced_map=produced,
+                 shipped_qty=shipped.get(order.id, 0), reservations=reservations[order.id]) for order in orders}
+    wip_codes = {bl.component_code for order in orders for bl in order.item.bom_lines
+                 if is_wip_asm_link(bl.component_code or "", bl.source_wip or "", getattr(bl, "recipe_seq", 0))}
+    wip_items = _load_wip_items(db, list(wip_codes))
+    requirements_by_order = {}
+    for order in orders:
+        requirements_by_order[order.id] = required_qty_by_operation(db, order, produced=produced,
+                                          netting_cache=netting, wip_items=wip_items)
+    op_ids = {oid for req in requirements_by_order.values() for oid in req}
+    operations = {op.id: op for op in db.query(RoutingOperation).filter(RoutingOperation.id.in_(op_ids)).all()} if op_ids else {}
+    work = {}
+    for order in orders:
+        work[order.id] = {oid: operation_remaining(db, order.id, oid, qty, ctx, produced=produced, plan_lines=[])
+                          for oid, qty in requirements_by_order[order.id].items()
+                          if oid in operations and operations[oid].work_center_id in wc_by_id}
+
     out: list[OrderScheduleOut] = []
+    calendar_cache = {}
     for o in orders:
-        ops = [op for op in o.item.operations if op.work_center_id in wc_by_id]
-        required = sum(op.hours_for(o.quantity) for op in ops)
+        needs = work[o.id]
+        required = sum(operation_run_hours(operations[oid], w.remaining_execution_qty, setup_required=w.setup_required)
+                       for oid, w in needs.items() if w.remaining_execution_qty > 1e-6)
         batch = order_batch.get(o.id)
         sim_bid = sim_order_batch.get(o.id)
         if sim_bid is not None:
@@ -522,44 +581,74 @@ def order_schedule(
             planned = sum(p.planned_hours for p in pls) * share
             start = min((p.week_start for p in pls), default=None)
             end_week = max((p.week_start for p in pls), default=None)
-            schedule_order_id = sorted(sim_batches[sim_bid][1])[0]
         elif batch:
             pls = by_batch.get(batch.id, [])
             share = o.quantity / batch.quantity if batch.quantity else 0.0
             planned = sum(p.planned_hours for p in pls) * share
             start = min((p.week_start for p in pls), default=None)
             end_week = max((p.week_start for p in pls), default=None)
-            schedule_order_id = sorted(batch.orders, key=lambda l: l.order_id)[0].order_id if batch.orders else o.id
         else:
             pls = by_order.get(o.id, [])
             share = 1.0
             planned = sum(p.planned_hours for p in pls)
             start = min((p.week_start for p in pls), default=None)
             end_week = max((p.week_start for p in pls), default=None)
-            schedule_order_id = o.id
+        # Allocate a common batch by each member's remaining operation need.
+        # A reservation on one member must not reduce another member's share.
+        member_ids = sim_batches[sim_bid][1] if sim_bid is not None else ([link.order_id for link in batch.orders] if batch else [o.id])
+        op_share = {}
+        for oid, need in needs.items():
+            total = sum(work.get(mid, {}).get(oid).remaining_execution_qty
+                        for mid in member_ids if oid in work.get(mid, {}))
+            op_share[oid] = need.remaining_execution_qty / total if total > 1e-6 else 0.0
+        planned = sum(p.planned_hours * op_share.get(p.operation_id, 0) for p in pls)
+        planned_qty = defaultdict(float)
+        for p in pls:
+            planned_qty[p.operation_id] += float(p.planned_qty or 0) * op_share.get(p.operation_id, 0)
+        missing = any(planned_qty[oid] + 1e-4 < w.remaining_execution_qty for oid, w in needs.items())
+        covered_hours = sum(operation_run_hours(operations[oid], min(planned_qty[oid], w.remaining_execution_qty),
+                                               setup_required=w.setup_required and planned_qty[oid] > 1e-6)
+                            for oid, w in needs.items() if w.remaining_execution_qty > 1e-6)
         planned_end = None
         last_wc_code = ""
-        if end_week is not None:
-            # son haftadaki satirlar birden fazla is merkezinde olabilir; en gec biteni al
-            candidates = []
-            for p in pls:
-                if p.week_start != end_week:
-                    continue
-                wc = wc_by_id.get(p.work_center_id)
-                if not wc:
-                    continue
-                d = _end_day_in_week(db, wc, end_week, schedule_order_id, by_wc_week[(wc.id, end_week)])
-                candidates.append((d, wc.code))
-            if candidates:
-                planned_end, last_wc_code = max(candidates)
-        coverage = (planned / required * 100) if required > 0 else 0.0
-        if required <= 1e-6:
+        completion = []
+        # Only the finished item's final operation produces the finished item.
+        final_op = max(o.item.operations, key=lambda op: (op.seq, op.id), default=None)
+        final_need = needs.get(final_op.id) if final_op else None
+        remaining_output = final_need.remaining_execution_qty if final_need else 0.0
+        final_lines = sorted((p for p in pls if final_op and p.operation_id == final_op.id),
+                             key=lambda p: (p.week_start, plan_line_priority_key(p)))
+        by_week = {}
+        for p in final_lines:
+            quantity = min(remaining_output, float(p.planned_qty or 0) * op_share.get(p.operation_id, 0))
+            if quantity <= 1e-6:
+                continue
+            wc = wc_by_id[p.work_center_id]
+            _, end = plan_line_window(db, wc, p.week_start, p, by_wc_week[(wc.id, p.week_start)], cache=calendar_cache)
+            entry = by_week.setdefault(p.week_start, {"week_start": p.week_start, "planned_end": end, "quantity": 0.0})
+            entry["planned_end"] = max(entry["planned_end"], end)
+            entry["quantity"] += quantity
+            remaining_output -= quantity
+            last_wc_code = wc.code
+        completion = [dict(entry, quantity=round(entry["quantity"], 4)) for _, entry in sorted(by_week.items())]
+        if completion:
+            planned_end = max(entry["planned_end"] for entry in completion)
+            end_week = completion[-1]["week_start"]
+        fulfilled = bool(needs) and all(w.remaining_execution_qty <= 1e-6 for w in needs.values())
+        coverage = (covered_hours / required * 100) if required > 0 else (100.0 if fulfilled else 0.0)
+        if fulfilled:
+            status = "covered"
+            start = end_week = planned_end = None
+            last_wc_code = ""
+        elif required <= 1e-6:
             status = "no_ops"
         elif planned <= 1e-6:
             status = "unplanned"
-        elif coverage < 99.5:
+        elif missing:
             status = "partial"
-        elif planned_end and planned_end > effective_due(o):
+        elif planned_end is None:
+            status = "finish_unknown"
+        elif planned_end > effective_due(o):
             status = "late"
         else:
             status = "on_time"
@@ -581,9 +670,21 @@ def order_schedule(
                 planned_start=start,
                 planned_end_week=end_week,
                 planned_end=planned_end,
+                completion_weeks=completion,
                 last_work_center_code=last_wc_code,
                 lateness_days=(planned_end - effective_due(o)).days if planned_end else None,
+                slack_days=(effective_due(o) - planned_end).days if planned_end else None,
+                target_date=effective_due(o) - timedelta(days=DELIVERY_BUFFER_DAYS),
+                buffer_ok=(planned_end <= effective_due(o) - timedelta(days=DELIVERY_BUFFER_DAYS)) if planned_end else None,
                 plan_status=status,
+                conditional_line_count=sum(getattr(p, "material_unverified", None) is True for p in pls),
+                unknown_material_line_count=sum(getattr(p, "material_unverified", None) is None for p in pls),
+                material_note=(
+                    " ".join(filter(None, [
+                        "Koşullu plan: oluşturulurken malzeme doğrulanmamış." if any(getattr(p, "material_unverified", None) is True for p in pls) else "",
+                        "Bazı plan satırlarının oluşturulma anındaki malzeme koşulu kaydedilmemiş." if any(getattr(p, "material_unverified", None) is None for p in pls) else "",
+                    ])) if pls else "Plan satırı yok; kayıtlı malzeme koşulu bulunmuyor."
+                ),
             )
         )
     return out
@@ -599,6 +700,10 @@ def order_progress(db: Session, wc_ids: list[int] | None, as_of: date | None = N
     termin sirasiyla (FIFO) dagitilir.
     """
     as_of = as_of or date.today()
+    from app.core.config import get_settings
+    if get_settings().production_source == "mes":
+        from app.services.mes_order_progress import report
+        return report(db, wc_ids, as_of)
     wcs = _planned_wcs(db, wc_ids)
     wc_by_id = {w.id: w for w in wcs}
     orders = _open_orders(db)

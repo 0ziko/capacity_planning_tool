@@ -32,7 +32,10 @@ def test_machines_and_capacity_source(client, auth):
 
     # 3 personel is merkezine bagli
     _upload(client, auth, "employees", ["Sicil No", "Ad Soyad", "İş Merkezi Kodu"], [["M-1", "A", "MAK-1"], ["M-2", "B", "MAK-1"], ["M-3", "C", "MAK-1"]])
-    assert _cap(client, auth, wc["id"]) == 3 * 4 * 5
+    assert _cap(client, auth, wc["id"]) == 0
+    response = client.put(f"/api/workcenters/{wc['id']}/weeks/{_monday()}", headers=auth, json={"headcount": 3})
+    assert response.status_code == 200
+    assert _cap(client, auth, wc["id"]) == 60
 
     # Makineler: API ile ekle + Excel ile ekle
     r = client.post(f"/api/workcenters/{wc['id']}/machines", headers=auth, json={"code": "MK-01", "name": "Pres 60t"})
@@ -62,20 +65,20 @@ def test_machines_and_capacity_source(client, auth):
     body = {k: v for k, v in wc.items() if k not in ("id", "shifts", "machines", "employee_count", "machine_employee_count", "capacity_headcount")}
     r = client.put(f"/api/workcenters/{wc['id']}", headers=auth, json={**body, "capacity_source": "machines"})
     assert r.status_code == 200 and r.json()["capacity_headcount"] == 2
-    assert _cap(client, auth, wc["id"]) == 2 * 4 * 5
+    assert _cap(client, auth, wc["id"]) == 60
 
     # Makine modunda vardiya kisi sayisi (10) yok sayilir; makine atamasi gecerlidir
     client.post(f"/api/workcenters/{wc['id']}/shifts", headers=auth, json={"name": "Gündüz", "weekdays": "0,1,2,3,4", "start_time": "08:00", "end_time": "18:00", "headcount": 10})
-    assert _cap(client, auth, wc["id"]) == 40
+    assert _cap(client, auth, wc["id"]) == 60
     # Pasif makine sayilmaz
     m2 = next(m for m in wc["machines"] if m["code"] == "MK-02")
     client.put(f"/api/machines/{m2['id']}", headers=auth, json={"code": "MK-02", "name": "Pres 100t", "is_active": False})
-    assert _cap(client, auth, wc["id"]) == 20
+    assert _cap(client, auth, wc["id"]) == 60
 
     # Kaynak geri "is merkezi" => vardiya kisi sayisi 10 gecerli
     r = client.put(f"/api/workcenters/{wc['id']}", headers=auth, json={**body, "capacity_source": "work_center"})
     assert r.status_code == 200
-    assert _cap(client, auth, wc["id"]) == 10 * 4 * 5
+    assert _cap(client, auth, wc["id"]) == 60
 
     # Baska is merkezine ait makine atanamaz
     _upload(client, auth, "workcenters", ["İş Merkezi Kodu", "İş Merkezi Adı"], [["MAK-2", "Diğer"]])

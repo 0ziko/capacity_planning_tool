@@ -25,12 +25,23 @@ def _seed_daily_imports(client, auth, wc_code: str, item_code: str, order_no: st
     _upload(client, auth, "stock_receipts", ["Tarih", "Stok Kodu", "Miktar"], [[today, item_code, 1]])
 
 
-def test_preflight_blocks_no_routing(client, auth):
+def test_preflight_blocks_no_routing(client, auth, db):
     _clean_orders(client, auth)
     _upload(client, auth, "workcenters", ["İş Merkezi Kodu", "İş Merkezi Adı", "Planlanıyor (E/H)", "Birim Saat", "Kişi Başı Verimli Saat"], [["PF-1", "Preflight WC", "E", 10, 4]])
     wc = next(w for w in client.get("/api/workcenters", headers=auth).json() if w["code"] == "PF-1")
     _upload(client, auth, "items", ["Stok Kodu", "Stok Adı", "Ürün Grubu"], [["PF-NOROTA", "Rotasiz", "G"]])
-    _upload(client, auth, "orders", ["Sipariş No", "Termin", "Stok Kodu", "Miktar"], [["PF-O1", "2026-10-01", "PF-NOROTA", 10]])
+    # Siparis giris kapisi rotasiz urunu artik reddeder; eski (kapidan once girilmis) siparis dogrudan yazilir.
+    from tests.test_capacity_flow import _xlsx
+
+    res = client.post("/api/imports/orders", headers=auth, files={"file": ("orders.xlsx", _xlsx(["Sipariş No", "Termin", "Stok Kodu", "Miktar"], [["PF-O1", "2026-10-01", "PF-NOROTA", 10]]), "application/octet-stream")}).json()
+    assert res["errors"] and "Rota tanimi eksik" in res["errors"][0]
+    from datetime import date as _date
+
+    from app.models import Item, Order
+
+    item = db.query(Item).filter(Item.code == "PF-NOROTA").one()
+    db.add(Order(order_no="PF-O1", item_id=item.id, quantity=10, due_date=_date(2026, 10, 1), status="open"))
+    db.commit()
 
     body = {"start_week": WEEK.isoformat(), "weeks": 4, "work_center_ids": [wc["id"]], "mode": "due_date"}
     pf = client.post("/api/plan/auto/preflight", headers=auth, json=body).json()
@@ -48,7 +59,7 @@ def test_preflight_blocks_no_routing(client, auth):
     assert ws.freeze_panes == "A2" and ws.auto_filter.ref == ws.dimensions
     assert "Kontrol Kapsamı" in wb.sheetnames
 
-    r = client.post("/api/plan/auto", headers=auth, json=body)
+    r = _plan_with_ack(client, "/api/plan/auto", headers=auth, json=body)
     assert r.status_code == 400
 
 
@@ -68,7 +79,7 @@ def test_preflight_warns_no_capacity(client, auth):
     assert pf["needs_daily_data_ack"] is False
     assert any(r["work_center_code"] == "PF-2" for r in pf["no_capacity"])
 
-    r = client.post("/api/plan/auto", headers=auth, json=body)
+    r = _plan_with_ack(client, "/api/plan/auto", headers=auth, json=body)
     assert r.status_code == 200
 
 
@@ -117,7 +128,13 @@ def test_preflight_ok_with_routing_and_capacity(client, auth):
     body = {"start_week": WEEK.isoformat(), "weeks": 2, "work_center_ids": [wc["id"]], "mode": "due_date"}
     pf = client.post("/api/plan/auto/preflight", headers=auth, json=body).json()
     assert pf["can_plan"] is True
-    assert pf["needs_capacity_ack"] is False
+    # Positive shift defaults do not constitute an explicit weekly labor entry.
+    assert len(pf["no_capacity"]) == 2
+    assert all(r["capacity_hours"] == 0 for r in pf["no_capacity"])
+    assert pf["needs_capacity_ack"] is True
+    assert len(pf["missing_labor_weeks"]) == 2
     assert pf["needs_daily_data_ack"] is False
     assert all(c["status"] == "ok" for c in pf["daily_data"])
     assert pf["no_routing"] == []
+
+from tests.test_capacity_flow import _plan_with_ack

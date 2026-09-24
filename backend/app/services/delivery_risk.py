@@ -3,6 +3,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 import math
 from types import SimpleNamespace
+from sqlalchemy import func
 from sqlalchemy.orm import selectinload
 from app.models import Item, Order, PlanLine, Reservation, Shipment, StockReceipt, RoutingOperation, WorkCenter
 from app.models.mes import MesDetail
@@ -53,9 +54,16 @@ def analyze(db, as_of, horizon=8, work_center_ids=None):
     horizon_end = monday(as_of) + timedelta(weeks=horizon, days=6)
     schedule_end = max(horizon_end, start) + timedelta(weeks=26)
     past = start - timedelta(weeks=26)
-    items = {i.id: i for i in db.query(Item).options(selectinload(Item.operations), selectinload(Item.bom_lines)).all()}
-    by_code = {i.code.upper(): i for i in items.values()}
     orders = db.query(Order).filter(Order.status == "open").order_by(Order.due_date, Order.id).all()
+    # Stock competition still includes every open order; unused catalogue BOMs are irrelevant.
+    items = {i.id: i for i in db.query(Item).options(selectinload(Item.operations), selectinload(Item.bom_lines))
+             .filter(Item.id.in_({o.item_id for o in orders})).all()}
+    wip_codes = {b.component_code.upper() for item in items.values() for b in item.bom_lines
+                 if is_wip_asm_link(b.component_code, b.source_wip, b.recipe_seq)}
+    if wip_codes:
+        items.update({i.id: i for i in db.query(Item).options(selectinload(Item.operations), selectinload(Item.bom_lines))
+                      .filter(func.upper(Item.code).in_(wip_codes)).all()})
+    by_code = {i.code.upper(): i for i in items.values()}
     orders.sort(key=lambda o: (o.revised_due_date or o.due_date, o.order_no, o.position_no, o.id))
     # All orders compete for stock; only demand due within the requested horizon is scheduled.
     shipped, shipped_item, reserved, reserved_item, receipts = (defaultdict(float) for _ in range(5))
@@ -169,10 +177,12 @@ def analyze(db, as_of, horizon=8, work_center_ids=None):
         graphs[o.id] = (nodes, warnings)
     # Reuse common-pool rules, only in local dictionaries. No ORM relationship is assigned.
     records = [detail_dict(r) for r in db.query(MesDetail).filter(MesDetail.prod_date <= as_of).all()]
-    pool = {c: max(q, 0) for c, q in balances(records).items()}
+    from app.services.mes_inventory import planning_pool
+    pool = planning_pool(records)
     allocations = allocate_pool(db, pool, as_of, orders, required, credits, items.values(), plan_lines=plans) if records else []
     from app.services.remaining_work import produced_qty_map
-    legacy, legacy_warnings = produced_qty_map(db, as_of=as_of, include_mes=False)
+    from app.core.config import get_settings
+    legacy, legacy_warnings = ({}, []) if get_settings().production_source == "mes" else produced_qty_map(db, as_of=as_of, include_mes=False)
     work_centers = {w.id: w for w in db.query(WorkCenter).all()}
     used_wc = {n["op"].work_center_id for nodes, _ in graphs.values() for n in nodes}
     full, forward = {}, {}

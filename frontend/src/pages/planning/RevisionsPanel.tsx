@@ -3,15 +3,33 @@ import {
   api,
   ApiError,
   fmt,
+  trackedRevisionCalculate,
   REVISION_REASONS,
   type JobMovePreview,
   type Order,
   type PlanMode,
+  type MaterialPolicy,
   type PlanRevision,
   type PlanRevisionChange,
+  type PlanRevisionOrderDiff,
+  type OvertimeSuggestion,
   type WorkCenter,
 } from "../../api";
 import { ErrorText, OrderMultiSelect, useAsync } from "../../components";
+import PlanPreflightModal from "./PlanPreflightModal";
+import {
+  DIFF_FILTERS,
+  applyToDrafts,
+  buildDueDrafts,
+  deltaLabel,
+  diffsToCsv,
+  draftsToChanges,
+  filterDiffs,
+  statusBadge,
+  summarize,
+  unmetChangeIds,
+  type DiffFilter,
+} from "./revisionDiff";
 
 const STATUS: Record<string, [string, string]> = {
   draft: ["warn", "Taslak"],
@@ -49,6 +67,7 @@ export default function RevisionsPanel({
   weeks,
   wcIds,
   mode,
+  materialPolicy,
   orders,
   wcs,
   canEdit,
@@ -58,6 +77,7 @@ export default function RevisionsPanel({
   weeks: number;
   wcIds: number[];
   mode: PlanMode;
+  materialPolicy: MaterialPolicy;
   orders: Order[];
   wcs: WorkCenter[];
   canEdit: boolean;
@@ -71,8 +91,14 @@ export default function RevisionsPanel({
   const [reasons, setReasons] = useState<string[]>(["other"]);
   const [note, setNote] = useState("");
   const [replaceManual, setReplaceManual] = useState(false);
+  const [slipMode, setSlipMode] = useState<"chain" | "defer">("chain");
+  const [useOvertime, setUseOvertime] = useState(true);
+  const [prepFill, setPrepFill] = useState(true);
   const [orderIds, setOrderIds] = useState<number[]>([]);
-  const [newDue, setNewDue] = useState("");
+  const [dueByOrder, setDueByOrder] = useState<Record<number, string>>({});
+  const [applyDate, setApplyDate] = useState("");
+  const [diffFilter, setDiffFilter] = useState<DiffFilter>("requested");
+  const [diffQuery, setDiffQuery] = useState("");
   const [wcId, setWcId] = useState(0);
   const [week, setWeek] = useState(start);
   const [headcount, setHeadcount] = useState("");
@@ -80,6 +106,14 @@ export default function RevisionsPanel({
   const [moveQtyMode, setMoveQtyMode] = useState<"remaining" | "split">("remaining");
   const [moveQty, setMoveQty] = useState("");
   const [moveStart, setMoveStart] = useState(start);
+  const [approvalOpen, setApprovalOpen] = useState(false);
+  const [calcPhase, setCalcPhase] = useState("");
+  const [otHeadcount, setOtHeadcount] = useState("");
+  const [otDays, setOtDays] = useState("");
+  const [otSuggest, setOtSuggest] = useState<OvertimeSuggestion | null>(null);
+  const [otErr, setOtErr] = useState("");
+  const [placement] = useState<"asap" | "jit" | "flow">("flow");
+  const [jitBufferDays] = useState(2);
 
   const selected = useMemo(() => (list.data ?? []).find((r) => r.id === selId) || null, [list.data, selId]);
   const editable = selected && (selected.status === "draft" || selected.status === "calculated");
@@ -142,23 +176,55 @@ export default function RevisionsPanel({
         start_week: start,
         weeks,
         mode,
+        material_policy: materialPolicy,
+        placement,
+        jit_buffer_days: jitBufferDays,
+        slip_mode: slipMode,
+        use_overtime: useOvertime,
+        prep_fill: prepFill,
         work_center_ids: wcIds.length ? wcIds : null,
         replace_manual: replaceManual,
       }),
     );
 
+  const drafts = useMemo(() => buildDueDrafts(orders, orderIds, dueByOrder), [orders, orderIds, dueByOrder]);
+  const dueChanges = useMemo(() => draftsToChanges(drafts), [drafts]);
+  const setDraftDue = (id: number, value: string) => setDueByOrder((m) => ({ ...m, [id]: value }));
+  const applyDrafts = (mode: "same" | "shift", value: string | number) => {
+    const next = applyToDrafts(drafts, mode, value);
+    setDueByOrder((m) => ({ ...m, ...Object.fromEntries(next.map((d) => [d.order_id, d.new_due])) }));
+  };
+
   const addDue = () => {
-    if (!selected || !orderIds.length || !newDue) return;
-    run(() =>
-      api.post<PlanRevision>(`/api/plan/revisions/${selected.id}/changes/bulk`, {
-        changes: orderIds.map((entity_id) => ({
-          entity_type: "order",
-          entity_id,
-          field: "revised_due_date",
-          new_value: newDue,
-        })),
-      }),
-    );
+    if (!selected || !dueChanges.length) return;
+    run(() => api.post<PlanRevision>(`/api/plan/revisions/${selected.id}/changes/bulk`, { changes: dueChanges })).then(() => {
+      setDueByOrder({});
+      setOrderIds([]);
+    });
+  };
+
+  const cmp = selected?.compare;
+  const diffRows: PlanRevisionOrderDiff[] = cmp?.order_diffs ?? [];
+  const diffSummary = cmp?.diff_summary ?? summarize(diffRows);
+  const visibleDiffs = useMemo(() => filterDiffs(diffRows, diffFilter, diffQuery), [diffRows, diffFilter, diffQuery]);
+  const unmetIds = useMemo(() => unmetChangeIds(diffRows), [diffRows]);
+
+  const removeUnmetAndRecalculate = () => {
+    if (!selected || !unmetIds.length) return;
+    run(async () => {
+      await api.post<PlanRevision>(`/api/plan/revisions/${selected.id}/changes/remove`, { change_ids: unmetIds });
+      return trackedRevisionCalculate(selected.id, setCalcPhase);
+    });
+  };
+
+  const downloadCsv = () => {
+    if (!selected) return;
+    const blob = new Blob([diffsToCsv(visibleDiffs)], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${selected.revision_no}-${diffFilter}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
   };
 
   const addMove = () => {
@@ -186,21 +252,53 @@ export default function RevisionsPanel({
   };
 
   const addLabor = () => {
-    if (!selected || !wcId || !week || !headcount) return;
-    run(() =>
-      api.post<PlanRevision>(`/api/plan/revisions/${selected.id}/changes`, {
-        entity_type: "wc_week",
-        extra_key: `${wcId}|${week}`,
-        field: "headcount",
-        new_value: headcount,
-      }),
-    );
+    if (!selected || !wcId || !week || (!headcount && !otHeadcount)) return;
+    const changes: { entity_type: string; extra_key: string; field: string; new_value: string }[] = [];
+    if (headcount) changes.push({ entity_type: "wc_week", extra_key: `${wcId}|${week}`, field: "headcount", new_value: headcount });
+    if (otHeadcount) {
+      changes.push({ entity_type: "wc_week", extra_key: `${wcId}|${week}`, field: "overtime_headcount", new_value: otHeadcount });
+      if (otDays) changes.push({ entity_type: "wc_week", extra_key: `${wcId}|${week}`, field: "overtime_days", new_value: otDays });
+      changes.push({ entity_type: "wc_week", extra_key: `${wcId}|${week}`, field: "overtime_hours_per_person", new_value: "2.5" });
+    }
+    run(() => api.post<PlanRevision>(`/api/plan/revisions/${selected.id}/changes/bulk`, { changes })).then(() => {
+      setOtHeadcount("");
+      setOtDays("");
+    });
   };
 
-  const cmp = selected?.compare;
+  // Hesaplanmış revizyon için fazla mesai önerisi (salt hesap; planlamacı taslağa eklerse etkinleşir)
+  useEffect(() => {
+    setOtSuggest(null);
+    setOtErr("");
+    if (!selected || selected.status !== "calculated") return;
+    let cancelled = false;
+    api
+      .get<OvertimeSuggestion>(`/api/plan/revisions/${selected.id}/overtime-suggestions`)
+      .then((s) => { if (!cancelled) setOtSuggest(s); })
+      .catch((e) => { if (!cancelled) setOtErr((e as Error).message); });
+    return () => { cancelled = true; };
+  }, [selected?.id, selected?.status, selected?.calculated_at]);
+
+  const applyOvertimeSuggestions = (rows: OvertimeSuggestion["suggestions"]) => {
+    if (!selected || !rows.length) return;
+    const changes = rows.flatMap((r) => [
+      { entity_type: "wc_week", extra_key: `${r.work_center_id}|${r.week_start}`, field: "overtime_headcount", new_value: String(r.suggested_overtime_headcount) },
+      { entity_type: "wc_week", extra_key: `${r.work_center_id}|${r.week_start}`, field: "overtime_days", new_value: String(r.overtime_days) },
+      { entity_type: "wc_week", extra_key: `${r.work_center_id}|${r.week_start}`, field: "overtime_hours_per_person", new_value: String(r.overtime_hours_per_person) },
+    ]);
+    run(async () => {
+      await api.post<PlanRevision>(`/api/plan/revisions/${selected.id}/changes/bulk`, { changes });
+      return trackedRevisionCalculate(selected.id, setCalcPhase);
+    });
+  };
 
   return (
     <div>
+      {approvalOpen && selected && <PlanPreflightModal revision
+        req={{ start_week: selected.start_week, weeks: selected.weeks, work_center_ids: selected.work_center_ids, material_policy: selected.material_policy, mode: selected.mode as PlanMode }}
+        preflightUrl={`/api/plan/revisions/${selected.id}/preflight`}
+        onClose={() => setApprovalOpen(false)}
+        onConfirm={(ack) => { setApprovalOpen(false); void run(() => api.post(`/api/plan/revisions/${selected.id}/approve${ack ? `?missing_headcount_ack=${encodeURIComponent(ack)}` : ""}`)); }} />}
       <h2>Plan revizyonu</h2>
       <p className="muted" style={{ marginTop: -8 }}>
         Nedeni kaydedin; vade, haftalık iş gücü veya <b>iş taşıma</b> (kalan operasyon + yeni başlangıç) ekleyin.
@@ -234,7 +332,23 @@ export default function RevisionsPanel({
             <input type="checkbox" checked={replaceManual} onChange={(e) => setReplaceManual(e.target.checked)} />
             Manuel plan satırlarını da yeniden hesapla
           </label>
-          <p className="muted">Ufuk: {start} · {weeks} hafta · {mode === "revenue" ? "ciro öncelikli (sezgisel)" : "termine göre"}</p>
+          <div style={{ display: "flex", gap: 16, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
+            <label title="Hedef tarihe sığmayan adet: zincir etkisi = sonraya dengeli yerleşir; komple kaydır = plana yazılmaz, raporlanır">Kayan adet{" "}
+              <select value={slipMode} onChange={(e) => setSlipMode(e.target.value as "chain" | "defer")}>
+                <option value="chain">Zincir etkisi</option>
+                <option value="defer">Komple kaydır</option>
+              </select>
+            </label>
+            <label style={{ display: "flex", gap: 6, alignItems: "center" }} title="Termini kurtarmak için sınırlar içinde fazla mesai önerilsin (onaylanınca haftalık iş gücüne yazılır)">
+              <input type="checkbox" checked={useOvertime} onChange={(e) => setUseOvertime(e.target.checked)} />
+              Termin için fazla mesai öner
+            </label>
+            <label style={{ display: "flex", gap: 6, alignItems: "center" }} title="Kalan normal kapasiteye hazırlık yarımamülü (son operasyon hariç, fazla mesai yok)">
+              <input type="checkbox" checked={prepFill} onChange={(e) => setPrepFill(e.target.checked)} />
+              Atıl kapasiteye hazırlık yarımamülü
+            </label>
+          </div>
+          <p className="muted">Malzeme: {materialPolicy === "strict" ? "Katı" : "Koşullu"} · Ufuk: {start} · {weeks} hafta · {mode === "revenue" ? "ciro öncelikli (sezgisel)" : "termine göre"}</p>
           <button onClick={() => void create()} disabled={busy || reasons.length === 0}>
             Taslak oluştur
           </button>
@@ -258,7 +372,7 @@ export default function RevisionsPanel({
                 <td><code>{r.revision_no}</code></td>
                 <td><StatusBadge status={r.status} /></td>
                 <td>{r.reason_codes.map(reasonLabel).join(", ")}</td>
-                <td>{r.created_by}</td>
+                <td>{r.created_by}<br /><span className="muted">Malzeme: {r.material_policy === "strict" ? "Katı" : "Koşullu"}</span></td>
                 <td>{r.approved_by || "—"}</td>
               </tr>
             ))}
@@ -277,11 +391,11 @@ export default function RevisionsPanel({
             </h3>
             {canEdit && editable && (
               <div className="row">
-                <button className="secondary" onClick={() => void run(() => api.post(`/api/plan/revisions/${selected.id}/calculate`))} disabled={busy}>
+                <button className="secondary" onClick={() => void run(() => trackedRevisionCalculate(selected.id, setCalcPhase))} disabled={busy}>
                   Yeniden hesapla
                 </button>
                 {selected.status === "calculated" && (
-                  <button onClick={() => void run(() => api.post(`/api/plan/revisions/${selected.id}/approve`))} disabled={busy}>
+                  <button onClick={() => setApprovalOpen(true)} disabled={busy}>
                     Onayla ve devreye al
                   </button>
                 )}
@@ -295,12 +409,17 @@ export default function RevisionsPanel({
             )}
           </div>
           <p>{selected.note || <span className="muted">Açıklama yok</span>}</p>
+          {calcPhase && (
+            <div className="panel" style={{ padding: "8px 12px", marginBottom: 10, background: "#e3f2fd", borderColor: "#90caf9" }}>
+              ⏳ Yeniden hesap arka planda sürüyor — {calcPhase}. Sayfayı kapatabilirsiniz; sonuç revizyon kaydına yazılır.
+            </div>
+          )}
           {conflict && (
             <div className="panel" style={{ padding: "8px 12px", marginBottom: 10, background: "#fff3e0", borderColor: "#ffb74d" }}>
               <b>Onay uygulanamadı</b>
               <p style={{ margin: "6px 0 8px" }}>{conflict}</p>
               {selected.status === "calculated" && (
-                <button className="secondary" onClick={() => void run(() => api.post(`/api/plan/revisions/${selected.id}/calculate`))} disabled={busy}>
+                <button className="secondary" onClick={() => void run(() => trackedRevisionCalculate(selected.id, setCalcPhase))} disabled={busy}>
                   Yeniden hesapla
                 </button>
               )}
@@ -315,15 +434,66 @@ export default function RevisionsPanel({
             <>
               <h4>Taslak girdiler</h4>
               <div className="row" style={{ flexWrap: "wrap", alignItems: "flex-end", gap: 12 }}>
-                <OrderMultiSelect orders={orders} value={orderIds} onChange={setOrderIds} />
-                <label>
-                  Yeni revize termin
-                  <input type="date" value={newDue} onChange={(e) => setNewDue(e.target.value)} />
-                </label>
-                <button className="secondary" onClick={addDue} disabled={busy || !orderIds.length || !newDue}>
-                  {orderIds.length > 1 ? `${orderIds.length} siparişe vade ekle` : "Vade ekle"}
-                </button>
+                <OrderMultiSelect orders={orders} value={orderIds} onChange={setOrderIds} label="Siparişler (müşteri / sipariş / stok ile arayın)" />
               </div>
+              {drafts.length > 0 && (
+                <>
+                  <h4 style={{ marginBottom: 4 }}>Termin talepleri</h4>
+                  <p className="muted" style={{ marginTop: 0 }}>
+                    Her siparişe kendi yeni termini girilir. Kısayollar mevcut (etkin) termine göre uygular; boş bırakılan satır taslağa girmez.
+                  </p>
+                  <div className="row" style={{ flexWrap: "wrap", alignItems: "flex-end", gap: 8, marginBottom: 6 }}>
+                    <label>
+                      Tümüne aynı termin
+                      <input type="date" value={applyDate} onChange={(e) => setApplyDate(e.target.value)} />
+                    </label>
+                    <button className="secondary" onClick={() => applyDate && applyDrafts("same", applyDate)} disabled={busy || !applyDate}>Uygula</button>
+                    <span className="muted">veya termine göre:</span>
+                    {[-7, -14, -21, 7, 14].map((d) => (
+                      <button key={d} className="secondary small" onClick={() => applyDrafts("shift", d)} disabled={busy}>
+                        {d > 0 ? `+${d}` : d} gün
+                      </button>
+                    ))}
+                    <button className="secondary small" onClick={() => setDueByOrder({})} disabled={busy}>Temizle</button>
+                  </div>
+                  <div className="table-wrap rev-due" style={{ maxHeight: 320 }}>
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Sipariş</th>
+                          <th>Müşteri</th>
+                          <th>Stok</th>
+                          <th>Etkin termin</th>
+                          <th>Plan bitişi</th>
+                          <th>Yeni termin</th>
+                          <th>Fark</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {drafts.map((d) => {
+                          const diff = d.new_due && d.new_due !== d.current_due ? Math.round((Date.parse(d.new_due) - Date.parse(d.current_due)) / 86400000) : null;
+                          return (
+                            <tr key={d.order_id} className={diff !== null ? "changed" : ""}>
+                              <td>{d.order_no}{d.position_no ? `/${d.position_no}` : ""}</td>
+                              <td>{d.customer}</td>
+                              <td>{d.item_code}</td>
+                              <td>{d.current_due}</td>
+                              <td>{d.planned_end || <span className="muted">—</span>}</td>
+                              <td><input type="date" value={d.new_due} onChange={(e) => setDraftDue(d.order_id, e.target.value)} /></td>
+                              <td className={diff === null ? "muted" : diff < 0 ? "delta-minus" : "delta-plus"}>{diff === null ? "—" : deltaLabel(diff)}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="row" style={{ marginTop: 6 }}>
+                    <button onClick={addDue} disabled={busy || !dueChanges.length}>
+                      {dueChanges.length ? `${dueChanges.length} siparişe revize termin ekle` : "Yeni termin girin"}
+                    </button>
+                  </div>
+                </>
+              )}
               <div className="row" style={{ flexWrap: "wrap", marginTop: 8 }}>
                 <label>
                   İş merkezi
@@ -342,7 +512,15 @@ export default function RevisionsPanel({
                   Kişi sayısı
                   <input type="number" min={0} value={headcount} onChange={(e) => setHeadcount(e.target.value)} />
                 </label>
-                <button className="secondary" onClick={addLabor} disabled={busy}>İş gücü ekle</button>
+                <label title="18:00-21:00 penceresinde fazla mesai yapacak kişi; haftanın kişi sayısını aşamaz">
+                  Fazla mesai kişi
+                  <input type="number" min={0} value={otHeadcount} onChange={(e) => setOtHeadcount(e.target.value)} />
+                </label>
+                <label title="Fazla mesai gün sayısı (boş = tüm çalışma günleri); kişi başı 2,5 saat sabittir">
+                  FM gün
+                  <input type="number" min={0} max={7} value={otDays} onChange={(e) => setOtDays(e.target.value)} disabled={!otHeadcount} />
+                </label>
+                <button className="secondary" onClick={addLabor} disabled={busy || !wcId || !week || (!headcount && !otHeadcount)}>İş gücü ekle</button>
               </div>
               <h4>İş taşıma (kalan zincir)</h4>
               <p className="muted" style={{ marginTop: -8 }}>
@@ -483,20 +661,169 @@ export default function RevisionsPanel({
               <div className="row">
                 <div className="kpi"><span className="v">{fmt(cmp.baseline.planned_hours)}</span><span className="l">Canlı saat</span></div>
                 <div className="kpi"><span className="v">{fmt(cmp.proposed.planned_hours)}</span><span className="l">Önerilen saat</span></div>
-                <div className="kpi"><span className="v">{cmp.baseline.late} → {cmp.proposed.late}</span><span className="l">Geç sipariş</span></div>
+                <div className={`kpi ${cmp.proposed.late > cmp.baseline.late ? "bad" : cmp.proposed.late < cmp.baseline.late ? "ok" : ""}`}><span className="v">{cmp.baseline.late} → {cmp.proposed.late}</span><span className="l">Geç sipariş</span></div>
                 <div className="kpi"><span className="v">{cmp.baseline.on_time} → {cmp.proposed.on_time}</span><span className="l">Zamanında</span></div>
                 <div className="kpi"><span className="v">{cmp.baseline.unplanned} → {cmp.proposed.unplanned}</span><span className="l">Plansız</span></div>
               </div>
               {!!cmp.insert_notes?.length && (
                 <p>{cmp.insert_notes.join(" · ")}</p>
               )}
-              {!!cmp.bumped_orders?.length && (
-                <p>Kaydırılan (çakışan) işler: <b>{cmp.bumped_orders.join(", ")}</b></p>
-              )}
               {!!cmp.unplanned?.length && (
                 <p className="muted">
                   Ufka sığmayan: {cmp.unplanned.map((u) => `${u.order_no || "?"} ${u.work_center_code || ""} ${u.hours ?? ""}s`).join("; ")}
                 </p>
+              )}
+
+              {(otSuggest || otErr) && (
+                <div className="panel" style={{ marginTop: 10, background: otSuggest && otSuggest.suggestions.length ? "#fffbeb" : undefined, borderColor: otSuggest && otSuggest.suggestions.length ? "#fcd34d" : undefined }}>
+                  <h4 style={{ marginTop: 0, marginBottom: 4 }}>Fazla mesai önerisi <span className="muted" style={{ fontWeight: 400 }}>({otSuggest?.window ?? "18:00-21:00"}, kişi başı en fazla {fmt(otSuggest?.max_hours_per_person ?? 2.5, 1)} sa; haftanın kişi sayısı ve çalışma günü aşılmaz)</span></h4>
+                  {otErr && <ErrorText err={otErr} />}
+                  {otSuggest && !otSuggest.suggestions.length && !otSuggest.notes.length && (
+                    <p className="muted" style={{ margin: 0 }}>Önerilen planda kapasite yetersizliğinden plansız kalan iş yok; fazla mesai gerekmiyor.</p>
+                  )}
+                  {otSuggest && otSuggest.suggestions.length > 0 && (
+                    <>
+                      <p style={{ margin: "4px 0 8px" }}>
+                        Kapasite açığı <b>{fmt(otSuggest.total_shortfall_hours, 1)} sa</b>; fazla mesai ile <b>{fmt(otSuggest.covered_hours, 1)} sa</b> kapatılabilir
+                        {otSuggest.uncovered_hours > 0 && <>, <b className="badge bad">{fmt(otSuggest.uncovered_hours, 1)} sa açık kalır</b></>}.
+                        Öneriyi taslağa eklemek canlıyı değiştirmez; yeniden hesap sonrası <b>onayla</b> derseniz haftalık iş gücüne yazılır.
+                      </p>
+                      <div className="table-wrap" style={{ maxHeight: 260 }}>
+                        <table>
+                          <thead>
+                            <tr><th>İş merkezi</th><th>Hafta</th><th className="num">Doluluk</th><th className="num">Kişi</th><th className="num">FM kişi</th><th className="num">FM gün</th><th className="num">Ek kapasite</th><th className="num">Açık (önce → sonra)</th><th>Etkilenen siparişler</th><th /></tr>
+                          </thead>
+                          <tbody>
+                            {otSuggest.suggestions.map((r) => (
+                              <tr key={`${r.work_center_id}-${r.week_start}`}>
+                                <td><b>{r.work_center_code}</b></td>
+                                <td>{r.week_start}</td>
+                                <td className="num">{Math.round(r.utilization * 100)}%</td>
+                                <td className="num">{r.headcount}</td>
+                                <td className="num"><b>{r.suggested_overtime_headcount}</b>{r.current_overtime_headcount ? <span className="muted"> (şu an {r.current_overtime_headcount})</span> : null}</td>
+                                <td className="num">{r.overtime_days}</td>
+                                <td className="num" title={r.explanation}>+{fmt(r.added_capacity_hours, 1)} sa</td>
+                                <td className="num">{fmt(r.shortfall_hours_before, 1)} → {fmt(r.shortfall_hours_after, 1)}</td>
+                                <td className="muted">{r.order_nos.slice(0, 4).join(", ")}{r.order_nos.length > 4 ? ` +${r.order_nos.length - 4}` : ""}</td>
+                                <td>{canEdit && editable && <button className="secondary small" onClick={() => applyOvertimeSuggestions([r])} disabled={busy}>Taslağa ekle</button>}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      {canEdit && editable && (
+                        <div className="row" style={{ marginTop: 6 }}>
+                          <button onClick={() => applyOvertimeSuggestions(otSuggest.suggestions)} disabled={busy}>Tüm önerileri taslağa ekle ve yeniden hesapla</button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                  {otSuggest && otSuggest.notes.length > 0 && (
+                    <ul className="muted" style={{ margin: "6px 0 0", paddingLeft: 18 }}>{otSuggest.notes.map((n, i) => <li key={i}>{n}</li>)}</ul>
+                  )}
+                </div>
+              )}
+
+              <h4 style={{ marginBottom: 4 }}>Sipariş bazında önce / sonra</h4>
+              <p className="muted" style={{ marginTop: 0 }}>
+                Talepler yeni termine yetişiyor mu, hangi siparişler bu uğurda ötelendi? Kartlara tıklayarak süzün; tablo canlı plan ile önerilen planın farkıdır.
+              </p>
+              <div className="rev-cards">
+                {(
+                  [
+                    ["requested", "Talep", diffSummary.requested, "info"],
+                    ["requested", "Karşılanan", diffSummary.met, "ok"],
+                    ["unmet", "Karşılanamayan", diffSummary.unmet, diffSummary.unmet ? "bad" : "muted"],
+                    ["pushed", "Ötelenen", diffSummary.pushed, diffSummary.pushed ? "warn" : "muted"],
+                    ["newly_late", "Yeni geç", diffSummary.newly_late, diffSummary.newly_late ? "bad" : "muted"],
+                    ["pulled", "Öne alınan", diffSummary.pulled_forward, "ok"],
+                    ["bumped", "Kaydırılan", diffSummary.bumped, diffSummary.bumped ? "warn" : "muted"],
+                    ["all", "Değişmeyen", diffSummary.unchanged, "muted"],
+                  ] as [DiffFilter, string, number, string][]
+                ).map(([f, label, value, cls], i) => (
+                  <button key={`${f}-${i}`} type="button" className={`rev-card ${cls} ${diffFilter === f ? "active" : ""}`} onClick={() => setDiffFilter(f)} title={DIFF_FILTERS.find((x) => x.id === f)?.hint}>
+                    <span className="v">{value}</span>
+                    <span className="l">{label}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="row" style={{ alignItems: "center", gap: 8, marginBottom: 6 }}>
+                <div className="seg">
+                  {DIFF_FILTERS.map((f) => (
+                    <button key={f.id} type="button" className={diffFilter === f.id ? "active" : ""} style={diffFilter === f.id ? { background: "#e3f2fd", fontWeight: 600 } : undefined} onClick={() => setDiffFilter(f.id)} title={f.hint}>
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+                <input placeholder="Sipariş / müşteri / stok ara" value={diffQuery} onChange={(e) => setDiffQuery(e.target.value)} style={{ minWidth: 220 }} />
+                <span className="muted">{visibleDiffs.length} / {diffRows.length} sipariş</span>
+                <button className="secondary small" onClick={downloadCsv} disabled={!visibleDiffs.length}>CSV indir</button>
+                {canEdit && editable && unmetIds.length > 0 && (
+                  <button className="danger small" onClick={removeUnmetAndRecalculate} disabled={busy} title="Yeni termine yetişmeyen talepleri taslaktan çıkarır ve yeniden hesaplar">
+                    {unmetIds.length} karşılanamayan talebi geri çek ve yeniden hesapla
+                  </button>
+                )}
+              </div>
+              {!diffRows.length ? (
+                <p className="muted">Sipariş bazlı karşılaştırma için revizyonu yeniden hesaplayın.</p>
+              ) : (
+                <div className="table-wrap rev-diff" style={{ maxHeight: 460 }}>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Sipariş</th>
+                        <th>Müşteri</th>
+                        <th>Stok</th>
+                        <th className="num">Miktar</th>
+                        <th>Termin</th>
+                        <th>Bitiş (canlı → öneri)</th>
+                        <th className="num">Kayma</th>
+                        <th>Durum</th>
+                        <th>Etiket</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {visibleDiffs.map((r) => {
+                        const [clsB, labB] = statusBadge(r.status_before);
+                        const [clsA, labA] = statusBadge(r.status_after);
+                        const dueChanged = r.due_before !== r.due_after;
+                        return (
+                          <tr key={r.order_id} className={r.requested ? (r.met === false ? "unmet" : "requested") : r.newly_late ? "newly-late" : ""}>
+                            <td>{r.order_no}{r.position_no ? `/${r.position_no}` : ""}</td>
+                            <td>{r.customer}</td>
+                            <td>{r.item_code}</td>
+                            <td className="num">{fmt(r.quantity, 0)}</td>
+                            <td>
+                              {dueChanged ? (<>{r.due_before || "—"}<span className="arrow">→</span><b>{r.due_after || "—"}</b></>) : (r.due_after || r.due_before || "—")}
+                            </td>
+                            <td>
+                              {r.end_before || "—"}<span className="arrow">→</span>{r.end_after ? <b>{r.end_after}</b> : <span className="badge bad">yok</span>}
+                            </td>
+                            <td className={`num ${r.delta_days ? (r.delta_days > 0 ? "delta-plus" : "delta-minus") : ""}`}>{deltaLabel(r.delta_days)}</td>
+                            <td>
+                              <span className={`badge ${clsB}`}>{labB}</span>
+                              <span className="arrow">→</span>
+                              <span className={`badge ${clsA}`}>{labA}</span>
+                              {r.status_after === "late" && r.lateness_after ? <span className="muted"> {r.lateness_after} gün</span> : null}
+                            </td>
+                            <td>
+                              <span className="rev-tags">
+                                {r.requested && r.met === true && <span className="badge ok">Talep karşılandı</span>}
+                                {r.requested && r.met === false && <span className="badge bad">Talep karşılanamadı</span>}
+                                {r.change_kind === "job_move" && <span className="badge info">İş taşıma</span>}
+                                {!r.requested && r.pushed && <span className="badge warn">Ötelendi</span>}
+                                {r.newly_late && <span className="badge bad">Yeni geç</span>}
+                                {r.pulled_forward && !r.requested && <span className="badge ok">Öne geldi</span>}
+                                {r.bumped && <span className="badge warn">Kaydırıldı</span>}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      {!visibleDiffs.length && <tr><td colSpan={9} className="muted">Bu filtrede sipariş yok</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </>
           )}

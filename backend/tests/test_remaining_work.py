@@ -31,6 +31,7 @@ def _wc_shift(db, code: str) -> int:
             efficient_hours_per_person=4,
         )
     )
+    _staff_db(db, wc.id, 10, 4)
     db.commit()
     return wc.id
 
@@ -61,7 +62,7 @@ def test_completed_production_schedules_remaining_only(client, auth, db):
     )
     db.commit()
 
-    client.post(
+    _plan_with_ack(client,
         "/api/plan/auto",
         headers=auth,
         json={"start_week": START.isoformat(), "weeks": 2, "work_center_ids": [wc_id], "replace_existing": True},
@@ -79,10 +80,10 @@ def test_append_mode_no_duplicate_plan(client, auth):
         json={"order_no": "RW-2", "due_date": "2026-09-20", "item_code": "UCUZ", "quantity": 10, "unit_price": 1},
     )
     body = {"start_week": START.isoformat(), "weeks": 4, "work_center_ids": [wc_id], "replace_existing": False}
-    r1 = client.post("/api/plan/auto", headers=auth, json=body).json()
+    r1 = _plan_with_ack(client, "/api/plan/auto", headers=auth, json=body).json()
     assert r1["created"] >= 1
     h1 = _plan_hours(client, auth, start=START.isoformat(), work_center_ids=[wc_id])
-    r2 = client.post("/api/plan/auto", headers=auth, json=body).json()
+    r2 = _plan_with_ack(client, "/api/plan/auto", headers=auth, json=body).json()
     assert r2["created"] == 0
     h2 = _plan_hours(client, auth, start=START.isoformat(), work_center_ids=[wc_id])
     assert round(h1, 1) == 10.0
@@ -104,7 +105,7 @@ def test_manual_plan_reduces_auto_load(client, auth, db):
         headers=auth,
         json={"order_id": order_id, "operation_id": op.id, "week_start": START.isoformat(), "planned_hours": 4, "planned_qty": 4},
     )
-    client.post(
+    _plan_with_ack(client,
         "/api/plan/auto",
         headers=auth,
         json={"start_week": START.isoformat(), "weeks": 4, "work_center_ids": [wc_id], "replace_existing": True},
@@ -139,7 +140,7 @@ def test_outside_horizon_plan_not_repeated(client, auth, db):
     )
     db.commit()
 
-    client.post(
+    _plan_with_ack(client,
         "/api/plan/auto",
         headers=auth,
         json={"start_week": START.isoformat(), "weeks": 1, "work_center_ids": [wc_id], "replace_existing": True},
@@ -171,7 +172,7 @@ def test_completed_op_zero_and_past_unplanned_rescheduled(client, auth, db):
         )
     )
     db.commit()
-    r_done = client.post(
+    r_done = _plan_with_ack(client,
         "/api/plan/auto",
         headers=auth,
         json={"start_week": START.isoformat(), "weeks": 2, "work_center_ids": [wc_id], "replace_existing": True},
@@ -194,7 +195,7 @@ def test_completed_op_zero_and_past_unplanned_rescheduled(client, auth, db):
     )
     db.commit()
 
-    client.post(
+    _plan_with_ack(client,
         "/api/plan/auto",
         headers=auth,
         json={"start_week": START.isoformat(), "weeks": 2, "work_center_ids": [wc_id], "replace_existing": True},
@@ -224,7 +225,7 @@ def test_batch_bom_coefficient_preserved(client, auth, db):
     ).json()
 
     wk = START.isoformat()
-    client.post(
+    _plan_with_ack(client,
         "/api/plan/auto",
         headers=auth,
         json={"start_week": wk, "weeks": 8, "work_center_ids": [wc_id], "replace_existing": True},
@@ -235,3 +236,7 @@ def test_batch_bom_coefficient_preserved(client, auth, db):
     fg_h = sum(l["planned_hours"] for l in batch_lines if not l.get("semi_finished_code"))
     assert round(wip_h, 1) == 20.0  # 10 FG * BOM 2
     assert round(fg_h, 1) == 10.0
+
+from tests.test_capacity_flow import _plan_with_ack
+
+from tests.test_capacity_flow import _staff_db

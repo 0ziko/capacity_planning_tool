@@ -3,7 +3,7 @@
 import io
 from datetime import date, timedelta
 
-from tests.test_capacity_flow import _upload, _xlsx
+from tests.test_capacity_flow import _upload, _xlsx, _weekly_staffing
 
 WEEK = date(2026, 9, 7)  # Pazartesi
 
@@ -14,6 +14,7 @@ def _setup(client, auth):
         client.delete("/api/orders", headers=auth, params={"status": st})
     _upload(client, auth, "workcenters", ["İş Merkezi Kodu", "İş Merkezi Adı", "Planlanıyor (E/H)", "Birim Saat", "Kişi Başı Verimli Saat"], [["TZG-A", "A Tezgahı", "E", 10, 4], ["MON-1", "Montaj", "E", 10, 4]])
     _upload(client, auth, "shifts", ["İş Merkezi Kodu", "Vardiya", "Günler (Pzt=0..Paz=6)", "Başlangıç", "Bitiş", "Kişi Sayısı", "Kişi Başı Verimli Saat"], [["TZG-A", "Gündüz", "0,1,2,3,4", "08:00", "18:00", 10, 4], ["MON-1", "Gündüz", "0,1,2,3,4", "08:00", "18:00", 5, 4]])
+    _weekly_staffing(client, auth, [['TZG-A', 10, 4, 5], ['MON-1', 5, 4, 5]])
     _upload(client, auth, "items", ["Stok Kodu", "Stok Adı", "Ürün Grubu"], [["MAM-1", "Ocak", "OCAK"]])
     # 36 sn kesim + 72 sn montaj => 1000 adet: 10 saat + 20 saat
     _upload(client, auth, "routing", ["Stok Kodu", "Sıra", "Operasyon", "İş Merkezi Kodu", "Çevrim Süresi (sn)"], [["MAM-1", 10, "Kesim", "TZG-A", 36], ["MAM-1", 20, "Montaj", "MON-1", 72]])
@@ -41,6 +42,8 @@ def test_single_order_crud(client, auth):
 def test_orders_filter_by_item_code(client, auth):
     _setup(client, auth)
     _upload(client, auth, "items", ["Stok Kodu", "Stok Adı", "Ürün Grubu"], [["MAM-2", "Fırın", "OCAK"]])
+    # Siparis giris kapisi: rotasi olmayan urune siparis acilamaz
+    _upload(client, auth, "routing", ["Stok Kodu", "Sıra", "Operasyon", "İş Merkezi Kodu", "Çevrim Süresi (sn)"], [["MAM-2", 10, "Kesim", "TZG-A", 50]])
     for no, code in [("IC-1", "MAM-1"), ("IC-2", "MAM-2"), ("IC-3", "MAM-1")]:
         assert client.post(
             "/api/orders",
@@ -68,7 +71,7 @@ def test_order_date_import_and_planned_end(client, auth):
     assert o["order_date"] == "2026-09-01"
     assert o["planned_end"] is None
 
-    client.post("/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 6})
+    _plan_with_ack(client, "/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 6})
     o2 = client.get("/api/orders", headers=auth, params={"position": "5"}).json()[0]
     assert o2["planned_end"] is not None
 
@@ -82,7 +85,7 @@ def test_schedule_progress_and_merge(client, auth):
     sched = client.get("/api/plan/orders", headers=auth).json()
     assert len(sched) == 3 and all(s["plan_status"] == "unplanned" for s in sched)
 
-    r = client.post("/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 6}).json()
+    r = _plan_with_ack(client, "/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 6}).json()
     assert r["unplanned"] == []
     sched = client.get("/api/plan/orders", headers=auth).json()
     s1 = next(s for s in sched if s["order_no"] == "SP-1")
@@ -269,3 +272,5 @@ def test_orders_import_preview_xlsx(client, auth):
     r2 = client.post("/api/imports/orders/preview", headers=auth, files={"file": ("rapor.xlsx", r.content, "application/octet-stream")}).json()
     assert r2["file_row_count"] == 2
     assert r2["parse_errors"] == [] or len(r2["error_rows"]) == 1
+
+from tests.test_capacity_flow import _plan_with_ack

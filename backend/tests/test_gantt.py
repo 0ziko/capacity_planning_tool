@@ -14,11 +14,12 @@ def test_load_includes_actual_hours(client, auth):
     wk = _monday()
     _upload(client, auth, "workcenters", ["İş Merkezi Kodu", "İş Merkezi Adı", "Planlanıyor (E/H)", "Kişi Başı Verimli Saat"], [["GNT-1", "Gantt IM", "E", 8]])
     _upload(client, auth, "employees", ["Sicil No", "Ad Soyad", "İş Merkezi Kodu"], [["G1", "A", "GNT-1"]])
+    _weekly_staffing(client, auth, [["GNT-1", 1, 8, 5]])
     _upload(client, auth, "items", ["Stok Kodu", "Ürün Grubu"], [["GNT-M", "GN"]])
     _upload(client, auth, "routing", ["Stok Kodu", "Sıra", "Operasyon", "İş Merkezi Kodu", "Çevrim Süresi (sn)", "Yarımamül Kodu"], [["GNT-M", 10, "OP1", "GNT-1", 36, "GNT-M-10"]])
     _upload(client, auth, "orders", ["Sipariş No", "Termin", "Stok Kodu", "Miktar"], [["G-S1", "2026-12-01", "GNT-M", 10]])
     wc = next(w for w in client.get("/api/workcenters", headers=auth).json() if w["code"] == "GNT-1")
-    client.post("/api/plan/auto", headers=auth, json={"start_week": wk, "weeks": 2, "work_center_ids": [wc["id"]], "replace_existing": True, "mode": "due_date"})
+    _plan_with_ack(client, "/api/plan/auto", headers=auth, json={"start_week": wk, "weeks": 2, "work_center_ids": [wc["id"]], "replace_existing": True, "mode": "due_date"})
     prod_day = wk
     _upload(client, auth, "production", ["Tarih", "Yarımamül Kodu", "Miktar", "Sipariş No"], [[prod_day, "GNT-M-10", 5, "G-S1"]])
     load = client.get("/api/plan/load", headers=auth, params={"start": wk, "weeks": 1, "work_center_ids": [wc["id"]]}).json()
@@ -37,11 +38,12 @@ def test_gantt_bars_with_production(client, auth):
     wk = _monday()
     _upload(client, auth, "workcenters", ["İş Merkezi Kodu", "İş Merkezi Adı", "Planlanıyor (E/H)", "Kişi Başı Verimli Saat"], [["GNT-2", "Gantt2", "E", 8]])
     _upload(client, auth, "employees", ["Sicil No", "Ad Soyad", "İş Merkezi Kodu"], [["G2", "B", "GNT-2"]])
+    _weekly_staffing(client, auth, [["GNT-2", 1, 8, 5]])
     _upload(client, auth, "items", ["Stok Kodu", "Ürün Grubu"], [["GNT-M2", "GN"]])
     _upload(client, auth, "routing", ["Stok Kodu", "Sıra", "Operasyon", "İş Merkezi Kodu", "Çevrim Süresi (sn)", "Yarımamül Kodu"], [["GNT-M2", 10, "OP1", "GNT-2", 36, "GNT-M2-10"]])
     _upload(client, auth, "orders", ["Sipariş No", "Termin", "Stok Kodu", "Miktar"], [["G-S2", "2026-12-01", "GNT-M2", 20]])
     wc = next(w for w in client.get("/api/workcenters", headers=auth).json() if w["code"] == "GNT-2")
-    client.post("/api/plan/auto", headers=auth, json={"start_week": wk, "weeks": 2, "work_center_ids": [wc["id"]], "replace_existing": True, "mode": "due_date"})
+    _plan_with_ack(client, "/api/plan/auto", headers=auth, json={"start_week": wk, "weeks": 2, "work_center_ids": [wc["id"]], "replace_existing": True, "mode": "due_date"})
     _upload(client, auth, "production", ["Tarih", "Yarımamül Kodu", "Miktar", "Sipariş No"], [[wk, "GNT-M2-10", 8, "G-S2"]])
     end = (date.fromisoformat(wk) + timedelta(days=13)).isoformat()
     g = client.get("/api/plan/gantt", headers=auth, params={"work_center_id": wc["id"], "start": wk, "end": end}).json()
@@ -52,6 +54,15 @@ def test_gantt_bars_with_production(client, auth):
     assert bar["produced_qty"] == 8
     assert bar["remaining_qty"] == 12
     assert bar["status"] == "in_progress"
+    params = {"work_center_id": wc["id"], "start": wk, "end": end, "selection_kind": "item", "selection_codes": "GNT-M2"}
+    filtered = client.get("/api/plan/gantt", headers=auth, params=params).json()
+    assert filtered["bars"] == g["bars"]  # Filtering must not move the original dates.
+    params["selection_codes"] = "GNT-M"
+    assert client.get("/api/plan/gantt", headers=auth, params=params).json()["bars"] == []
+    params["selection_kind"] = "wip"
+    params["selection_codes"] = "GNT-M2-10"
+    assert client.get("/api/plan/gantt", headers=auth, params=params).json()["bars"] == g["bars"]
+
 
 
 def test_progress_pct_quantity_when_fully_produced(client, auth):
@@ -59,6 +70,7 @@ def test_progress_pct_quantity_when_fully_produced(client, auth):
     wk = _monday()
     _upload(client, auth, "workcenters", ["İş Merkezi Kodu", "İş Merkezi Adı", "Planlanıyor (E/H)", "Kişi Başı Verimli Saat"], [["PCT-1", "Pct IM", "E", 8]])
     _upload(client, auth, "employees", ["Sicil No", "Ad Soyad", "İş Merkezi Kodu"], [["P1", "A", "PCT-1"]])
+    _weekly_staffing(client, auth, [["PCT-1", 1, 8, 5]])
     _upload(client, auth, "items", ["Stok Kodu", "Ürün Grubu"], [["PCT-M", "GN"]])
     _upload(
         client, auth, "routing",
@@ -77,3 +89,7 @@ def test_progress_pct_quantity_when_fully_produced(client, auth):
     assert row["pct"] == 100
     assert row["status"] == "completed"
     assert row["earned_hours"] < row["required_hours"]  # setup gunluk uretimde sayilmaz
+
+from tests.test_capacity_flow import _plan_with_ack
+
+from tests.test_capacity_flow import _weekly_staffing

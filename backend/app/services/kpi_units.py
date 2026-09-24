@@ -6,9 +6,10 @@ from collections import defaultdict
 from datetime import date, timedelta
 
 from sqlalchemy import func
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models import Downtime, Item, Order, PlanLine, ProductionActual
+from app.core.config import get_settings
 from app.services import capacity as cap
 from app.services.gantt import _production_map
 
@@ -28,15 +29,22 @@ def production_hours_by_plan_line(
     wc_id: int,
     week_start: date,
     as_of: date | None = None,
+    *, lines: list[PlanLine] | None = None,
 ) -> dict[int, float]:
     """Plan satiri id -> eslesen uretim saati (aynı siparis/operasyon; plansiz is plani tuketmez)."""
     wk = cap.week_start(week_start)
-    lines = (
-        db.query(PlanLine)
-        .options(joinedload(PlanLine.order).joinedload(Order.item).joinedload(Item.operations))
-        .filter(PlanLine.work_center_id == wc_id, PlanLine.week_start == wk)
-        .all()
-    )
+    if get_settings().production_source == "mes":
+        from app.services.mes_actuals import measure
+        measured = measure(db, as_of or date.today())
+        return {line.id: measured["matches"][line.id]["hours"] for line in measured["lines"]
+                if line.work_center_id == wc_id and line.week_start == wk}
+    if lines is None:
+        lines = (
+            db.query(PlanLine)
+            .options(joinedload(PlanLine.order).joinedload(Order.item).joinedload(Item.operations))
+            .filter(PlanLine.work_center_id == wc_id, PlanLine.week_start == wk)
+            .all()
+        )
     if not lines:
         return {}
     order_ids = {pl.order_id for pl in lines}
@@ -59,6 +67,11 @@ def week_plan_and_output_kpis(
     wk = cap.week_start(week_start)
     wk_end = wk + timedelta(days=6)
     as_of = as_of or date.today()
+    if get_settings().production_source == "mes":
+        from app.services.mes_actuals import weekly_kpis
+        return weekly_kpis(db, [wc_id], wk, wk, as_of).get((wc_id, wk), {
+            "planned_hours": 0., "standard_hour_equivalent_output": 0.,
+            "plan_matched_output_hours": 0., "plan_adherence_remaining_hours": 0.})
     planned = (
         db.query(func.sum(PlanLine.planned_hours))
         .filter(PlanLine.work_center_id == wc_id, PlanLine.week_start == wk)
@@ -100,8 +113,15 @@ def plan_and_output_kpis_for_range(
     the orders planned in each cell; pooling weeks would change FIFO allocation.
     """
     as_of = as_of or date.today()
+    if get_settings().production_source == "mes":
+        from app.services.mes_actuals import weekly_kpis
+        return weekly_kpis(db, wc_ids, start, end, as_of)
     grouped: dict[tuple[int, date], list[PlanLine]] = defaultdict(list)
-    lines = db.query(PlanLine).filter(
+    producing_wcs = {row[0] for row in db.query(ProductionActual.work_center_id).filter(ProductionActual.work_center_id.in_(wc_ids), ProductionActual.prod_date <= as_of).distinct().all()}
+    query = db.query(PlanLine)
+    if producing_wcs:
+        query = query.options(selectinload(PlanLine.order).selectinload(Order.item).selectinload(Item.operations))
+    lines = query.filter(
         PlanLine.work_center_id.in_(wc_ids), PlanLine.week_start >= start, PlanLine.week_start <= end,
     ).all()
     for line in lines:
@@ -116,7 +136,7 @@ def plan_and_output_kpis_for_range(
     result = {}
     for key in grouped.keys() | output.keys():
         cell_lines = grouped.get(key, [])
-        matched = production_hours_by_plan_line(db, key[0], key[1], as_of) if cell_lines else {}
+        matched = production_hours_by_plan_line(db, key[0], key[1], as_of, lines=cell_lines) if cell_lines and key[0] in producing_wcs else {}
         result[key] = {
             "planned_hours": round(sum(float(p.planned_hours or 0) for p in cell_lines), 4),
             "standard_hour_equivalent_output": round(output.get(key, 0.0), 4),

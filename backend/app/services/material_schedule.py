@@ -16,6 +16,14 @@ POLICY_CONDITIONAL = "conditional"
 POLICY_STRICT = "strict"
 
 
+def recorded_material_note(unverified: bool | None) -> str:
+    if unverified is None:
+        return "Eski plan: oluşturulurken kullanılan malzeme koşulu kaydedilmemiş."
+    if unverified:
+        return "Koşullu plan: oluşturulurken malzeme doğrulanmamış."
+    return "Plan oluşturulurken malzeme durumu/tarihi doğrulanmış."
+
+
 @dataclass(frozen=True)
 class MaterialGate:
     status: str
@@ -112,7 +120,7 @@ def material_gate_for_batch(batch: ProductionBatch, *, policy: str = POLICY_COND
             if g.earliest_week and (earliest is None or g.earliest_week > earliest):
                 earliest = g.earliest_week
                 notes.append(g.week_rounding_note)
-    note = notes[0] if notes else ""
+    note = notes[-1] if notes else ""
     if unverified:
         return MaterialGate(
             status=MATERIAL_UNKNOWN,

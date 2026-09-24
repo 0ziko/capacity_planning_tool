@@ -1,10 +1,14 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # Explicit cutover after MES data validation; never auto-switch on first upload.
+    production_source: Literal["legacy", "mes"] = "legacy"
 
     app_name: str = "Bilge Inox Kapasite Planlama"
     database_url: str = "postgresql+psycopg://kapasite:kapasite@localhost:5432/kapasite"
@@ -17,6 +21,9 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173"
     # ERP BOM SURE (dk/adet) -> cycle_time_sec donusum carpani (guvenilirlik duzeltmesi dahil)
     bom_cycle_factor: float = 1.6
+    # Fazla mesai yumusak sinirlari (kisi basi nominal saat). 0 = kapali. Yasal 270 sa/yil yalnizca bilgi olarak raporlanir.
+    overtime_monthly_cap_hours: float = 100  # kisi basi nominal sa/ay (yumusak sinir; 0 = kapali)
+    overtime_yearly_cap_hours: float = 600  # kisi basi nominal sa/yil (yumusak sinir; yasal 270 bilgi olarak raporlanir)
 
     @property
     def cors_origin_list(self) -> list[str]:

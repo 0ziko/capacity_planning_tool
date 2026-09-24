@@ -41,7 +41,7 @@ a { color: var(--primary-2); text-decoration: none; }
 .sidebar .user button { margin-top: 6px; }
 
 .content { padding: 20px 28px; max-width: 1400px; }
-.main-column { display: flex; flex-direction: column; min-height: 100vh; }
+.main-column { min-width: 0; display: flex; flex-direction: column; min-height: 100vh; }
 .page-body { flex: 1; min-width: 0; }
 
 .data-freshness-bar {
@@ -411,3 +411,31 @@ table.dash-load th:first-child { width: 120px; }
 .bom-tree-panel .badge { flex-shrink: 0; font-size: 10px; }
 .stock-auto-dialog { width: min(1400px, calc(100vw - 48px)); max-height: 90vh; overflow: auto; border: 0; border-radius: 12px; padding: 24px; color: inherit; background: white; box-shadow: 0 16px 60px #0f172a40; }
 .stock-auto-dialog::backdrop { background: rgba(15, 23, 42, 0.45); }
+
+/* --- Plan revizyonu: önce/sonra karşılaştırma --- */
+.rev-cards { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.rev-card { display: inline-flex; flex-direction: column; min-width: 120px; padding: 6px 12px; background: #fff; color: var(--text); border: 1px solid var(--border); border-left-width: 4px; border-radius: 6px; text-align: left; cursor: pointer; }
+.rev-card .v { font-size: 20px; font-weight: 700; line-height: 1.1; }
+.rev-card .l { font-size: 12px; color: var(--muted); }
+.rev-card.ok { border-left-color: var(--ok); }
+.rev-card.bad { border-left-color: var(--bad); }
+.rev-card.warn { border-left-color: var(--warn); }
+.rev-card.info { border-left-color: #0277bd; }
+.rev-card.muted { border-left-color: #94a3b8; }
+.rev-card.active { background: #e3f2fd; border-color: var(--primary); }
+.rev-diff td.num { text-align: right; white-space: nowrap; }
+.rev-diff tr.requested { background: #f4f9ff; }
+.rev-diff tr.unmet { background: #fff5f5; }
+.rev-diff tr.newly-late { background: #fff8e1; }
+.rev-diff .arrow { color: var(--muted); padding: 0 4px; }
+.rev-diff .delta-plus { color: var(--bad); font-weight: 600; }
+.rev-diff .delta-minus { color: var(--ok); font-weight: 600; }
+.rev-tags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.rev-due td input[type="date"] { padding: 3px 6px; }
+.rev-due tr.changed td { background: #f4f9ff; }
+
+/* Uzun hesap ilerleme mini penceresi (sağ alt, sayfayı kilitlemez) */
+.progress-pop { position: fixed; right: 20px; bottom: 20px; z-index: 900; display: flex; gap: 12px; align-items: flex-start; min-width: 300px; max-width: 420px; padding: 12px 16px; background: var(--panel, #fff); border: 1px solid var(--border); border-left: 4px solid #0277bd; border-radius: 8px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18); }
+.progress-pop .progress-phase { font-size: 15px; color: #0277bd; font-variant-numeric: tabular-nums; margin: 2px 0; }
+.progress-dot { flex: none; width: 12px; height: 12px; margin-top: 4px; border-radius: 50%; background: #0277bd; animation: progress-pulse 1.2s ease-in-out infinite; }
+@keyframes progress-pulse { 0%, 100% { transform: scale(0.8); opacity: 0.5; } 50% { transform: scale(1.2); opacity: 1; } }

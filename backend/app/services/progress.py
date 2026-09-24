@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.models import PlanLine, ProductionActual, WorkCenter
 from app.schemas import ProgressOut
+from app.core.config import get_settings
 from app.services import capacity as cap
 from app.services.kpi_units import week_plan_and_output_kpis
 
@@ -41,7 +42,7 @@ def week_progress(db: Session, wc: WorkCenter, wk: date, as_of: date | None = No
     )
     kpis = week_plan_and_output_kpis(db, wc.id, wk, as_of=as_of)
     std_out = kpis["standard_hour_equivalent_output"]
-    if std_out > 0:
+    if std_out > 0 or get_settings().production_source == "mes":
         actual = std_out
     remaining = kpis["plan_adherence_remaining_hours"]
     unverified = (
@@ -55,6 +56,8 @@ def week_progress(db: Session, wc: WorkCenter, wk: date, as_of: date | None = No
         .first()
         is not None
     )
+    if get_settings().production_source == "mes":
+        unverified = False
     capacity = cap.week_capacity_hours(db, wc, wk)
     daily_cap = capacity / n_days if n_days else 0.0
     remaining_days = remaining / daily_cap if daily_cap > 0 else 0.0
@@ -106,6 +109,9 @@ def daily_series(db: Session, wc: WorkCenter, wk: date) -> list[dict]:
         .all()
     )
     actual_by_day = {d: float(h or 0) for d, h in rows}
+    if get_settings().production_source == "mes":
+        from app.services.mes_actuals import measure
+        actual_by_day = {day: hours for (wid, day), hours in measure(db, wk + timedelta(days=6))["daily"].items() if wid == wc.id}
     out, cum_exp, cum_act = [], 0.0, 0.0
     for d in wdays:
         cum_exp += per_day

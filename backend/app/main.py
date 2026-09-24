@@ -29,6 +29,8 @@ def seed_admin() -> None:
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     ensure_columns(engine)
+    from app.services.durable_jobs import recover_interrupted
+    recover_interrupted()
     widen_revision_change_values(engine)
     repair_bom_constraints(engine)
     removed = repair_orphans(engine)

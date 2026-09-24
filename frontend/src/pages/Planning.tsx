@@ -1,5 +1,5 @@
-import { Fragment, useState } from "react";
-import { addDays, api, fmt, mondayOf, qs, shortDate, weekLabel, weekLong, type AutoPlanRequest, type CoShipmentOptions, type CoShipmentException, type CoShipmentResult, type ForecastSummary, type ItemDetail, type LoadDetail, type LeadTime, type MaterialPolicy, type Order, type OrderSchedule, type PlanLine, type PlanMode, type PlanningGranularity, type WcWeek, type WorkCenterLoad } from "../api";
+import { Fragment, useState, useEffect } from "react";
+import { AUTO_PLAN_JOB_KEY, trackedAutoPlan, addDays, api, fmt, mondayOf, qs, shortDate, weekLabel, weekLong, type DailyScheduleResult, type AutoPlanRequest, type Placement, type SlipMode, type OvertimeProposal, type PlacementNote, type PullForwardPlan, type PlanRevision, type CoShipmentOptions, type CoShipmentException, type CoShipmentResult, type ForecastSummary, type ItemDetail, type LoadDetail, type LeadTime, type MaterialPolicy, type Order, type OrderSchedule, type PlanLine, type PlanMode, type PlanningGranularity, type WcWeek, type WorkCenterLoad } from "../api";
 import { useAuth } from "../auth";
 import { Bar, ErrorText, PlanStackBar, UtilBadge, WeekInput, WcMultiSelect, useAsync, useWorkCenters } from "../components";
 import WcWeeksPanel from "./WcWeeksPanel";
@@ -8,14 +8,16 @@ import MergePanel from "./planning/MergePanel";
 import OrderProgressPanel from "./planning/OrderProgressPanel";
 import OrderSchedulePanel from "./planning/OrderSchedulePanel";
 import RevenuePanel from "./planning/RevenuePanel";
-import GanttPanel from "./planning/GanttPanel";
 import WcOrdersPanel from "./planning/WcOrdersPanel";
 import ProductionOutputPanel from "./planning/ProductionOutputPanel";
 import PlanPreflightModal from "./planning/PlanPreflightModal";
 import CoShipmentPanel, { defaultCoShipment } from "./planning/CoShipmentPanel";
 import RevisionsPanel from "./planning/RevisionsPanel";
+import IdleSuggestionModal from "./planning/IdleSuggestionModal";
+import PlanReportPanel from "./planning/PlanReportPanel";
 
 interface AutoResult {
+  daily_schedule?: DailyScheduleResult;
   created: number;
   message: string;
   mode: PlanMode;
@@ -25,13 +27,19 @@ interface AutoResult {
   co_shipment_exceptions?: CoShipmentException[];
   material_unverified?: boolean;
   material_unverified_order_ids?: number[];
+  placement?: Placement;
+  placement_notes?: PlacementNote[];
+  overtime_proposals?: OvertimeProposal[];
+  slip_mode?: SlipMode;
+  prep_hours?: number;
+  report_id?: number;
+  report_error?: string;
 }
 
-type Tab = "load" | "labor" | "gantt" | "orders" | "wc" | "revenue" | "compare" | "progress" | "merge" | "leadtime" | "output" | "revision";
+type Tab = "load" | "labor" | "orders" | "wc" | "revenue" | "compare" | "progress" | "merge" | "leadtime" | "output" | "revision";
 const TABS: { id: Tab; label: string; hint: string }[] = [
   { id: "load", label: "Haftalık yük & plan satırları", hint: "İş merkezi × hafta doluluk ve tüm plan satırları" },
   { id: "output", label: "Haftalık üretim planı", hint: "Seçilen hafta için iş merkezi bazlı üretim listesi (üretim ekibi çıktısı)" },
-  { id: "gantt", label: "Gantt", hint: "İş merkezi bazında sipariş / yarımamül zaman çizelgesi" },
   { id: "labor", label: "Haftalık iş gücü", hint: "İş merkezi × hafta kişi / verimli saat / gün — haftaya özel değişiklikler" },
   { id: "revision", label: "Plan revizyonu", hint: "Nedenli taslak, yeniden hesap, onayla ve devreye al" },
   { id: "orders", label: "Sipariş bitiş tarihleri", hint: "Plan sonucuna göre her siparişin tahmini üretim bitişi" },
@@ -52,19 +60,46 @@ export default function Planning() {
   const [wcIds, setWcIds] = useState<number[]>([]);
   const [mode, setMode] = useState<PlanMode>("due_date");
   const [planningGranularity, setPlanningGranularity] = useState<PlanningGranularity>("weekly");
+  const [placement] = useState<Placement>("flow");
+  const [jitBufferDays] = useState(2);
+  const [idleSel, setIdleSel] = useState<{ wcId: number; wcCode: string; week: string } | null>(null);
+  const [pullPlan, setPullPlan] = useState<PullForwardPlan | null>(null);
+  const [pullBusy, setPullBusy] = useState(false);
+  const [pullMsg, setPullMsg] = useState("");
+  const previewPullForward = async () => {
+    setPullBusy(true); setPullMsg("");
+    try { setPullPlan(await api.postLong<PullForwardPlan>("/api/plan/pull-forward/preview", planReq)); }
+    catch (e) { setPullMsg((e as Error).message); }
+    finally { setPullBusy(false); }
+  };
+  const createPullForwardDraft = async () => {
+    setPullBusy(true); setPullMsg("");
+    try {
+      const rev = await api.postLong<PlanRevision>("/api/plan/pull-forward/draft", planReq);
+      setPullPlan(null);
+      setPullMsg(`${rev.revision_no} taslağı oluşturuldu (${rev.changes.length} iş taşıma). Revizyon sekmesinde hesaplayıp onaylayın.`);
+      setTab("revision");
+    } catch (e) { setPullMsg((e as Error).message); }
+    finally { setPullBusy(false); }
+  };
   const [materialPolicy, setMaterialPolicy] = useState<MaterialPolicy>("conditional");
+  const [slipMode, setSlipMode] = useState<SlipMode>("chain");
+  const [useOvertime, setUseOvertime] = useState(true);
+  const [prepFill, setPrepFill] = useState(true);
   const [result, setResult] = useState<AutoResult | null>(null);
+  const [reportKey, setReportKey] = useState(0);
   const [err, setErr] = useState("");
+  const [jobPhase, setJobPhase] = useState("");
   const [busy, setBusy] = useState(false);
   const [weekFilter, setWeekFilter] = useState("");
   const [lineMode, setLineMode] = useState("");
   const [loadDetail, setLoadDetail] = useState<{ wcId: number; wcCode: string; week: string } | null>(null);
   const [preflightOpen, setPreflightOpen] = useState(false);
   const [coShipment, setCoShipment] = useState<CoShipmentOptions>(defaultCoShipment);
-  const openOrders = useAsync(() => api.get<Order[]>("/api/orders?status=open"), []);
+  const openOrders = useAsync(() => api.get<Order[]>("/api/orders?status=open"), [], coShipment.enabled || tab === "revision");
   const load = useAsync(() => api.get<WorkCenterLoad[]>(`/api/plan/load${qs({ start, weeks, work_center_ids: wcIds })}`), [start, weeks, wcIds.join(",")]);
   const lines = useAsync(() => api.get<PlanLine[]>(`/api/plan/lines${qs({ start, end: addDays(start, weeks * 7 - 1), work_center_ids: wcIds, mode: lineMode || undefined })}`), [start, weeks, wcIds.join(","), lineMode]);
-  const schedule = useAsync(() => api.get<OrderSchedule[]>(`/api/plan/orders${qs({ work_center_ids: wcIds })}`), [wcIds.join(",")]);
+  const schedule = useAsync(() => api.get<OrderSchedule[]>(`/api/plan/orders${qs({ work_center_ids: wcIds })}`), [wcIds.join(",")], tab === "orders" || tab === "wc");
   const refresh = () => { load.reload(); lines.reload(); schedule.reload(); };
   const mergeCount = useAsync(() => api.get<unknown[]>("/api/plan/merge-suggestions").then((g) => g.length), [schedule.data?.length]);
 
@@ -76,10 +111,22 @@ export default function Planning() {
     mode,
     planning_granularity: planningGranularity,
     material_policy: materialPolicy,
+    placement,
+    jit_buffer_days: jitBufferDays,
+    slip_mode: slipMode,
+    use_overtime: useOvertime,
+    prep_fill: prepFill,
     ...(coShipment.enabled && coShipment.selections.length
       ? { co_shipment: coShipment }
       : {}),
   };
+
+  useEffect(() => {
+    if (!sessionStorage.getItem(AUTO_PLAN_JOB_KEY)) return;
+    setBusy(true);
+    trackedAutoPlan<AutoResult>(undefined, setJobPhase).then(r => { setResult(r); refresh(); })
+      .catch(e => setErr((e as Error).message)).finally(() => setBusy(false));
+  }, []);
 
   const runAuto = async (skipConfirm = false) => {
     if (!skipConfirm) {
@@ -88,16 +135,16 @@ export default function Planning() {
     }
     setBusy(true); setErr("");
     try {
-      setResult(await api.post<AutoResult>("/api/plan/auto", planReq));
+      setResult(await trackedAutoPlan<AutoResult>(planReq, setJobPhase));
       refresh();
     } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
   };
 
-  const confirmAutoPlan = async () => {
+  const confirmAutoPlan = async (missingHeadcountAck: string | null) => {
     setPreflightOpen(false);
     setBusy(true); setErr("");
     try {
-      setResult(await api.post<AutoResult>("/api/plan/auto", planReq));
+      setResult(await trackedAutoPlan<AutoResult>({ ...planReq, missing_headcount_ack: missingHeadcountAck }, setJobPhase));
       refresh();
     } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
   };
@@ -139,6 +186,21 @@ export default function Planning() {
                     <option value="strict">Strict (unknown engelle)</option>
                   </select>
                 </label>
+                <span className="muted" title="Dengeli yerleşim: her siparişte tüm parça ve operasyonlar aynı adette ilerler (yetim parça üretilmez); ardışık operasyonlar bekletilmez; hedef bitiş = etkin termin − 2 gün.">Yerleştirme: dengeli akış · hedef termin − 2 gün</span>
+                <label title="Hedef tarihe (termin − 2 gün) sığmayan adet ne olsun? Zincir etkisi: sonraki haftalara dengeli yerleşir ve sonraki siparişlerden kapasite alır (etki görünür). Komple kaydır: plana yazılmaz; tahmini bitiş ve darboğaz raporlanır, kapasite sonraki siparişlere kalır.">Kayan adet
+                  <select value={slipMode} onChange={(e) => setSlipMode(e.target.value as SlipMode)}>
+                    <option value="chain">Zincir etkisi (sonraya yerleştir)</option>
+                    <option value="defer">Komple kaydır (plana yazma)</option>
+                  </select>
+                </label>
+                <label title="Hedef tarihi kurtarmak için gereken saat, sınırlar içinde (hafta içi 18:00-21:00 kişi başı 2,5 sa; Cmt/Paz 08:00-18:00 8,5 sa; haftanın kişi sayısı) fazla mesai olarak önerilir ve haftalık iş gücüne 'onay bekliyor' yazılır. Hazırlık işi için fazla mesai kullanılmaz.">
+                  <input type="checkbox" checked={useOvertime} onChange={(e) => setUseOvertime(e.target.checked)} />
+                  Termin için fazla mesai öner
+                </label>
+                <label title="Termin işleri yerleştikten sonra kalan normal kapasiteye, ufukta bitmiş ürüne dönüşemeyen siparişlerin yarımamülleri (son operasyon hariç) 'hazırlık' etiketiyle yazılır. Fazla mesai kullanılmaz, terminleri etkilemez.">
+                  <input type="checkbox" checked={prepFill} onChange={(e) => setPrepFill(e.target.checked)} />
+                  Atıl kapasiteye hazırlık yarımamülü
+                </label>
                 <label title="Pilot: yalnızca tam kaynak tanımlı operasyonlar için makine aralığı segmentleri üretilir.">
                   <input type="checkbox" checked={planningGranularity === "daily_detailed"} onChange={(e) => setPlanningGranularity(e.target.checked ? "daily_detailed" : "weekly")} />
                   Günlük ayrıntılı çizelge (pilot)
@@ -159,6 +221,16 @@ export default function Planning() {
           {can("poweruser") && mode === "revenue" && coShipment.enabled && (
             <p className="muted">Birlikte sevk modu yalnızca “Termine göre” planlamada kullanılabilir.</p>
           )}
+          {busy && (
+            <div className="progress-pop" role="status" aria-live="polite">
+              <span className="progress-dot" />
+              <div>
+                <div style={{ fontWeight: 600 }}>Otomatik plan hesaplanıyor</div>
+                <div className="progress-phase">{jobPhase || "Başlatılıyor…"}</div>
+                <div className="muted">Bittiğinde sonuç ve rapor bu sayfada otomatik açılır. Sayfadan ayrılabilirsiniz.</div>
+              </div>
+            </div>
+          )}
           <ErrorText err={err || load.err || lines.err} />
           {result && (
             <div className="panel">
@@ -166,6 +238,7 @@ export default function Planning() {
                 <button className="secondary small" style={{ marginLeft: 8 }} onClick={() => setTab("orders")}>Sipariş bitiş tarihleri →</button>{" "}
                 <button className="secondary small" onClick={() => setTab("revenue")}>Ciro →</button>
               </div>
+              {result.daily_schedule && <DailyResult result={result.daily_schedule} />}
               {result.material_unverified && (
                 <p className="muted" style={{ marginTop: 8 }}>Malzeme doğrulanmadı: plan koşulludur ({result.material_unverified_order_ids?.length ?? 0} sipariş).</p>
               )}
@@ -175,10 +248,69 @@ export default function Planning() {
                   <ul className="errors">{result.skipped.map((u, i) => <li key={i}>{u.batch_no ? `Parti ${u.batch_no}` : u.order_no} / {u.item_code}: {fmt(u.hours)} saat · ciro {fmt(u.revenue, 0)}</li>)}</ul>
                 </>
               )}
+              {(result.prep_hours ?? 0) > 0 && (
+                <p className="muted" style={{ margin: "6px 0" }}>Hazırlık: {fmt(result.prep_hours)} sa yarımamül atıl kapasitede üretildi ({result.placement_notes?.filter((n) => n.kind === "prep").length ?? 0} sipariş); plan satırlarında “hazırlık” rozeti.</p>
+              )}
+              {(result.overtime_proposals?.length ?? 0) > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  <b>Fazla mesai ihtiyacı (onay bekliyor · haftalık iş gücünde onaylayın):</b>
+                  <div className="table-wrap" style={{ maxHeight: 260, marginTop: 4 }}>
+                    <table>
+                      <thead><tr><th>İş merkezi</th><th>Hafta</th><th className="num">Saat</th><th className="num">Hafta içi kişi × gün</th><th className="num">Hafta sonu kişi × gün</th><th className="num">Kişi başı saat</th><th>Hesap</th></tr></thead>
+                      <tbody>
+                        {result.overtime_proposals!.map((p, i) => (
+                          <tr key={i}>
+                            <td><b>{p.work_center_code}</b></td>
+                            <td>{weekLabel(p.week_start)} <span className="muted">{shortDate(p.week_start)}</span></td>
+                            <td className="num">{fmt(p.hours)}</td>
+                            <td className="num">{p.weekday_persons ? `${p.weekday_persons} × ${p.weekday_days}` : "—"}</td>
+                            <td className="num">{p.weekend_persons ? `${p.weekend_persons} × ${p.weekend_days}` : "—"}</td>
+                            <td className="num">{fmt(p.person_hours)}</td>
+                            <td className="muted">{p.explanation}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+              {(result.placement_notes?.some((n) => n.kind === "slip") ?? false) && (
+                <div style={{ marginTop: 10 }}>
+                  <b>Hedef tarihe sığmayan siparişler ({result.placement_notes!.filter((n) => n.kind === "slip").length}):</b>
+                  <div className="table-wrap" style={{ maxHeight: 300, marginTop: 4 }}>
+                    <table>
+                      <thead><tr><th>Sipariş</th><th className="num">Kalan adet</th><th className="num">Hedefte</th><th className="num">Fazla mesaiyle</th><th className="num">Kayan</th><th>Darboğaz</th><th>Tahmini bitiş</th><th>Durum</th></tr></thead>
+                      <tbody>
+                        {result.placement_notes!.filter((n) => n.kind === "slip").map((n, i) => (
+                          <tr key={i}>
+                            <td><b>{n.label}</b></td>
+                            <td className="num">{fmt(n.remaining_qty, 0)}</td>
+                            <td className="num">{fmt(n.target_qty, 0)}</td>
+                            <td className="num">{n.overtime_qty ? fmt(n.overtime_qty, 0) : "—"}</td>
+                            <td className="num" style={{ color: n.qty ? "var(--bad)" : undefined }}>{fmt(n.qty, 0)}</td>
+                            <td>{n.bottleneck || "—"}</td>
+                            <td>{n.est_finish_week ? shortDate(n.est_finish_week) : "—"}</td>
+                            <td>{n.overdue ? <span className="badge bad">Termini geçmiş</span> : n.slip_mode === "defer" ? <span className="badge warn">Plana yazılmadı</span> : <span className="badge info">Sonraya yerleşti</span>}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+              {(result.placement_notes?.filter((n) => n.kind !== "slip" && n.kind !== "prep").length ?? 0) > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <b>{result.placement === "jit" ? "Termine yakın yerleştirme" : "Ara stok sınırı"} notları:</b>
+                  <ul className={result.placement_notes!.some((n) => n.kind === "wip_cap_violation") ? "errors" : "muted"} style={{ margin: "4px 0", paddingLeft: 18, fontSize: 12 }}>
+                    {result.placement_notes!.filter((n) => n.kind !== "slip" && n.kind !== "prep").slice(0, 40).map((n, i) => <li key={i} style={{ color: n.kind === "wip_cap_violation" ? "var(--bad)" : undefined }}>{n.label}: {n.detail}</li>)}
+                    {result.placement_notes!.filter((n) => n.kind !== "slip" && n.kind !== "prep").length > 40 && <li>… ve {result.placement_notes!.filter((n) => n.kind !== "slip" && n.kind !== "prep").length - 40} not daha</li>}
+                  </ul>
+                </div>
+              )}
               {result.unplanned.length > 0 && (
                 <>
-                  <div className="error">Ufuk içine sığmayan {result.unplanned.length} operasyon (hafta sayısını artırın veya kapasite ekleyin):</div>
-                  <ul className="errors">{result.unplanned.map((u, i) => <li key={i}>{u.order_no} / {u.item_code} op.{u.operation_seq} @ {u.work_center_code}: {fmt(u.hours)} saat{u.reason ? ` · ${u.reason}` : ""}{u.planning_granularity === "weekly_approx" ? " (haftalık yaklaşık)" : ""}</li>)}</ul>
+                  <div className="error">Yerleştirilemeyen {result.unplanned.length} operasyon (nedenlerini aşağıda inceleyin):</div>
+                  <ul className="errors">{result.unplanned.map((u, i) => <li key={i}>{u.order_no} / {u.item_code} op.{u.operation_seq} @ {u.work_center_code}: {u.reason === "operasyon_suresi_eksik" ? "Süre hesaplanamadı" : u.hours > 0 && u.hours < 0.01 ? `${fmt(u.hours * 3600, 2)} saniye` : `${fmt(u.hours)} saat`}{u.reason ? ` · ${{kapasite_yetersiz: "İzin verilen haftalarda yeterli kapasite bulunamadı", termin_kaydi: "Hedef tarihe sığmadı; komple kaydır ayarıyla plana yazılmadı", oncul_eksik: "Önceki operasyon, Senaryo Matrisi kuralının gerektirdiği miktara ulaşamadı", yarimamul_eksik: "Mamulü besleyen yarımamul miktarı yetersiz", operasyon_suresi_eksik: "Operasyon süresi sıfır veya negatif; rota süresini düzeltin", bekleme_ufuk_disinda: "Operasyonlar arası bekleme süresi plan ufkunu aşıyor", rota_dongusu: "Rotada döngü var", malzeme_unknown_strict: "Malzeme durumu bilinmiyor; katı modda planlanamaz", material_date_missing: "Beklenen malzemenin hazır olacağı tarih girilmemiş"}[u.reason] ?? u.reason}` : ""}{u.planning_granularity === "weekly_approx" ? " (haftalık yaklaşık)" : ""}</li>)}</ul>
                 </>
               )}
               {(result.co_shipment_results?.length ?? 0) > 0 && (
@@ -215,6 +347,7 @@ export default function Planning() {
               )}
             </div>
           )}
+          <PlanReportPanel focusId={result?.report_id ?? null} refreshKey={reportKey} canEdit={can("poweruser")} onOvertimeDecided={refresh} />
         </>
       )}
 
@@ -235,29 +368,56 @@ export default function Planning() {
           weeks={weeks}
           wcIds={wcIds}
           mode={mode}
+          materialPolicy={materialPolicy}
           orders={openOrders.data ?? []}
           wcs={wcIds.length ? wcs.filter((w) => wcIds.includes(w.id)) : wcs.filter((w) => w.is_planned)}
           canEdit={can("poweruser")}
-          onApplied={refresh}
+          onApplied={() => { refresh(); setReportKey((k) => k + 1); }}
         />
       )}
-      {tab === "gantt" && (
-        <GanttPanel
-          wcs={wcIds.length ? wcs.filter((w) => wcIds.includes(w.id)) : wcs.filter((w) => w.is_planned)}
-          defaultStart={start}
-          defaultEnd={addDays(start, weeks * 7 - 1)}
-        />
-      )}
-      {tab === "orders" && <OrderSchedulePanel rows={schedule.data} err={schedule.err} onReload={schedule.reload} />}
+      {tab === "orders" && <OrderSchedulePanel wcIds={wcIds} rows={schedule.data} err={schedule.err} onReload={schedule.reload} />}
       {tab === "wc" && <WcOrdersPanel lines={lines.data} schedule={schedule.data} wcs={wcIds.length ? wcs.filter((w) => wcIds.includes(w.id)) : wcs.filter((w) => w.is_planned)} horizon={`${start} → ${addDays(start, weeks * 7 - 1)}`} />}
       {tab === "revenue" && <RevenuePanel start={start} weeks={weeks} wcIds={wcIds} />}
-      {tab === "compare" && <ComparePanel start={start} weeks={weeks} wcIds={wcIds} onApplied={refresh} />}
+      {tab === "compare" && <ComparePanel materialPolicy={materialPolicy} start={start} weeks={weeks} wcIds={wcIds} onApplied={refresh} />}
       {tab === "progress" && <OrderProgressPanel wcIds={wcIds} />}
-      {tab === "merge" && <MergePanel planCtx={{ start_week: start, weeks, work_center_ids: wcIds, mode }} onChanged={() => { refresh(); mergeCount.reload(); }} onAutoPlan={() => runAuto(true)} />}
+      {tab === "merge" && <MergePanel planCtx={{ start_week: start, weeks, work_center_ids: wcIds, mode }} onChanged={() => { refresh(); mergeCount.reload(); }} onAutoPlan={() => runAuto()} />}
       {tab === "leadtime" && <LeadTimePanel onForecastAdded={refresh} onShowForecastLines={() => { setTab("load"); setLineMode("forecast"); }} />}
       {tab === "output" && <ProductionOutputPanel />}
       {tab === "load" && (<>
       <h2>Haftalık yük (saat: plan / gerçekleşen / kalan / kalan iş gün)</h2>
+      {can("poweruser") && (
+        <div className="panel" style={{ padding: "8px 12px", marginBottom: 10 }}>
+          <div className="row" style={{ alignItems: "center" }}>
+            <b>Atıl kapasite (tüm ufuk)</b>
+            <span className="muted">Hücre hücre seçmek yerine: ufuktaki tüm atıl haftalar taranır, öncülü/malzemesi hazır işler sipariş başına bir kez en erken sığdığı haftaya çekilir; tek revizyon taslağı oluşur (hesapla → önce/sonra → onayla). Kalıcı çözüm için yerleştirmeyi <b>Akış</b> moduna alın.</span>
+            <button className="secondary" onClick={() => void previewPullForward()} disabled={pullBusy}>Öne çekilebilir işleri hesapla</button>
+            {pullPlan && (
+              <>
+                <span>
+                  <b>{pullPlan.idle_cells}</b> atıl hücre · <b>{fmt(pullPlan.idle_hours_total, 0)}</b> sa atıl · <b>{pullPlan.moves.length}</b> iş / <b>{fmt(pullPlan.moved_hours, 0)}</b> sa öne çekilebilir
+                </span>
+                <button onClick={() => void createPullForwardDraft()} disabled={pullBusy || !pullPlan.moves.length}>{pullPlan.moves.length ? `${pullPlan.moves.length} işi öne çeken revizyon taslağı oluştur` : "Öne çekilebilir iş yok"}</button>
+              </>
+            )}
+            {pullMsg && <span className="muted">{pullMsg}</span>}
+          </div>
+          {pullPlan && pullPlan.moves.length > 0 && (
+            <div className="table-wrap" style={{ maxHeight: 220, marginTop: 6 }}>
+              <table>
+                <thead><tr><th>Sipariş</th><th>Müşteri</th><th>Stok</th><th>İş merkezi</th><th>Planlı hafta → hedef</th><th>Termin</th><th className="num">Saat</th></tr></thead>
+                <tbody>
+                  {pullPlan.moves.map((m) => (
+                    <tr key={`${m.order_id}-${m.operation_seq}`}>
+                      <td>{m.order_no}{m.position_no ? `/${m.position_no}` : ""}</td><td>{m.customer}</td><td>{m.item_code}</td><td>{m.work_center_code}</td>
+                      <td>{weekLabel(m.from_week)} → <b>{weekLabel(m.to_week)}</b></td><td>{m.due_date}</td><td className="num">{fmt(m.hours, 1)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
       <p className="muted" style={{ marginTop: -8 }}>Turuncu = kesin plan (oto/manuel); mor = tahmin payı. Yeşil = üretim beyanı (gerçekleşen). Plan doluluk %, iş merkezinde tanımlı <b>atıl kapasite</b> düşüldükten sonraki planlanabilir kapasiteye göre hesaplanır. %100 üzeri kapasite aşımı gösterir.</p>
       <div className="table-wrap">
         <table>
@@ -268,8 +428,9 @@ export default function Planning() {
           ))}</tr></thead>
           <tbody>
             {load.data?.map((wc) => (
-              <tr key={wc.work_center_id}>
-                <td><b>{wc.work_center_code}</b></td>
+              <Fragment key={wc.work_center_id}>
+              <tr>
+                <td><b>{wc.work_center_code}</b>{(wc.machines?.length ?? 0) > 0 && <div className="muted" style={{ fontSize: 11 }}>{wc.machines!.length} istasyon</div>}</td>
                 {wc.weeks.map((w) => {
                   const cap = w.planning_capacity_hours || 1;
                   const firmPct = Math.round((w.firm_planned_hours / cap) * 100);
@@ -283,7 +444,7 @@ export default function Planning() {
                   >
                     <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 155 }}>
                       <span style={{ fontSize: 12 }} title="Plan / standart saat karşılığı çıktı / plan uyumu kalan">{fmt(w.planned_hours, 0)} / <b style={{ color: "var(--ok)" }}>{fmt(w.standard_hour_equivalent_output ?? w.actual_hours, 0)}</b> / {fmt(w.plan_adherence_remaining_hours ?? w.remaining_hours, 0)} / <span title="Plan uyumu kalan iş gün">{fmt(w.remaining_days, 2)}</span></span>
-                      <span style={{ fontSize: 11 }} className="muted">Atıl: {w.idle_hours > 0.5 ? <b>{fmt(w.idle_hours, 0)} sa</b> : "yok"}</span>
+                      <span style={{ fontSize: 11 }} className="muted">Atıl: {w.idle_hours > 0.5 ? <button type="button" className="secondary small" style={{ padding: "0 6px", fontWeight: 700 }} title="Bu haftaya öne çekilebilecek işleri göster (iş taşıma taslağı)" onClick={(e) => { e.stopPropagation(); setIdleSel({ wcId: wc.work_center_id, wcCode: wc.work_center_code, week: w.week_start }); }}>{fmt(w.idle_hours, 0)} sa ▸</button> : "yok"}{(w.overtime_hours ?? 0) > 0 && <span title="Kapasitenin fazla mesaiden (18:00-21:00) gelen kısmı"> · FM +{fmt(w.overtime_hours, 0)} sa</span>}</span>
                       <PlanStackBar utilization={w.utilization} forecastHours={w.forecast_hours} planningCapacity={w.planning_capacity_hours} />
                       <Bar ratio={w.actual_utilization} cls="actual" />
                       <div style={{ display: "flex", gap: 6, fontSize: 11 }}>
@@ -298,6 +459,21 @@ export default function Planning() {
                   );
                 })}
               </tr>
+              {wc.machines?.map((m) => (
+                <tr key={`m-${m.machine_id}`} className="machine-row">
+                  <td style={{ paddingLeft: 18 }}><span className="muted">└</span> {m.machine_code}{m.machine_name && m.machine_name !== m.machine_code ? <span className="muted" style={{ fontSize: 11 }}> {m.machine_name.replace(/^.*- /, "")}</span> : null}</td>
+                  {m.weeks.map((w) => (
+                    <td key={w.week_start} title={`${m.machine_code}: plan ${fmt(w.planned_hours)} sa / kapasite ${fmt(w.capacity_hours)} sa`}>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                        <span style={{ fontSize: 11 }} className="muted">{fmt(w.planned_hours, 1)} / {fmt(w.capacity_hours, 0)} sa</span>
+                        <Bar ratio={w.utilization} />
+                        <span style={{ fontSize: 11 }}><UtilBadge u={w.utilization} /> <span className="muted">istasyon</span></span>
+                      </div>
+                    </td>
+                  ))}
+                </tr>
+              ))}
+              </Fragment>
             ))}
           </tbody>
         </table>
@@ -329,7 +505,7 @@ export default function Planning() {
                     </select>
                   ) : <span title={l.week_start}>{weekLong(l.week_start)}</span>}
                 </td>
-                <td><b>{l.work_center_code}</b></td>
+                <td><b>{l.work_center_code}</b>{l.machine_code && <div className="muted">{l.machine_code}</div>}</td>
                 <td>
                   {l.batch_no ? (
                     <>
@@ -341,9 +517,9 @@ export default function Planning() {
                 <td>{l.batch_no ? <span className="muted">—</span> : (l.position_no || <span className="muted">—</span>)}</td>
                 <td>{l.batch_no ? <span className="muted">parti</span> : l.customer}</td>
                 <td style={{ color: l.due_date < l.week_start ? "var(--bad)" : undefined }} title={l.due_date < l.week_start ? "Termin, plan haftasından önce!" : ""}>{l.due_date}</td>
-                <td>{l.item_code}</td><td>{l.operation_seq}</td>
+                <td>{l.item_code}<div className="muted" title={l.material_note}>{l.material_unverified !== false ? l.material_note : ""}</div></td><td>{l.operation_seq}</td>
                 <td className="num">{fmt(l.planned_hours, 2)}</td><td className="num">{fmt(l.planned_qty, 0)}</td>
-                <td><span className={`badge ${l.mode === "manual" ? "warn" : l.mode === "forecast" ? "ok" : "muted"}`} title={l.strategy === "revenue" ? "Otomatik · ciro öncelikli" : l.strategy === "due_date" ? "Otomatik · termine göre" : l.mode === "forecast" ? "Terminleme tahmini" : ""}>{l.mode === "manual" ? "manuel" : l.mode === "forecast" ? "tahmin" : l.strategy === "revenue" ? "oto 💰" : "oto"}</span></td>
+                <td><span className={`badge ${l.mode === "manual" ? "warn" : l.mode === "forecast" ? "ok" : "muted"}`} title={l.strategy === "revenue" ? "Otomatik · ciro öncelikli" : l.strategy === "due_date" ? "Otomatik · termine göre" : l.mode === "forecast" ? "Terminleme tahmini" : ""}>{l.mode === "manual" ? "manuel" : l.mode === "forecast" ? "tahmin" : l.strategy === "revenue" ? "oto 💰" : "oto"}</span>{l.tag === "overtime" ? <span className="badge warn" style={{ marginLeft: 4 }} title="Fazla mesai kapasitesiyle yerleşti (onay bekliyor)">FM</span> : l.tag === "slip" ? <span className="badge bad" style={{ marginLeft: 4 }} title="Hedef tarihten (termin − 2 gün) sonra">kayma</span> : l.tag === "prep" ? <span className="badge muted" style={{ marginLeft: 4 }} title="Hazırlık: atıl kapasitede ileriki sipariş yarımamülü">hazırlık</span> : null}</td>
                 <td>{can("poweruser") && (<><button className="secondary small" onClick={() => setHours(l)}>Saat</button> <button className="danger small" onClick={async () => { await api.del(`/api/plan/lines/${l.id}`); refresh(); }}>Sil</button></>)}</td>
               </tr>
             ))}
@@ -352,6 +528,17 @@ export default function Planning() {
         </table>
       </div>
       {loadDetail && <LoadDetailModal wcId={loadDetail.wcId} wcCode={loadDetail.wcCode} week={loadDetail.week} onClose={() => setLoadDetail(null)} />}
+      {idleSel && (
+        <IdleSuggestionModal
+          wcId={idleSel.wcId}
+          wcCode={idleSel.wcCode}
+          week={idleSel.week}
+          horizon={{ start, weeks, wcIds: wcIds.length ? wcIds : null, mode, materialPolicy, placement, jitBufferDays }}
+          canEdit={can("poweruser")}
+          onClose={() => setIdleSel(null)}
+          onDraftCreated={() => { setIdleSel(null); setTab("revision"); }}
+        />
+      )}
       </>)}
       {preflightOpen && <PlanPreflightModal req={planReq} onClose={() => setPreflightOpen(false)} onConfirm={confirmAutoPlan} />}
     </>
@@ -395,9 +582,9 @@ function LaborPanel({ start, weeks, wcs, canEdit, onChanged }: { start: string; 
                     {cells.map((c) => (
                       <td key={c.week_start} style={{ background: c.has_override ? "#fff7ed" : undefined }} title={c.has_override ? `İstisna: ${c.note || "-"}` : "Varsayılan"}>
                         <div style={{ whiteSpace: "nowrap" }}>
-                          <b>{c.headcount}</b> kişi · {fmt(c.efficient_hours_per_person, 2)} sa · {c.working_days} gün
+                          {c.planning_mode === "line" ? <>{fmt(c.capacity_hours,2)} hat-sa · {fmt(c.required_labor_hours,2)} kişi-sa</> : <><b>{c.headcount}</b> kişi · {fmt(c.efficient_hours_per_person, 2)} sa · {c.working_days} gün</>}
                         </div>
-                        <div className="muted">= {fmt(c.capacity_hours, 0)} saat</div>
+                          <div className="muted">= {fmt(c.capacity_hours, 0)} {c.planning_mode === "line" ? "hat-saat" : "kişi-saat"}{(c.overtime_capacity_hours ?? 0) > 0 && <span title={`Fazla mesai: ${c.overtime_headcount} kişi × ${fmt(c.overtime_hours_per_person, 1)} sa × ${c.overtime_days} gün (verim ${fmt(c.overtime_efficiency_ratio, 2)})`}> · FM {c.overtime_headcount} kişi +{fmt(c.overtime_capacity_hours, 0)}</span>}</div>
                       </td>
                     ))}
                     {cells.length === 0 && <td colSpan={Math.max(weekList.length, 1)} className="muted">…</td>}
@@ -551,6 +738,9 @@ function LoadDetailModal({ wcId, wcCode, week, onClose }: { wcId: number; wcCode
 }
 
 function LeadTimePanel({ onForecastAdded, onShowForecastLines }: { onForecastAdded: () => void; onShowForecastLines: () => void }) {
+  const [materialStatus, setMaterialStatus] = useState("unknown");
+  const [materialDate, setMaterialDate] = useState("");
+  const [materialPolicy, setMaterialPolicy] = useState("conditional");
   const { can } = useAuth();
   const [code, setCode] = useState("");
   const [qty, setQty] = useState(100);
@@ -561,10 +751,12 @@ function LeadTimePanel({ onForecastAdded, onShowForecastLines }: { onForecastAdd
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const forecasts = useAsync(() => api.get<ForecastSummary[]>("/api/plan/forecast"), []);
+  useEffect(() => { setRes(null); setErr(""); }, [code, qty, start, materialStatus, materialDate, materialPolicy]);
   const reload = () => { forecasts.reload(); onForecastAdded(); };
   const run = async () => {
     setErr(""); setMsg("");
-    try { setRes(await api.post<LeadTime>("/api/plan/leadtime", { item_code: code, quantity: qty, start })); } catch (e) { setErr((e as Error).message); }
+    setRes(null); setBusy(true);
+    try { setRes(await api.post<LeadTime>("/api/plan/leadtime", { item_code: code, quantity: qty, start, material_status: materialStatus, material_ready_date: materialDate || null, material_policy: materialPolicy })); } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
   };
   const addForecast = async () => {
     if (!res || res.status !== "complete") return;
@@ -573,6 +765,7 @@ function LeadTimePanel({ onForecastAdded, onShowForecastLines }: { onForecastAdd
     try {
       const out = await api.post<{ created: number; message: string }>("/api/plan/leadtime/forecast", {
         item_code: res.item_code, quantity: res.quantity, label: label.trim(), steps: res.steps, status: res.status,
+        material_status: res.material_status, material_ready_date: res.material_ready_date, material_policy: res.material_policy,
       });
       setMsg(out.message);
       reload();
@@ -598,10 +791,13 @@ function LeadTimePanel({ onForecastAdded, onShowForecastLines }: { onForecastAdd
         Aynı gün birden fazla termin hesapladığınızda, başarılı sonuçları <b>plana tahmin olarak ekleyin</b>; sonraki hesaplamalar doluluğu doğru yansıtır.
       </p>
       <div className="row">
-        <label>Stok kodu<input value={code} onChange={(e) => setCode(e.target.value)} /></label>
-        <label>Miktar<input type="number" value={qty} onChange={(e) => setQty(Number(e.target.value))} /></label>
-        <label>En erken başlangıç<input type="date" value={start} onChange={(e) => setStart(e.target.value)} /></label>
-        <button onClick={run} disabled={!code}>Hesapla</button>
+        <label>Stok kodu<input disabled={busy} value={code} onChange={(e) => setCode(e.target.value)} /></label>
+        <label>Miktar<input disabled={busy} type="number" value={qty} onChange={(e) => setQty(Number(e.target.value))} /></label>
+        <label>En erken başlangıç<input disabled={busy} type="date" value={start} onChange={(e) => setStart(e.target.value)} /></label>
+        <label>Malzeme durumu<select disabled={busy} value={materialStatus} onChange={e => { setMaterialStatus(e.target.value); setMaterialDate(""); }}><option value="unknown">Bilinmiyor</option><option value="ready">Hazır</option><option value="expected">Bekleniyor</option></select></label>
+        {materialStatus === "expected" && <label>Malzeme hazır olma tarihi<input disabled={busy} type="date" value={materialDate} onChange={e => setMaterialDate(e.target.value)} /></label>}
+        <label>Malzeme politikası<select disabled={busy} value={materialPolicy} onChange={e => setMaterialPolicy(e.target.value)}><option value="conditional">Koşullu</option><option value="strict">Katı (bilinmeyeni engelle)</option></select></label>
+        <button onClick={run} disabled={busy || !code || (materialStatus === "expected" && !materialDate)}>Hesapla</button>
         {can("poweruser") && <button className="secondary" onClick={clearForecast}>Tahminleri temizle</button>}
         <button className="secondary" onClick={onShowForecastLines}>Plan satırlarında göster →</button>
       </div>
@@ -616,7 +812,7 @@ function LeadTimePanel({ onForecastAdded, onShowForecastLines }: { onForecastAdd
             <tbody>
               {forecasts.data!.map((f) => (
                 <tr key={f.order_id}>
-                  <td><b>{f.order_no}</b></td>
+                  <td><b>{f.order_no}</b><div className="muted">{f.material_status === "unknown" ? "Malzeme doğrulanmadı — koşullu tahmin" : f.material_status === "expected" ? `Malzeme bekleniyor: ${f.material_ready_date || "tarih eksik"}` : "Malzeme hazır"}</div></td>
                   <td>{f.item_code} <span className="muted">{f.item_name}</span></td>
                   <td className="num">{fmt(f.quantity, 0)}</td>
                   <td className="num">{fmt(f.total_hours)}</td>
@@ -634,6 +830,7 @@ function LeadTimePanel({ onForecastAdded, onShowForecastLines }: { onForecastAdd
       {res && (
         <>
           <h3>Son hesaplama</h3>
+          {res.material_note && <p role="status" style={{background: "#fff3e0", padding: 12}}>{res.material_note}</p>}
           {res.status !== "complete" && (
             <div className="panel" style={{ padding: "8px 12px", marginBottom: 10, background: "#fff3e0", borderColor: "#ffb74d" }}>
               <b>{res.status === "infeasible" ? "Termin hesaplanamadı" : "Kısmi termin"}</b>
@@ -675,4 +872,34 @@ function LeadTimePanel({ onForecastAdded, onShowForecastLines }: { onForecastAdd
       )}
     </div>
   );
+}
+
+
+function DailyResult({ result }: { result: DailyScheduleResult }) {
+  const reasons: Record<string, string> = {
+    missing_resource_definition: "Operasyon kaynak tanımı eksik",
+    missing_wip_routing: "Bağlı yarımamul kartı veya rotası eksik",
+    predecessor_incomplete: "Önceki operasyon / yarımamul üretimi yetersiz",
+    insufficient_capacity: "Makine veya iş gücü kapasitesi yetersiz",
+    setup_unknown: "Hazırlık süresi tanımlı değil",
+    no_eligible_machine: "Uygun aktif makine yok",
+    no_machine_hours: "Makine süresi tanımlı değil",
+    material_unknown: "Malzeme durumu doğrulanmadı",
+    material_date_missing: "Beklenen malzemenin hazır olacağı tarih girilmemiş",
+  };
+  const issues = [...result.skipped, ...result.remaining_qty];
+  return <section>
+    <h3>Günlük çizelge (pilot)</h3>
+    <p>{result.segments_created} hazırlık / üretim aralığı oluşturuldu.</p>
+    {issues.length > 0 ? <details open>
+      <summary className="error">{issues.length} operasyon günlük çizelgede eksik veya yerleşemedi. Çizelge tamamlanmadı.</summary>
+      <ul className="errors" style={{ maxHeight: 240, overflowY: "auto" }}>
+        {issues.map((issue, index) => <li key={index}>
+          {issue.order_no} / {issue.item_code || "—"} op.{issue.operation_seq}: {reasons[issue.reason || "insufficient_capacity"] || issue.reason}
+          {"remaining_qty" in issue && <> · kalan {fmt(issue.remaining_qty)} adet</>}
+          {"wip_codes" in issue && issue.wip_codes?.length ? <> · {issue.wip_codes.join(", ")}</> : null}
+        </li>)}
+      </ul>
+    </details> : <p>Günlük çizelgeye aktarılan operasyonlarda kalan miktar veya eksik kaynak tanımı bildirilmedi.</p>}
+  </section>;
 }

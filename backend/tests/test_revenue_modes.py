@@ -2,9 +2,30 @@
 
 from datetime import date
 
-from tests.test_capacity_flow import _upload
+from tests.test_capacity_flow import _upload, _weekly_staffing
 
 WEEK = date(2026, 9, 7)  # Pazartesi
+
+
+def _reset_routing(codes):
+    """Bu stok kodlarinin rota/BOM/senaryo kurallarini temizler; senaryo yalnizca CIRO-1 rotasina dayanir."""
+    from app.db.session import SessionLocal
+    from app.models import BomLine, Item, OpTransitionRule, PlanLine, RoutingOperation, RoutingOperationStation
+
+    s = SessionLocal()
+    try:
+        ids = [i.id for i in s.query(Item).filter(Item.code.in_(codes)).all()]
+        if ids:
+            op_ids = [o.id for o in s.query(RoutingOperation.id).filter(RoutingOperation.item_id.in_(ids)).all()]
+            if op_ids:
+                s.query(PlanLine).filter(PlanLine.operation_id.in_(op_ids)).delete(synchronize_session=False)
+                s.query(RoutingOperationStation).filter(RoutingOperationStation.operation_id.in_(op_ids)).delete(synchronize_session=False)
+                s.query(RoutingOperation).filter(RoutingOperation.id.in_(op_ids)).delete(synchronize_session=False)
+            s.query(BomLine).filter(BomLine.item_id.in_(ids)).delete(synchronize_session=False)
+            s.query(OpTransitionRule).filter(OpTransitionRule.item_id.in_(ids)).delete(synchronize_session=False)
+        s.commit()
+    finally:
+        s.close()
 
 
 def _setup(client, auth):
@@ -13,8 +34,10 @@ def _setup(client, auth):
     # tek is merkezi, 10 kisi x 4 saat x 5 gun = 200 saat/hafta; ufuk 1 hafta
     _upload(client, auth, "workcenters", ["İş Merkezi Kodu", "İş Merkezi Adı", "Planlanıyor (E/H)", "Birim Saat", "Kişi Başı Verimli Saat"], [["CIRO-1", "Ciro Hattı", "E", 10, 4]])
     _upload(client, auth, "shifts", ["İş Merkezi Kodu", "Vardiya", "Günler (Pzt=0..Paz=6)", "Başlangıç", "Bitiş", "Kişi Sayısı", "Kişi Başı Verimli Saat"], [["CIRO-1", "Gündüz", "0,1,2,3,4", "08:00", "18:00", 10, 4]])
+    _weekly_staffing(client, auth, [['CIRO-1', 10, 4, 5]])
     # 3600 sn/adet => 1 saat/adet
     _upload(client, auth, "items", ["Stok Kodu", "Stok Adı", "Ürün Grubu"], [["UCUZ", "Ucuz ürün", "G"], ["PAHALI", "Pahalı ürün", "G"]])
+    _reset_routing(["UCUZ", "PAHALI"])  # diger test dosyalari ayni stok kodlarina ek operasyon/BOM ekleyebilir
     _upload(client, auth, "routing", ["Stok Kodu", "Sıra", "Operasyon", "İş Merkezi Kodu", "Çevrim Süresi (sn)"], [["UCUZ", 10, "Op", "CIRO-1", 3600], ["PAHALI", 10, "Op", "CIRO-1", 3600]])
     wc = next(w for w in client.get("/api/workcenters", headers=auth).json() if w["code"] == "CIRO-1")
     # diger testlerin is merkezlerini plan disina al (yalnizca CIRO-1 uzerinden hesaplansin)
@@ -41,7 +64,7 @@ def test_modes_and_compare(client, auth):
     for no, due, item, qty, price in [("E-1", "2026-09-11", "UCUZ", 120, 10), ("E-2", "2026-09-18", "PAHALI", 100, 100), ("E-3", "2026-09-25", "PAHALI", 60, 100)]:
         assert client.post("/api/orders", headers=auth, json={"order_no": no, "due_date": due, "item_code": item, "quantity": qty, "unit_price": price}).status_code == 201
 
-    body = {"start_week": WEEK.isoformat(), "weeks": 1, "work_center_ids": [wc_id]}
+    body = {"start_week": WEEK.isoformat(), "weeks": 1, "work_center_ids": [wc_id], "use_overtime": False}  # kısmi durum sözleşmesi: otomatik FM kapalı
     cmp_ = client.post("/api/plan/compare", headers=auth, json=body)
     assert cmp_.status_code == 200, cmp_.text
     c = cmp_.json()
@@ -69,7 +92,7 @@ def test_modes_and_compare(client, auth):
     assert diffs == {"E-1": "rev_drops", "E-2": "due_drops", "E-3": "due_drops"}
 
     # ciro planini uygula ve haftalik/aylik ciro raporunu al
-    r = client.post("/api/plan/auto", headers=auth, json={**body, "mode": "revenue"}).json()
+    r = _plan_with_ack(client, "/api/plan/auto", headers=auth, json={**body, "mode": "revenue"}).json()
     assert r["mode"] == "revenue" and r["created"] >= 3
     lines = client.get("/api/plan/lines", headers=auth, params={"start": WEEK.isoformat(), "work_center_ids": [wc_id]}).json()
     assert all(l["strategy"] == "revenue" for l in lines)
@@ -82,7 +105,7 @@ def test_modes_and_compare(client, auth):
     assert rep["months"][0]["period"] == "2026-09" and rep["months"][0]["completed_revenue"] == 16000
 
     # termin planini uygula: ciro dusuk ama E-1 zamaninda
-    r = client.post("/api/plan/auto", headers=auth, json={**body, "mode": "due_date"}).json()
+    r = _plan_with_ack(client, "/api/plan/auto", headers=auth, json={**body, "mode": "due_date", "use_overtime": False}).json()  # kısmi durum sözleşmesi: otomatik FM kapalı
     assert r["mode"] == "due_date"
     rep = client.get("/api/plan/revenue", headers=auth, params={"start": WEEK.isoformat(), "weeks": 1, "work_center_ids": [wc_id]}).json()
     assert rep["planned_revenue"] == 1200
@@ -90,3 +113,5 @@ def test_modes_and_compare(client, auth):
     # plan excel'i ciro sayfalariyla aciliyor
     r = client.get(f"/api/plan/export.xlsx?start={WEEK}&weeks=1&work_center_ids={wc_id}", headers=auth)
     assert r.status_code == 200 and r.content[:2] == b"PK"
+
+from tests.test_capacity_flow import _plan_with_ack

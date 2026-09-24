@@ -4,7 +4,7 @@ from datetime import timedelta
 from app.models import WorkCenter
 from app.models.mes import MesDetail, MesPlanBaseline
 from app.services.capacity import LaborCapacityCalendar
-from app.services.mes import monday, live_plan, detail_dict, balances
+from app.services.mes import monday, live_plan_range, detail_dict, balances
 
 
 def ratio(n, d):
@@ -18,9 +18,10 @@ def progress(db, day, wc_ids=None, horizon=4):
         MesPlanBaseline.week_start >= week, MesPlanBaseline.week_start <= week + timedelta(weeks=horizon)).all()}
     selected = set(wc_ids or [])
     targets = {}
+    live_weeks = live_plan_range(db, {week + timedelta(weeks=i) for i in range(horizon + 1)} - baselines.keys())
     for offset in range(horizon + 1):
         wk = week + timedelta(weeks=offset)
-        lines = baselines[wk].lines if wk in baselines else live_plan(db, wk)
+        lines = baselines[wk].lines if wk in baselines else live_weeks[wk]
         for p in lines:
             if selected and p["work_center_id"] not in selected:
                 continue
@@ -70,6 +71,8 @@ def progress(db, day, wc_ids=None, horizon=4):
     for r in current:
         m = r["mapping"]
         if selected and m.get("work_center_id") not in selected:
+            continue
+        if m["status"] == "free_stock":
             continue
         if m["status"] != "mapped":
             unresolved.append(r)
@@ -134,16 +137,19 @@ def progress(db, day, wc_ids=None, horizon=4):
         cum += d["hours"]
         d["cumulative_hours"] = cum
         d["off_plan_hours"] = d["hours"] - d["matched_hours"]
-    pool = balances(records, day)
+    from app.services.mes_inventory import inventory
+    stock = inventory(records, day)
+    pool = {r["material_code"]: r["balance"] for r in stock["rows"]}
     total_plan = sum(r["hours"] for r in rows)
     total_actual = sum(d["hours"] for d in daily)
     allocations = []
     if records:
         from app.services.remaining_work import produced_qty_map
-        produced_qty_map(db, as_of=day, mes_allocations=allocations)
+        produced_qty_map(db, as_of=day, mes_allocations=allocations, include_mes=True)
         if selected:
             allocations = [a for a in allocations if a["work_center_id"] in selected]
-    return {"week": week, "week_end": end, "as_of": day, "horizon": horizon,
+    from app.services.mes import free_stock_rows
+    return {"pending_consumption_count": len(stock["pending"]), "free_stock": free_stock_rows(db, day), "week": week, "week_end": end, "as_of": day, "horizon": horizon,
             "baseline": "frozen" if week in baselines else "live",
             "baseline_created_at": baselines[week].created_at if week in baselines else None,
             "summary": {"planned_hours": total_plan, "actual_hours": total_actual,

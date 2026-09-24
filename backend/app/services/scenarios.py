@@ -155,11 +155,16 @@ def groups(db: Session) -> list[dict]:
     for it in items:
         if not it.operations:
             continue
-        by_group.setdefault(_group_key(it), []).append(it)
+        # Navigation must use the same key as flow, rule editing and RuleLookup.
+        # Commercial main/sub groups are not aliases for the rule's product_group.
+        by_group.setdefault(it.product_group or "", []).append(it)
     rules = db.query(OpTransitionRule).all()
     rule_count: dict[str, int] = {}
     for r in rules:
-        key = norm_op(r.product_group) if r.scope == "group" else norm_op(r.item.product_group if r.item else "")
+        group_name = r.product_group if r.scope == "group" else (r.item.product_group if r.item else r.product_group)
+        # Keep saved rules accessible even if their last routing was removed.
+        by_group.setdefault(group_name or "", [])
+        key = norm_op(group_name)
         rule_count[key] = rule_count.get(key, 0) + 1
     out = []
     for g, its in sorted(by_group.items(), key=lambda kv: kv[0]):

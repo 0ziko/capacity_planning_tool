@@ -1,18 +1,19 @@
-import { useState } from "react";
-import { api, fmt, qs } from "../api";
+import { useEffect, useState } from "react";
+import { api, fmt, qs, trackedMesPreview, trackedMesImport, MES_IMPORT_JOB_KEY } from "../api";
 import { ErrorText, WcMultiSelect, useAsync, useWorkCenters } from "../components";
 import { useAuth } from "../auth";
 import "./Progress.css";
 import DeliveryRisk from "./DeliveryRisk";
+import { filterMesPreview } from "./mesPreviewFilter";
 
-type Mapping = { status: string; reason: string; kind?: string; operation_name?: string; work_center_code?: string; candidates: string[]; inputs: Record<string, number>; standard_unit_hours: number };
-type Detail = { detail_id: string; prod_date: string; material_code: string; machine_code: string; quantity: number; mapping: Mapping; action?: string; match_week?: string; match_products?: string[]; standard_hours?: number; classification?: string };
+type Mapping = { consumption_status?: string; input_candidates?: Record<string,number>[]; status: string; reason: string; kind?: string; operation_name?: string; work_center_code?: string; candidates: string[]; inputs: Record<string, number>; standard_unit_hours: number; resource_deviation?: boolean; actual_work_center_code?: string | null };
+type Detail = { detail_id: string; prod_date: string; material_code: string; machine_code: string; quantity: number; mapping: Mapping; action?: string; preview_category?: "mapped" | "pending" | "free_stock" | "unresolved"; match_week?: string; match_products?: string[]; standard_hours?: number; classification?: string };
 type Preview = { token: string; counts: Record<string, number>; rows: Detail[]; shortages: { material_code: string; missing_qty: number }[]; net_quantity: number; standard_hours: number };
 type Operation = { key: string; material_code: string; operation_name: string; work_center_id: number; products: string[]; quantity: number; hours: number; actual_qty: number; early_qty: number; remaining_qty: number; remaining_hours: number; completion_pct: number | null; daily: number[] };
 type Day = { day: string; hours: number; matched_hours: number; off_plan_hours: number; cumulative_hours: number; reported: boolean };
 type Wc = { id: number; code: string; planned_hours: number; actual_hours: number; matched_hours: number; remaining_hours: number; elapsed_capacity_hours: number; output_vs_plan_pct: number | null; capacity_usage_pct: number | null };
 type Allocation = { material_code: string; quantity: number; finished_item_code: string; finish_week: string; plan_line_id: number; operation_name: string };
-type Report = { week: string; week_end: string; baseline: string; summary: Record<string, number | null>; daily: Day[]; operations: Operation[]; work_centers: Wc[]; off_plan: Detail[]; unresolved: Detail[]; pool: { material_code: string; quantity: number }[]; allocations: Allocation[]; notes: string[] };
+type Report = { pending_consumption_count: number; week: string; week_end: string; baseline: string; summary: Record<string, number | null>; daily: Day[]; operations: Operation[]; work_centers: Wc[]; off_plan: Detail[]; unresolved: Detail[]; pool: { material_code: string; quantity: number }[]; allocations: Allocation[]; notes: string[] };
 const pct = (v: number | null | undefined) => v == null ? "—" : `%${fmt(v, 1)}`;
 const dateLabel = (d: string) => new Date(`${d}T12:00:00`).toLocaleDateString("tr-TR", { day: "2-digit", month: "short" });
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
@@ -41,26 +42,43 @@ export default function ProgressPage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [message, setMessage] = useState("");
+  const [previewPhase, setPreviewPhase] = useState("");
+  const [importPhase, setImportPhase] = useState("");
   const [previewFilter, setPreviewFilter] = useState("all");
   const report = useAsync(() => api.get<Report>(`/api/mes/progress${qs({ as_of: asOf, work_center_ids: wcIds, horizon })}`), [asOf, wcIds.join(","), horizon, refresh]);
+  const source = useAsync(() => api.get<{production_source: "legacy" | "mes"; has_mes_records: boolean}>("/api/mes/source-status"), [refresh]);
+  const previewRows = filterMesPreview(preview?.rows ?? [], previewFilter);
   const r = report.data, s = r?.summary;
   const query = search.trim().toLocaleLowerCase("tr");
   const ops = r?.operations.filter(o => `${o.material_code} ${o.operation_name} ${o.products.join(" ")}`.toLocaleLowerCase("tr").includes(query)) ?? [];
   async function inspect(selected: File) {
     setFile(selected); setPreview(null); setErr(""); setMessage(""); setBusy(true);
-    try { setPreview(await api.upload<Preview>("/api/mes/preview", selected)); }
-    catch (e) { setErr(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
+    try { setPreview(await trackedMesPreview<Preview>(selected, setPreviewPhase)); }
+    catch (e) { setErr(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); setPreviewPhase(""); }
   }
   async function confirm() {
     if (!file || !preview) return;
     setBusy(true); setErr("");
     try {
-      const result = await api.upload<Preview>("/api/mes/import", file, { token: preview.token });
-      setMessage(`${result.counts.new} yeni, ${result.counts.updated} güncellenen, ${result.counts.unchanged} değişmeyen kayıt. ${result.counts.unresolved} kayıt eşleştirme bekliyor.`);
+      const result = await trackedMesImport<Pick<Preview, "counts">>(file, preview.token, setImportPhase);
+      setMessage(`${result.counts.new} yeni, ${result.counts.updated} güncellenen, ${result.counts.unchanged} değişmeyen kayıt. ${result.counts.unresolved} kayıt eşleştirme bekliyor; ${result.counts.free_stock ?? 0} kayıt tanım bekleyen serbest stok olarak saklandı. ${result.counts.pending_consumption ?? 0} kaydın önceki aşama tüketimi uzlaştırma bekliyor.`);
       setPreview(null); setRefresh(v => v + 1);
-    } catch (e) { setErr(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
+    } catch (e) { setErr(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); setImportPhase(""); }
   }
+  useEffect(() => {
+    if (!sessionStorage.getItem(MES_IMPORT_JOB_KEY)) return;
+    setBusy(true);
+    trackedMesImport<Pick<Preview, "counts">>(undefined, undefined, setImportPhase)
+      .then(result => {
+        setMessage(`MES aktarımı tamamlandı: ${result.counts.new} yeni, ${result.counts.updated} güncellenen, ${result.counts.unchanged} değişmeyen kayıt.`);
+        setPreview(null); setRefresh(v => v + 1);
+      }).catch(e => setErr(e instanceof Error ? e.message : String(e)))
+      .finally(() => { setBusy(false); setImportPhase(""); });
+  }, []);
   return <div className="mes-page">
+    {importPhase && <p role="status">{importPhase} · Sonuç doğrulanana kadar aynı aktarımı yeniden başlatmayın.</p>}
+    {previewPhase && <p role="status">{previewPhase} · Önizleme hazırlanıyor; henüz üretim aktarılmadı.</p>}
+    {source.data && <p role="status" className="muted">{source.data.production_source === "legacy" ? "Planlama ve genel gerçekleşme hesaplarında eski üretim kaynağı etkin. Bu sayfa MES kayıtlarını gösterir; Excel yüklemek MES geçişini kendiliğinden etkinleştirmez." : "MES üretim kaynağı etkin. Müşteri karşılaması Stok & Rezervasyon üzerinden takip edilir."}</p>}
     <div className="mes-heading"><div><span className="mes-eyebrow">ÜRETİMİN NABZI</span><h1>Üretim İlerlemesi</h1><p className="muted">Haftanın planı, günlük üretim ve kalan işçilik — ürün ve operasyon bazında.</p></div>
       {can("poweruser") && <label className={`mes-upload ${busy ? "disabled" : ""}`}>{busy ? "İşleniyor…" : "↑ MES Excel yükle"}<input aria-label="MES Excel dosyası" type="file" accept=".xlsx,.xlsm" disabled={busy} onChange={e => { const f = e.target.files?.[0]; if (f) void inspect(f); e.target.value = ""; }} /></label>}
     </div>
@@ -78,6 +96,7 @@ export default function ProgressPage() {
         <article className="mes-amber"><span>Bu hafta planı dışında</span><strong>{fmt(s?.off_plan_hours ?? 0)} <small>sa.</small></strong><p>{fmt(s?.early_hours ?? 0)} sa. yakın planla eşleşti</p></article>
       </div>
       {(s?.record_count ?? 0) === 0 && <div className="mes-notice">Bu hafta için MES kaydı bulunmuyor. Excel yükleyerek önizlemeyi inceleyebilir ve onayınızla içe aktarabilirsiniz. Eski genel üretim importları MES raporuna dahil değildir.</div>}
+      {r.pending_consumption_count > 0 && <div className="mes-warning">{r.pending_consumption_count} kaydın önceki aşama tüketimi belirsiz. Üretilen miktar korunur; stok hareketleri ve ayrılan miktarlar Stok &amp; Rezervasyon → Yarımamul stok hareketleri sekmesinde.</div>}
       {(s?.unresolved_count ?? 0) > 0 && <div className="mes-warning">{s?.unresolved_count} MES kaydı eşleştirme bekliyor; miktarı ve işçiliği hesaplara katılmadı. Ayrıntılar aşağıda.</div>}
       <div className="mes-charts"><section className="panel"><h2>Hafta nasıl ilerliyor?</h2><p className="muted">Kümülatif standart saat. Kesikli çizgi haftanın toplam hedefidir.</p><DailyChart days={r.daily} target={s?.planned_hours ?? 0} /></section>
         <section className="panel"><h2>Günlük üretim</h2><div className="mes-daybars">{r.daily.map(d => <div key={d.day}><span>{dateLabel(d.day)}</span><div className="mes-track"><i style={{ width: `${d.matched_hours / Math.max(...r.daily.map(x => x.hours), 1) * 100}%` }} /><i className="off" style={{ width: `${d.off_plan_hours / Math.max(...r.daily.map(x => x.hours), 1) * 100}%` }} /></div><b>{d.reported ? fmt(d.hours, 1) : "—"}</b></div>)}</div><p className="muted">Yeşil: haftalık planla eşleşen · Turuncu: plan dışı / erken üretim</p></section></div>
@@ -92,11 +111,14 @@ export default function ProgressPage() {
     </>}
     {preview && <div className="mes-overlay"><section className="mes-dialog" role="dialog" aria-modal="true" aria-labelledby="mes-preview-title"><div className="mes-heading"><div><h2 id="mes-preview-title">MES import önizlemesi</h2><p>{file?.name}</p></div><button disabled={busy} onClick={() => setPreview(null)}>Kapat</button></div>
       <div className="mes-notice">{preview.counts.new} yeni · {preview.counts.updated} güncellenecek · {preview.counts.unchanged} değişmeyen · {preview.counts.unresolved} eşleşme bekleyen kayıt<br />Dosya net adedi: {fmt(preview.net_quantity)} · Eşleşen standart işçilik: {fmt(preview.standard_hours)} sa.</div>
-      {preview.counts.unresolved > 0 && <p className="mes-warning">Eşleşmeyen kayıtlar saklanır; üretim, stok ve işçilik hesabına katılmaz. BOM/rota veya makine tanımını düzelttikten sonra aynı dosyayı tekrar yükleyin.</p>}
+      {(preview.counts.pending_consumption ?? 0) > 0 && <div className="mes-warning">{preview.counts.pending_consumption} kayıtta operasyon ve standart işçilik eşleşti; yalnızca önceki aşama tüketimi uzlaştırma bekliyor. Serbest stok kayıtları bu sayıya dahil değildir.</div>}
+      {(preview.counts.free_stock ?? 0) > 0 && <div className="mes-notice">{preview.counts.free_stock} kayıt tanım bekleyen serbest MES stoğuna alınacak. Stok &amp; Rezervasyon ekranında izlenir; bilinen sonraki tüketimler bu stoktan düşülür. Tanımsız işçilik kapasiteye yazılmaz.</div>}
+      {preview.counts.unresolved > 0 && <p className="mes-warning">Eşleşmeyen kayıtlar saklanır; üretim, stok ve işçilik hesabına katılmaz. BOM/rota veya süre tanımını düzelttikten sonra aynı dosyayı tekrar yükleyin.</p>}
       {preview.shortages.length > 0 && <details className="mes-warning"><summary>{preview.shortages.length} yarımamülde eksik bakiye — tüketim ayrıntılarını inceleyin</summary>{preview.shortages.map(x => <div key={x.material_code}>{x.material_code}: {fmt(x.missing_qty)} eksik</div>)}</details>}
-      <label>Göster<select value={previewFilter} onChange={e => setPreviewFilter(e.target.value)}><option value="all">Tüm kayıtlar</option><option value="unresolved">Eşleşmeyenler</option><option value="changed">Yeni / güncellenecek</option></select></label>
-      <div className="table-wrap mes-preview-table"><table><thead><tr><th>Tarih · Detay ID</th><th>Malzeme · Makine</th><th>Net adet</th><th>Operasyon / sonuç</th><th>Tüketilecek yarımamül</th></tr></thead><tbody>{preview.rows.filter(d => previewFilter === "all" || previewFilter === "unresolved" && d.mapping.status !== "mapped" || previewFilter === "changed" && d.action !== "unchanged").map(d => <tr key={d.detail_id}><td>{d.prod_date}<br /><small>{d.detail_id}</small></td><td><b>{d.material_code}</b><br />{d.machine_code}</td><td>{fmt(d.quantity)}</td><td>{d.mapping.status === "mapped" ? <>{d.mapping.operation_name}<br /><small>{d.mapping.work_center_code} · {d.action === "new" ? "Yeni" : d.action === "updated" ? "Güncelleme" : "Değişmedi"}</small></> : d.mapping.reason}</td><td>{Object.entries(d.mapping.inputs).map(([code, q]) => <div key={code}>{code} × {fmt(q * d.quantity)}</div>)}</td></tr>)}</tbody></table></div>
-      <p className="muted">Onayla: tekil kayıtlar güncellenir, eşleşen bitmiş ürünler stoğa girer, BOM tüketimleri havuza yansır. Sipariş veya müşteri rezervasyonu yapılmaz.</p><ErrorText err={err} /><div className="mes-dialog-actions"><button disabled={busy} onClick={() => setPreview(null)}>Vazgeç</button><button className="primary" disabled={busy} onClick={() => void confirm()}>{busy ? "Kaydediliyor…" : "Onayla ve içe aktar"}</button></div>
+      <label>Göster<select value={previewFilter} onChange={e => setPreviewFilter(e.target.value)}><option value="all">Tüm kayıtlar</option><option value="unresolved">Eşleşmeyenler</option><option value="pending">Tüketimi uzlaştırılacaklar</option><option value="free_stock">Serbest stok olarak alınacaklar</option><option value="changed">Yeni / güncellenecek</option></select></label>
+      <p role="status">Gösterilen: {previewRows.length} / {preview.rows.length} kayıt</p>
+      <div className="table-wrap mes-preview-table"><table><thead><tr><th>Tarih · Detay ID</th><th>Malzeme · Makine</th><th>Net adet</th><th>Operasyon / sonuç</th><th>Tüketilecek yarımamül</th></tr></thead><tbody>{previewRows.map(d => <tr key={d.detail_id}><td>{d.prod_date}<br /><small>{d.detail_id}</small></td><td><b>{d.material_code}</b><br />{d.machine_code}</td><td>{fmt(d.quantity)}</td><td>{d.mapping.status === "free_stock" ? <><b>Serbest stok olarak alınacak</b><br />{d.mapping.reason}</> : d.mapping.status === "mapped" ? <>{d.mapping.operation_name}<br /><small>{d.mapping.work_center_code} · {d.action === "new" ? "Yeni" : d.action === "updated" ? "Güncelleme" : "Değişmedi"}</small>{d.mapping.consumption_status === "pending" && <div className="mes-warning">{d.mapping.reason}</div>}{d.mapping.resource_deviation && <div className="mes-notice">Gerçekleşen: {d.machine_code} / {d.mapping.actual_work_center_code ?? "Tanımsız merkez"}. {d.mapping.reason}</div>}</> : d.mapping.reason}</td><td>{Object.entries(d.mapping.inputs).map(([code, q]) => <div key={code}>{code} × {fmt(q * d.quantity)}</div>)}</td></tr>)}</tbody></table></div>
+      <p className="muted">Onayla: tekil kayıtlar güncellenir, eşleşen bitmiş ürünler stoğa girer, BOM tüketimleri havuza yansır. Tanımsız kodlar serbest MES stoğuna alınır. Sipariş veya müşteri rezervasyonu yapılmaz.</p><ErrorText err={err} /><div className="mes-dialog-actions"><button disabled={busy} onClick={() => setPreview(null)}>Vazgeç</button><button className="primary" disabled={busy} onClick={() => void confirm()}>{busy ? "Kaydediliyor…" : "Onayla ve içe aktar"}</button></div>
     </section></div>}
   </div>;
 }

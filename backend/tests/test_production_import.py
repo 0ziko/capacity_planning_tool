@@ -2,7 +2,7 @@
 
 from datetime import date
 
-from tests.test_capacity_flow import _upload
+from tests.test_capacity_flow import _upload, _weekly_staffing
 
 WEEK = date(2026, 9, 7)
 
@@ -22,6 +22,7 @@ def test_production_template_order_no_optional(client, auth):
 def test_production_import_without_order_no(client, auth):
     _upload(client, auth, "workcenters", ["İş Merkezi Kodu", "İş Merkezi Adı", "Planlanıyor (E/H)", "Birim Saat", "Kişi Başı Verimli Saat"], [["PR-WC", "WC", "E", 10, 4]])
     _upload(client, auth, "shifts", ["İş Merkezi Kodu", "Vardiya", "Günler (Pzt=0..Paz=6)", "Başlangıç", "Bitiş", "Kişi Sayısı", "Kişi Başı Verimli Saat"], [["PR-WC", "G", "0,1,2,3,4", "08:00", "18:00", 1, 4]])
+    _weekly_staffing(client, auth, [['PR-WC', 1, 4, 5]])
     _upload(client, auth, "items", ["Stok Kodu", "Stok Adı", "Ürün Grubu"], [["PR-M", "Mamul", "G"]])
     _upload(
         client,

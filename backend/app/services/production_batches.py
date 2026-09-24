@@ -270,10 +270,22 @@ def open_batches_with_ops(db: Session) -> list[ProductionBatch]:
     return (
         db.query(ProductionBatch)
         .options(joinedload(ProductionBatch.item).joinedload(Item.operations), joinedload(ProductionBatch.orders).joinedload(ProductionBatchOrder.order))
-        .filter(ProductionBatch.status == "open")
+        .filter(ProductionBatch.status == "open", ProductionBatch.orders.any(ProductionBatchOrder.order.has(Order.status == "open")))
         .order_by(ProductionBatch.due_date, ProductionBatch.batch_no)
         .all()
     )
+
+
+def close_empty_batches(db: Session, batch_ids: set[int]) -> None:
+    """Keep batch history, but never leave deleted demand open. Caller commits."""
+    if not batch_ids:
+        return
+    db.flush()
+    for batch in db.query(ProductionBatch).filter(
+        ProductionBatch.id.in_(batch_ids), ProductionBatch.status == "open",
+        ~ProductionBatch.orders.any(),
+    ).all():
+        batch.status = "closed"
 
 
 def batch_order_map(db: Session) -> dict[int, ProductionBatch]:

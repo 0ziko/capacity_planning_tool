@@ -270,6 +270,9 @@ def _trim_progress_receipts(db: Session, item_id: int, amount: float) -> None:
 
 def sync_progress_receipts(db: Session, item_ids: list[int] | None = None, username: str = "system") -> dict:
     """Rota zincirindeki operasyon beyanlarinin dar bogazini bitmis urun depo girisine yansitir."""
+    from app.core.config import get_settings
+    if get_settings().production_source == "mes":
+        return {"added": 0, "adjusted": 0, "source": "mes", "message": "Eski üretim kayıtları stok üretmez; mevcut stok korunur."}
     if item_ids:
         ids = list(item_ids)
     else:

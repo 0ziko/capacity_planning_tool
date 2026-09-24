@@ -11,6 +11,7 @@ from app.models import (
     Employee,
     ImportLog,
     Item,
+    LaserTimeStandard,
     Machine,
     OpTransitionRule,
     Order,
@@ -62,6 +63,7 @@ def _dataset_count(db: Session, kind: str) -> int:
         "items": Item,
         "bom": BomLine,
         "routing": RoutingOperation,
+        "laser_times": LaserTimeStandard,
         "op_rules": OpTransitionRule,
         "orders": Order,
         "production": ProductionActual,
@@ -88,6 +90,7 @@ def purge(db: Session, target: str) -> int:
         "items_ds": _purge_items_only,
         "bom": _purge_bom,
         "routing": _purge_routing,
+        "laser_times": _purge_laser_times,
         "op_rules": _purge_op_rules,
         "orders_ds": _purge_orders,
         "production": _purge_production,
@@ -99,6 +102,13 @@ def purge(db: Session, target: str) -> int:
     if target not in fn:
         raise ValueError(f"Bilinmeyen hedef: {target}")
     return fn[target](db)
+
+
+def _purge_laser_times(db: Session) -> int:
+    """Yalnizca standart tabloyu siler; rotalardaki mevcut degerler ERP receteleri yeniden yuklenene kadar kalir."""
+    n = _count(db, LaserTimeStandard)
+    db.query(LaserTimeStandard).delete(synchronize_session=False)
+    return n
 
 
 def _purge_plan_lines(db: Session) -> int:

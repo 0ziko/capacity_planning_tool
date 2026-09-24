@@ -45,7 +45,7 @@ def test_export_round_trip_and_update(client, auth, db, weekly_case):
     assert [ws.cell(2, c).value for c in range(3, 7)] == [8, 4.5, 5, "Mevcut"]
     assert ws["C3"].value is None  # defaults are not frozen into overrides
     assert ws["A2"].protection.locked and not ws["C2"].protection.locked
-    assert ws.freeze_panes == "C2" and ws.auto_filter.ref == "A1:G3"
+    assert ws.freeze_panes == "C2" and ws.auto_filter.ref == "A1:M3"  # + fazla mesai (hafta ici + hafta sonu) kisi/gun/saat sutunlari
     before = db.query(WorkCenterWeek).count()
     result = upload(client, auth, wb)
     assert not result["errors"] and result["inserted"] == result["updated"] == 0

@@ -17,8 +17,10 @@ class DraftLine:
     week_start: date
     planned_hours: float
     planned_qty: float
+    machine_id: int | None = None
     mode: str = "auto"
     production_batch_id: int | None = None
     label: str = ""
     semi_finished_code: str = ""
-    material_unverified: bool = False
+    material_unverified: bool | None = False
+    tag: str = ""  # "" | overtime (fazla mesaiyle yerleşti) | slip (hedef tarihten sonra) | prep (hazırlık)

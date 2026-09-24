@@ -131,11 +131,11 @@ def test_material_unknown_conditional_vs_strict(client, auth):
         json={"order_no": "FN-U", "due_date": "2026-09-20", "item_code": "UCUZ", "quantity": 10, "unit_price": 1},
     )
     body = {"start_week": START.isoformat(), "weeks": 2, "work_center_ids": [wc_id], "replace_existing": True}
-    cond = client.post("/api/plan/auto", headers=auth, json={**body, "material_policy": "conditional"}).json()
+    cond = _plan_with_ack(client, "/api/plan/auto", headers=auth, json={**body, "material_policy": "conditional"}).json()
     assert cond["created"] >= 1
     assert cond.get("material_unverified") is True
-    client.post("/api/plan/auto", headers=auth, json={**body, "replace_existing": True})
-    strict = client.post("/api/plan/auto", headers=auth, json={**body, "material_policy": "strict"}).json()
+    _plan_with_ack(client, "/api/plan/auto", headers=auth, json={**body, "replace_existing": True})
+    strict = _plan_with_ack(client, "/api/plan/auto", headers=auth, json={**body, "material_policy": "strict"}).json()
     assert strict["created"] == 0
     assert any(u.get("reason") == "malzeme_unknown_strict" for u in strict.get("unplanned") or [])
 
@@ -156,7 +156,7 @@ def test_material_expected_no_plan_before_ready_week(client, auth):
         },
     )
     oid = r.json()["id"]
-    client.post(
+    _plan_with_ack(client,
         "/api/plan/auto",
         headers=auth,
         json={"start_week": START.isoformat(), "weeks": 1, "work_center_ids": [wc_id], "replace_existing": True},
@@ -207,7 +207,7 @@ def test_plan_hours_reflect_net_70(client, auth, db):
         )
     )
     db.commit()
-    client.post(
+    _plan_with_ack(client,
         "/api/plan/auto",
         headers=auth,
         json={"start_week": START.isoformat(), "weeks": 2, "work_center_ids": [wc_id], "replace_existing": True},
@@ -217,3 +217,5 @@ def test_plan_hours_reflect_net_70(client, auth, db):
         for l in client.get("/api/plan/lines", headers=auth, params={"start": START.isoformat(), "work_center_ids": [wc_id]}).json()
     )
     assert round(hours, 1) == 70.0
+
+from tests.test_capacity_flow import _plan_with_ack

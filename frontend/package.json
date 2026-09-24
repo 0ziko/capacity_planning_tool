@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "test": "node tests/coShipmentSelection.test.mjs",
+    "test": "node tests/coShipmentSelection.test.mjs && node tests/mesPreviewFilter.test.mjs && node tests/ganttFlow.test.mjs && node tests/autoPlanTracking.test.mjs && node tests/revisionDiff.test.mjs",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview"

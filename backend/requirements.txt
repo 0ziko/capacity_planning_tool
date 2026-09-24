@@ -8,5 +8,6 @@ PyJWT>=2.8
 bcrypt>=4.1
 python-multipart>=0.0.9
 openpyxl>=3.1
+lxml>=5.0  # openpyxl yazımını hızlandırır (büyük yedek/dışa aktarım); opsiyonel ama önerilir
 httpx>=0.27
 pytest>=8.2

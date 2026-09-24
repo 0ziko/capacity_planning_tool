@@ -143,6 +143,8 @@ def revenue_report(db: Session, wc_ids: list[int] | None, start: date, weeks: in
         )
 
     return RevenueOut(
+        conditional_orders=sum(s.conditional_line_count > 0 for s in sched),
+        unknown_material_orders=sum(s.unknown_material_line_count > 0 for s in sched),
         start=start,
         end=horizon_end,
         total_open_revenue=round(sum(o.quantity * (o.unit_price or 0.0) for o in orders), 2),
@@ -175,7 +177,8 @@ def _scenario(db: Session, sim: planning.Simulation, wc_ids: list[int] | None, w
 
 
 def compare(db: Session, req: PlanCompareRequest) -> PlanCompareOut:
-    base = dict(start_week=req.start_week, weeks=req.weeks, work_center_ids=req.work_center_ids, replace_existing=False)
+    base = dict(start_week=req.start_week, weeks=req.weeks, work_center_ids=req.work_center_ids, replace_existing=False, material_policy=req.material_policy,
+                slip_mode=getattr(req, "slip_mode", "chain"), use_overtime=bool(getattr(req, "use_overtime", True)), prep_fill=bool(getattr(req, "prep_fill", True)))
     sim_due = planning.simulate(db, AutoPlanRequest(mode="due_date", **base))
     sim_rev = planning.simulate(db, AutoPlanRequest(mode="revenue", **base))
     due = _scenario(db, sim_due, req.work_center_ids, req.weeks)

@@ -48,12 +48,14 @@ def test_excel_export_bom_routing_fields(db):
     db.flush()
     db.add(RoutingOperationStation(operation_id=op.id, machine_id=m.id, is_primary=True))
     db.commit()
+    db.expire_all()  # onceki testlerden kalan ORM durumu disa aktarimi etkilemesin
 
     wb = load_workbook(io.BytesIO(build_backup(db)))
     bom = wb["BOM"]
     assert bom.max_row >= 2
     hdr = [bom.cell(1, c).value for c in range(1, bom.max_column + 1)]
-    row = [bom.cell(2, c).value for c in range(1, bom.max_column + 1)]
+    row = next(row for row in bom.iter_rows(min_row=2, values_only=True)
+               if row[hdr.index("Stok Kodu")] == "EXP-FG")
     assert "Kaynak Yarımamül" in hdr
     assert row[hdr.index("Kaynak Yarımamül")] == "WIP-1"
     assert row[hdr.index("Dal Sıra")] == 5
@@ -61,7 +63,8 @@ def test_excel_export_bom_routing_fields(db):
 
     rota = wb["Rota"]
     rh = [rota.cell(1, c).value for c in range(1, rota.max_column + 1)]
-    rr = [rota.cell(2, c).value for c in range(1, rota.max_column + 1)]
+    rr = next(row for row in rota.iter_rows(min_row=2, values_only=True)
+              if row[rh.index("Stok Kodu")] == "EXP-FG")
     assert rr[rh.index("Birincil Makine Kodu")] == "EXP-M1"
     assert "Rota İstasyonları" in wb.sheetnames
 

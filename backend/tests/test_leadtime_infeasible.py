@@ -67,7 +67,7 @@ def test_leadtime_horizon_exceeded_not_success(client, auth):
         [["LT-HZ-M", 10, "Op", "LT-HZ", 3600]],
     )
     _upload(client, auth, "orders", ["Sipariş No", "Termin", "Stok Kodu", "Miktar"], [["LT-HZ-F", "2026-12-01", "LT-HZ-M", 40]])
-    client.post("/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 2, "work_center_ids": [wc["id"]]})
+    _plan_with_ack(client, "/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 2, "work_center_ids": [wc["id"]]})
     lt = client.post(
         "/api/plan/leadtime",
         headers=auth,
@@ -88,7 +88,7 @@ def test_leadtime_respects_future_planned_load(client, auth):
         [["LT-PLN-M", 10, "Op", "LT-PLN", 3600]],
     )
     _upload(client, auth, "orders", ["Sipariş No", "Termin", "Stok Kodu", "Miktar"], [["LT-PLN-F", "2026-12-01", "LT-PLN-M", 40]])
-    client.post("/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 1, "work_center_ids": [wc["id"]]})
+    _plan_with_ack(client, "/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 1, "work_center_ids": [wc["id"]]})
     load0 = client.get("/api/plan/load", headers=auth, params={"start": WEEK.isoformat(), "weeks": 1, "work_center_ids": [wc["id"]]}).json()[0]["weeks"][0]
     assert load0["utilization"] >= 0.99
     week2 = (WEEK + timedelta(weeks=1)).isoformat()
@@ -157,6 +157,8 @@ def test_gantt_uses_effective_due_order(client, auth):
         [["LT-G-LATE", "2026-12-31", "LT-G-M", 5], ["LT-G-EARLY", "2026-12-31", "LT-G-M", 5]],
     )
     wc = next(w for w in client.get("/api/workcenters", headers=auth).json() if w["code"] == "LT-GNT")
+    from tests.test_capacity_flow import _weekly_staffing
+    _weekly_staffing(client, auth, [["LT-GNT", 1, 8, 5]])
     early_id = next(o["id"] for o in client.get("/api/orders", headers=auth).json() if o["order_no"] == "LT-G-EARLY")
     client.put(
         f"/api/orders/{early_id}",
@@ -170,7 +172,7 @@ def test_gantt_uses_effective_due_order(client, auth):
             "customer": "T",
         },
     )
-    client.post("/api/plan/auto", headers=auth, json={"start_week": wk, "weeks": 1, "work_center_ids": [wc["id"]], "replace_existing": True})
+    _plan_with_ack(client, "/api/plan/auto", headers=auth, json={"start_week": wk, "weeks": 1, "work_center_ids": [wc["id"]], "replace_existing": True})
     end = (WEEK + timedelta(days=6)).isoformat()
     g = client.get("/api/plan/gantt", headers=auth, params={"work_center_id": wc["id"], "start": wk, "end": end}).json()
     bars = [b for b in g["bars"] if b["order_no"] in ("LT-G-EARLY", "LT-G-LATE")]
@@ -178,3 +180,5 @@ def test_gantt_uses_effective_due_order(client, auth):
     early = next(b for b in bars if b["order_no"] == "LT-G-EARLY")
     late = next(b for b in bars if b["order_no"] == "LT-G-LATE")
     assert early["planned_start"] <= late["planned_start"]
+
+from tests.test_capacity_flow import _plan_with_ack

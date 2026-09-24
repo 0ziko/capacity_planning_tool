@@ -48,7 +48,7 @@ def test_replan_preserves_future_auto_line(client, auth, db):
     )
     future_id = _insert_plan_line(db, "H-FUT", wc_id, NOV, hours=12.0)
 
-    client.post(
+    _plan_with_ack(client,
         "/api/plan/auto",
         headers=auth,
         json={"start_week": START.isoformat(), "weeks": 1, "work_center_ids": [wc_id], "replace_existing": True},
@@ -98,7 +98,7 @@ def test_replan_preserves_before_other_wc_manual_forecast(client, auth, db):
     forecast_id = _insert_plan_line(db, "H-KEEP", wc_id, START, hours=2.0, qty=2.0, mode="forecast")
     assert op2 is not None
 
-    client.post(
+    _plan_with_ack(client,
         "/api/plan/auto",
         headers=auth,
         json={"start_week": START.isoformat(), "weeks": 1, "work_center_ids": [wc_id], "replace_existing": True},
@@ -122,7 +122,7 @@ def test_replan_upper_bound_week_preserved_inside_replaced(client, auth, db):
     inside_id = _insert_plan_line(db, "H-IN", wc_id, START, hours=99.0, qty=10.0)
     upper_id = _insert_plan_line(db, "H-IN", wc_id, UPPER_BOUND, hours=3.0, qty=3.0)
 
-    client.post(
+    _plan_with_ack(client,
         "/api/plan/auto",
         headers=auth,
         json={"start_week": START.isoformat(), "weeks": 2, "work_center_ids": [wc_id], "replace_existing": True},
@@ -189,3 +189,5 @@ def test_preflight_reports_replace_scope(client, auth, db):
     assert scope["horizon_end_inclusive"] == "2026-09-20"
     assert scope["lines_to_replace"] == 1
     assert scope["replace_modes"] == ["Otomatik"]
+
+from tests.test_capacity_flow import _plan_with_ack

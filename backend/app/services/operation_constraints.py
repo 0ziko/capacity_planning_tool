@@ -15,7 +15,7 @@ from app.models import Item, RoutingOperation
 from app.services import scenarios as scen
 from app.services import capacity as cap
 
-BlockReason = Literal["kapasite_yetersiz", "oncul_eksik", "bekleme_ufuk_disinda", "rota_dongusu"]
+BlockReason = Literal["kapasite_yetersiz", "oncul_eksik", "bekleme_ufuk_disinda", "rota_dongusu", "yarimamul_eksik", "operasyon_suresi_eksik"]
 
 WEEKLY_PLANNING_NOTE = (
     "Haftalik planlama yaklasiktir: ayni hafta icindeki operasyon sirasi gun bazinda cozulmez; "
@@ -203,8 +203,8 @@ def max_successor_qty(
         return max(succ_required - succ_planned, 0.0)
     if pred_available + 1e-6 < rule.lag_cycles:
         return 0.0
-    feed = pred_available - rule.lag_cycles
-    allowed_total = min(succ_required, max(feed, 0.0))
+    # lag_cycles is a startup threshold, not stock withheld from consumption.
+    allowed_total = min(succ_required, max(pred_available, 0.0))
     return max(allowed_total - succ_planned, 0.0)
 
 
@@ -283,7 +283,7 @@ def unplanned_entry(
         "semi_finished_code": semi_finished_code,
         "operation_seq": operation_seq,
         "work_center_code": work_center_code,
-        "hours": round(hours, 2),
+        "hours": round(hours, 8),
         "reason": reason,
     }
     if weekly_note:

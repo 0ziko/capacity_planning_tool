@@ -154,15 +154,24 @@ def test_calculate_failure_does_not_mutate_live(client, auth, db):
     from app.models import Item
 
     wc_id = _setup(client, auth)
-    db.add(Item(code="NOROUTE", name="No route", product_group="test"))
+    item = Item(code="NOROUTE", name="No route", product_group="test")
+    db.add(item)
     db.commit()
+    # Giris kapisi rotasiz urune siparis acmayi reddeder; eski veri senaryosu icin siparis dogrudan yazilir.
     r = client.post(
         "/api/orders",
         headers=auth,
         json={"order_no": "RS-NR", "due_date": "2026-09-18", "item_code": "NOROUTE", "quantity": 5, "unit_price": 1},
     )
-    assert r.status_code == 201, r.text
-    order_id = r.json()["id"]
+    assert r.status_code == 400 and "Rota tan" in r.text, r.text
+    from datetime import date as _date
+
+    from app.models import Order
+
+    legacy = Order(order_no="RS-NR", item_id=item.id, quantity=5, unit_price=1, due_date=_date(2026, 9, 18), status="open")
+    db.add(legacy)
+    db.commit()
+    order_id = legacy.id
     body = {
         "reason_codes": ["customer_postpone"],
         "note": "fail calc",

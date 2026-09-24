@@ -4,10 +4,10 @@ import { setToken } from "./api";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import WorkCenters from "./pages/WorkCenters";
-import Employees from "./pages/Employees";
 import Items from "./pages/Items";
 import Orders from "./pages/Orders";
 import Planning from "./pages/Planning";
+import GanttPage from "./pages/Gantt";
 import ProgressPage from "./pages/Progress";
 import Analysis from "./pages/Analysis";
 import Imports from "./pages/Imports";
@@ -60,11 +60,12 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/workcenters" element={<WorkCenters />} />
-          <Route path="/employees" element={<Employees />} />
+          <Route path="/employees" element={<Navigate to="/workcenters" replace />} />
           <Route path="/items" element={<Items />} />
           <Route path="/orders" element={<Orders />} />
           <Route path="/scenarios" element={<Scenarios />} />
           <Route path="/planning" element={<Planning />} />
+          <Route path="/gantt" element={<GanttPage />} />
           <Route path="/stock" element={<Stock />} />
           <Route path="/progress" element={<ProgressPage />} />
           <Route path="/analysis" element={<Analysis />} />

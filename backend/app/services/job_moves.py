@@ -370,6 +370,7 @@ def _to_draft(pl: PlanLine, order: Order | None) -> DraftLine:
         order_id=pl.order_id,
         operation_id=pl.operation_id,
         work_center_id=pl.work_center_id,
+        machine_id=pl.machine_id,
         week_start=pl.week_start,
         planned_hours=pl.planned_hours,
         planned_qty=pl.planned_qty,
@@ -377,22 +378,26 @@ def _to_draft(pl: PlanLine, order: Order | None) -> DraftLine:
         production_batch_id=pl.production_batch_id,
         label=(order.order_no if order else "") or "",
         semi_finished_code=pl.semi_finished_code or "",
+        material_unverified=pl.material_unverified,
     )
 
 
-def _scale_line(line: DraftLine, ratio: float) -> DraftLine:
+def _scale_line(line: DraftLine, ratio: float, op=None) -> DraftLine:
+    from app.services.routing_resource import is_line_operation, line_run_hours
     return DraftLine(
         order=line.order,
         order_id=line.order_id,
         operation_id=line.operation_id,
         work_center_id=line.work_center_id,
+        machine_id=line.machine_id,
         week_start=line.week_start,
-        planned_hours=round(line.planned_hours * ratio, 3),
+        planned_hours=round(line_run_hours(op, round(line.planned_qty * ratio, 2)) if op is not None and is_line_operation(op) else line.planned_hours * ratio, 10),
         planned_qty=round(line.planned_qty * ratio, 2),
         mode=line.mode,
         production_batch_id=line.production_batch_id,
         label=line.label,
         semi_finished_code=line.semi_finished_code,
+        material_unverified=line.material_unverified,
     )
 
 
@@ -405,36 +410,52 @@ def _place_hours_on_wc(
     weeks: list[date],
     remaining: dict[tuple[int, date], float],
     wc_code: str,
+    op=None,
 ) -> tuple[list[DraftLine], float]:
     """Ayni IM'de saat yerlestir: once tercih edilen hafta, sonra ileri."""
     out: list[DraftLine] = []
     hours_left = hours
     total = hours
+    qty_left = qty
     idx = max(prefer_idx, start_idx)
     while hours_left > 1e-6 and idx < len(weeks):
         wk = weeks[idx]
+        from app.services.routing_resource import is_line_operation, line_run_hours, line_quantity_for_hours
+        from app.services.station_capacity import station_room
         avail = remaining[(line.work_center_id, wk)]
+        machine_id = line.machine_id
+        if op is not None and is_line_operation(op):
+            machine_id, avail = station_room(op, wk, remaining)
         if avail > 1e-6:
             take = min(avail, hours_left)
             take_qty = qty * (take / total) if total > 0 else 0
+            if op is not None and is_line_operation(op):
+                take_qty = min(qty_left, line_quantity_for_hours(op, avail))
+                take = line_run_hours(op, take_qty)
+                qty_left -= take_qty
             out.append(
                 DraftLine(
                     order=line.order,
                     order_id=line.order_id,
                     operation_id=line.operation_id,
                     work_center_id=line.work_center_id,
+                    machine_id=machine_id,
                     week_start=wk,
-                    planned_hours=round(take, 3),
+                    planned_hours=round(take, 10),
                     planned_qty=round(take_qty, 2),
                     mode=line.mode,
                     production_batch_id=line.production_batch_id,
                     label=line.label,
                     semi_finished_code=line.semi_finished_code,
+                    material_unverified=line.material_unverified,
                 )
             )
-            remaining[(line.work_center_id, wk)] = avail - take
-            hours_left -= take
-        idx += 1
+            remaining[(line.work_center_id, wk)] -= take
+            if machine_id is not None:
+                remaining[("machine", machine_id, wk)] -= take
+            hours_left = line_run_hours(op, qty_left) if op is not None and is_line_operation(op) else hours_left - take
+        if op is None or not is_line_operation(op) or station_room(op, wk, remaining)[1] <= 1e-6:
+            idx += 1
     return out, hours_left
 
 
@@ -461,6 +482,9 @@ def simulate_priority_insert(
     for w in wcs:
         for wk in weeks:
             remaining[(w.id, wk)] = max(cap.planning_capacity_hours(db, w, wk) - forecast.get((w.id, wk), 0.0), 0.0)
+    from app.services.station_capacity import load_budgets
+    total_capacity = sum(remaining.values())
+    load_budgets(db, wcs, weeks, remaining, retained_modes=["forecast"])
     live = (
         db.query(PlanLine)
         .options(joinedload(PlanLine.order), joinedload(PlanLine.operation))
@@ -486,7 +510,7 @@ def simulate_priority_insert(
         wc_by_id,
         wc_code,
         remaining,
-        sum(remaining.values()),
+        total_capacity,
         live,
         orders_by_id,
         all_orders,
@@ -567,7 +591,7 @@ def _simulate_insert(
         if target_remaining:
             ratio = stay_ratio.get(pl.order_id, 0.0)
             if ratio > 1e-6:
-                frozen.append(_scale_line(draft, ratio))
+                frozen.append(_scale_line(draft, ratio, db.get(RoutingOperation, pl.operation_id)))
             continue
         if freeze_manual or wk_i < earliest_idx or pl.work_center_id not in consumed_wcs:
             frozen.append(draft)
@@ -578,6 +602,12 @@ def _simulate_insert(
         key = (line.work_center_id, line.week_start)
         if key in remaining:
             remaining[key] = max(remaining[key] - line.planned_hours, 0.0)
+            wc = wc_by_id.get(line.work_center_id)
+            if wc and wc.planning_mode == "line":
+                if line.machine_id is None:
+                    raise ValueError("Korunan hat planında istasyon bilgisi eksik; önce bu satırları yeniden planlayın")
+                station_key = ("machine", line.machine_id, line.week_start)
+                remaining[station_key] = max(0, remaining.get(station_key, 0) - line.planned_hours)
 
     priority_lines: list[DraftLine] = []
     for move, chain, move_qty, idx, _rem_ids, _wcs in move_specs:
@@ -607,6 +637,7 @@ def _simulate_insert(
             weeks,
             remaining,
             wc_code.get(line.work_center_id, ""),
+            op=db.get(RoutingOperation, line.operation_id),
         )
         if any(p.week_start != line.week_start for p in placed) or leftover > 1e-6:
             if line.order:

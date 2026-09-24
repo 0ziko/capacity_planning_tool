@@ -491,8 +491,24 @@ def import_parsed_fg(
     machines: dict[str, Machine],
     counters: dict[str, int],
     warnings: list[str],
+    laser_standards: dict | None = None,
 ) -> None:
     fg_item = _get_or_create_item(db, cache, parsed.fg, parsed.name, counters=counters)
+    # Production BOM files do not carry conveyor settings. Preserve reviewed
+    # settings by exact recipe/operation/output identity on master replacement.
+    from app.services.routing_resource import conveyor_kind
+    from app.models import norm_op
+    codes = {parsed.fg, *(b.wip for b in parsed.branches)}
+    preserved_units = {}
+    preserved_intervals = {}
+    for old, code in db.query(RoutingOperation, Item.code).join(Item).filter(Item.code.in_(codes)).all():
+        if old.line_interval_sec is not None:
+            preserved_intervals[(code, norm_op(old.operation_name), old.semi_finished_code or "")] = old.line_interval_sec
+        if conveyor_kind(old):
+            key = (code, norm_op(old.operation_name), old.semi_finished_code or "")
+            preserved_units.setdefault(key, set()).add(old.units_per_cycle or 1)
+    if any(len(values) > 1 for values in preserved_units.values()):
+        raise ValueError("Aynı reçete operasyonunda çelişkili dizilim adetleri var; BOM yenilenmeden önce düzeltin")
     _clear_item_master(db, fg_item.id)
 
     for branch in parsed.branches:
@@ -502,6 +518,66 @@ def import_parsed_fg(
     counters["routes"] += _write_route(db, fg_item, parsed.branches, parsed.finish_wip, wc_idx=wc_idx, machines=machines, warnings=warnings)
     _write_fg_bom(db, fg_item, parsed.branches, parsed.finish_wip, cache, counters)
     _write_fg_recipe_detail(db, fg_item, parsed.branches, cache, counters)
+    db.flush()
+    written_ops = []
+    for op, code in db.query(RoutingOperation, Item.code).join(Item).filter(Item.code.in_(codes)).all():
+        values = preserved_units.get((code, norm_op(op.operation_name), op.semi_finished_code or ""))
+        if values:
+            op.units_per_cycle = next(iter(values))
+        op.line_interval_sec = preserved_intervals.get((code, norm_op(op.operation_name), op.semi_finished_code or ""))
+        written_ops.append(op)
+    # Lazer sure standardi: ERP SURE x bom_cycle_factor yerine standart CT/setup (carpansiz).
+    if laser_standards:
+        from app.services.laser_times import apply_standards
+
+        apply_standards(db, written_ops, laser_standards)
+
+
+def reconcile_operation_labels(by_fg, header, fg_filter=None):
+    """Recover missing labels only from consistent exact-code source evidence.
+
+    A duration or operation code marks a suspicious unlabeled row. Ordinary
+    component rows without either remain materials, even if made elsewhere.
+    No machine, time, quantity or route is invented or copied.
+    """
+    from app.models import norm_op
+    stock, op_code, op_name, duration = header[3], header[6], header[7], header[8]
+    references = defaultdict(list)
+    for rows in by_fg.values():
+        for row in rows:
+            if S(row.get(op_name)) and code_str(row.get(stock)):
+                references[code_str(row.get(stock)).upper()].append(row)
+    repaired, warnings, errors = {}, [], []
+    for fg, rows in by_fg.items():
+        if fg_filter and fg not in fg_filter:
+            repaired[fg] = rows
+            continue
+        repaired[fg] = []
+        for row in rows:
+            new = row
+            # Raw materials (1/2 prefixes) do not require an operation label,
+            # even when the source contains a duration or operation code.
+            if not code_str(row.get(stock)).startswith(("1", "2")) and code_str(row.get(stock)) != fg and not S(row.get(op_name)) and (code_str(row.get(op_code)) not in ("", "0") or (sure_dk(row.get(duration)) or 0) > 0):
+                code = code_str(row.get(stock)).upper()
+                candidates = references.get(code, [])
+                # Supplied fields must agree with the donor; blank fields are
+                # not a license to choose among different operation names.
+                names = {norm_op(S(r.get(op_name))) for r in candidates}
+                candidates = [r for r in candidates if
+                    (not S(row.get(op_code)) or code_str(row[op_code]) == code_str(r.get(op_code))) and
+                    (sure_dk(row.get(duration)) is None or sure_dk(row[duration]) == sure_dk(r.get(duration)))]
+                ctx = f"{fg} / SIRA {row.get(header[2])} / {code}"
+                if len(names) != 1 or not candidates:
+                    errors.append(f"{ctx}: operasyon alanı eksik; aynı kod için tek ve uyumlu kaynak tanımı yok. Malzeme sayılmadı; aktarım durduruldu.")
+                else:
+                    new = dict(row)
+                    new[op_name] = S(candidates[0][op_name])
+                    codes = {code_str(r.get(op_code)) for r in candidates if S(r.get(op_code))}
+                    if not S(new.get(op_code)) and len(codes) == 1:
+                        new[op_code] = next(iter(codes))
+                    warnings.append(f"{ctx}: eksik operasyon adı aynı stok kodunun kaynak dosyadaki tutarlı tanımından tamamlandı: {new[op_name]}.")
+            repaired[fg].append(new)
+    return repaired, warnings, errors
 
 
 def run_production_bom_import(
@@ -517,11 +593,20 @@ def run_production_bom_import(
         result.errors.append("BOM baslik satiri okunamadi")
         return result
 
+    by_fg, label_warnings, label_errors = reconcile_operation_labels(by_fg, header, fg_filter)
+    result.warnings.extend(label_warnings)
+    result.errors.extend(label_errors)
+    if label_errors:
+        return result  # Validate source before any master-data mutation.
+
     wc_idx = wc_lookup_by_name(db)
     ensure_extra_work_centers(db, wc_idx)
     machines = {m.code.upper(): m for m in db.query(Machine).filter(Machine.is_active.is_(True)).all()}
     cache: dict[str, Item] = {i.code.upper(): i for i in db.query(Item).all()}
     counters = {"created": 0, "updated": 0, "routes": 0, "bom": 0}
+    from app.services.laser_times import standards_by_code
+
+    laser_standards = standards_by_code(db)
 
     targets = sorted(by_fg.keys())
     if fg_filter:
@@ -533,7 +618,8 @@ def run_production_bom_import(
             if not parsed.branches:
                 result.warnings.append(f"{fg}: dal/operasyon yok")
                 continue
-            import_parsed_fg(db, parsed, cache=cache, wc_idx=wc_idx, machines=machines, counters=counters, warnings=result.warnings)
+            import_parsed_fg(db, parsed, cache=cache, wc_idx=wc_idx, machines=machines, counters=counters, warnings=result.warnings,
+                             laser_standards=laser_standards)
             result.fg_count += 1
         except Exception as e:  # noqa: BLE001
             result.errors.append(f"{fg}: {e}")

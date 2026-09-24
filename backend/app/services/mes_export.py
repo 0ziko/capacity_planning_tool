@@ -9,6 +9,8 @@ def export_report(r):
     wb = Workbook()
     wb.remove(wb.active)
     sheets = [
+        ("Tanım bekleyen serbest stok", ["Malzeme", "Serbest miktar", "Kayıt sayısı", "İlk tarih", "Son tarih", "MES detayları"],
+         [[p["material_code"], p["quantity"], p["record_count"], p["first_date"], p["last_date"], ", ".join(p["detail_ids"])] for p in r.get("free_stock", [])]),
         ("Bilgi", ["Alan", "Değer"], [["Hafta", str(r["week"])], ["Rapor tarihi", str(r["as_of"])],
           ["Referans", r["baseline"]], *[["Hesaplama", n] for n in r["notes"]]]),
         ("Günlük", ["Tarih", "Üretim standart saat", "Planla eşleşen saat", "Plan dışı saat", "Kümülatif saat"],

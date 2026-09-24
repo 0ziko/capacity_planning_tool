@@ -44,6 +44,12 @@ def compute_order_demand_netting(
     """Talep bakiyesi = siparis miktari - sevk. Stok/uretim kredisi cift sayilmaz."""
     from app.services.remaining_work import produced_qty_map
 
+    snapshot = db.info.get("_merge_read_snapshot")
+    if snapshot is not None:
+        if shipped_qty is None:
+            shipped_qty = snapshot["shipped"].get(order.id, 0.)
+        if reservations is None:
+            reservations = snapshot["reservations"].get(order.id, [])
     shipped = float(shipped_qty) if shipped_qty is not None else float(
         db.query(func.sum(Shipment.quantity)).filter(Shipment.order_id == order.id).scalar() or 0.0
     )
@@ -79,6 +85,10 @@ def compute_order_demand_netting(
     external_effective = external + legacy
     # Uretim gerceklesmesi (produced_qty_map) ayri dusulur; burada yalnizca stok/rezervasyon kredisi.
     stock_only = external_effective + max(0.0, prod_link - min(fg_produced, prod_link))
+    from app.core.config import get_settings
+    if get_settings().production_source == "mes":
+        # MES pool already excludes reserved/shipped FG; reservation is deducted here once.
+        stock_only = external_effective + prod_link
     stock_credit = min(demand_balance, stock_only)
     net = max(0.0, demand_balance - stock_credit)
 

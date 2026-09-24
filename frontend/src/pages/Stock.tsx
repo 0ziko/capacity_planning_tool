@@ -2,10 +2,12 @@ import { useState } from "react";
 import { api, fmt, qs, type AutoReserveResult, type Item, type OrderStockRow, type Receipt, type Reservation, type Shipment, type StockRow } from "../api";
 import { useAuth } from "../auth";
 import { ErrorText, useAsync } from "../components";
+import MesInventory from "./stock/MesInventory";
 import AutoReserveDialog from "./stock/AutoReserveDialog";
 
-type Tab = "free" | "reservations" | "orders" | "receipts" | "shipments";
+type Tab = "mes" | "free" | "reservations" | "orders" | "receipts" | "shipments";
 const TABS: { id: Tab; label: string; hint: string }[] = [
+  { id: "mes", label: "Yarımamul stok hareketleri", hint: "Kümülatif MES üretimi, tüketimi ve kalan ara stok" },
   { id: "free", label: "Serbest stok", hint: "Depodaki bitmiş ürün: eldeki, rezerve, serbest ve açık talep" },
   { id: "reservations", label: "Rezervasyonlar", hint: "Siparişlere ayrılmış ürünler — sevk et, taşı, kaldır" },
   { id: "orders", label: "Sipariş karşılama", hint: "Açık siparişlerin rezerve / sevk / kalan durumu" },
@@ -26,10 +28,11 @@ export default function Stock() {
   const [msg, setMsg] = useState("");
   const [autoScope, setAutoScope] = useState<number[] | null | undefined>(undefined);
   const summary = useAsync(() => api.get<StockRow[]>("/api/stock/summary"), []);
+  const mesFree = useAsync(() => api.get<{material_code: string; quantity: number; record_count: number; last_date: string; detail_ids: string[]; machine_codes: string[]}[]>("/api/mes/free-stock"), []);
   const posQ = position.trim() || undefined;
   const reservations = useAsync(() => api.get<Reservation[]>(`/api/stock/reservations${qs({ position: posQ })}`), [position]);
   const orders = useAsync(() => api.get<OrderStockRow[]>(`/api/stock/orders${qs({ position: posQ })}`), [position]);
-  const refresh = () => { summary.reload(); reservations.reload(); orders.reload(); };
+  const refresh = () => { mesFree.reload(); summary.reload(); reservations.reload(); orders.reload(); };
 
   const run = async (fn: () => Promise<unknown>, okMsg?: string) => {
     setErr(""); setMsg("");
@@ -79,6 +82,9 @@ export default function Stock() {
         ))}
       </div>
 
+      {tab === "mes" && <MesInventory />}
+      {tab === "free" && <section className="panel"><h2>Tanım bekleyen serbest MES stoğu</h2><p className="muted">Bu kayıtların tanım veya standart işçilik bilgileri tamamlanmamış olabilir. Miktarlar ortak MES stok hesabındadır; bilinen sonraki tüketimler bakiyeyi azaltır, belirsiz işçilik kapasiteye yazılmaz. Tanımlar tamamlandıktan sonra aynı MES dosyası yeniden önizlenip onaylanarak eşleştirilebilir.</p><ErrorText err={mesFree.err} />
+        {mesFree.loading ? <p>Yükleniyor…</p> : <div className="table-wrap"><table><thead><tr><th>Malzeme kodu</th><th>Serbest miktar</th><th>Son kayıt</th><th>Makineler</th><th>MES detayları</th></tr></thead><tbody>{(mesFree.data ?? []).map(r => <tr key={r.material_code}><td>{r.material_code}</td><td>{fmt(r.quantity)}</td><td>{r.last_date}</td><td>{r.machine_codes.join(", ")}</td><td>{r.detail_ids.join(", ")}</td></tr>)}{mesFree.data?.length === 0 && <tr><td colSpan={5}>Tanım bekleyen serbest MES stoğu yok.</td></tr>}</tbody></table></div>}</section>}
       {tab === "free" && <FreeStock rows={rows} orders={orders.data ?? []} canEdit={canEdit} onAuto={autoItem} onReserve={(orderId, itemId, qty, note) => run(() => api.post("/api/stock/reservations", { item_id: itemId, order_id: orderId, quantity: qty, note }), "Rezervasyon yapıldı.")} />}
       {tab === "reservations" && <Reservations rows={reservations.data ?? []} orders={orders.data ?? []} canEdit={canEdit}
         onShip={(id, qty, date, note) => run(() => api.post(`/api/stock/reservations/${id}/ship`, { quantity: qty, ship_date: date, note }), "Sevk kaydedildi; stoktan düşüldü.")}

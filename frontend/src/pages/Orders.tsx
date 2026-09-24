@@ -25,7 +25,7 @@ function matchesText(needle: string, hay: string): boolean {
 }
 
 const STATUS_LABEL: Record<string, string> = { open: "Açık", closed: "Kapalı", forecast: "Tahmin" };
-const PLAN_LABEL: Record<string, string> = { unplanned: "Planlanmadı", planned: "Planlanan", partial: "Kısmi", late: "Gecikmeli", on_time: "Zamanında", no_ops: "Rota yok", closed: "Kapalı", forecast: "Tahmin" };
+const PLAN_LABEL: Record<string, string> = { finish_unknown: "Bitiş tarihi belirsiz", covered: "Üretim ihtiyacı kalmadı", unplanned: "Planlanmadı", planned: "Planlanan", partial: "Kısmi", late: "Gecikmeli", on_time: "Zamanında", no_ops: "Rota yok", closed: "Kapalı", forecast: "Tahmin" };
 const RES_LABEL: Record<string, string> = { none: "Rezerv yok", partial: "Kısmi rezerv", full: "Tam rezerv" };
 const MARKET_LABEL: Record<string, string> = { domestic: "Yerli", export: "Yurtdışı" };
 
@@ -161,7 +161,7 @@ export default function Orders() {
             <label>Stok kodu<input value={itemCode} onChange={(e) => setItemCode(e.target.value)} placeholder="6010527 veya 6010527, 6012081" title="Virgülle birden fazla stok kodu" /></label>
             <label>Müşteri<input value={customer} onChange={(e) => setCustomer(e.target.value)} placeholder="filtre" /></label>
             <label>Pazar<select value={market} onChange={(e) => setMarket(e.target.value)}><option value="">Tümü</option><option value="domestic">Yerli</option><option value="export">Yurtdışı</option></select></label>
-            <label>Plan durumu<select value={planStatus} onChange={(e) => setPlanStatus(e.target.value)}><option value="">Tümü</option><option value="planned">Planlanan</option><option value="forecast">Tahmin</option><option value="unplanned">Planlanmadı</option><option value="partial">Kısmi</option><option value="late">Gecikmeli</option><option value="on_time">Zamanında</option><option value="no_ops">Rota yok</option></select></label>
+            <label>Plan durumu<select value={planStatus} onChange={(e) => setPlanStatus(e.target.value)}><option value="">Tümü</option><option value="planned">Planlanan</option><option value="forecast">Tahmin</option><option value="unplanned">Planlanmadı</option><option value="partial">Kısmi</option><option value="late">Gecikmeli</option><option value="on_time">Zamanında</option><option value="finish_unknown">Bitiş tarihi belirsiz</option><option value="no_ops">Rota yok</option><option value="covered">Üretim ihtiyacı kalmadı</option></select></label>
             <label>Rezervasyon<select value={resStatus} onChange={(e) => setResStatus(e.target.value)}><option value="">Tümü</option><option value="none">Rezerv yok</option><option value="partial">Kısmi</option><option value="full">Tam</option></select></label>
             <label>Termin (başlangıç)<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
             <label>Termin (bitiş)<input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
@@ -312,7 +312,7 @@ function OrderForm({ initial, onSaved, onCancel }: { initial: Order | null; onSa
             <option value="expected">Bekleniyor</option>
           </select>
         </label>
-        <label title="expected için zorunlu">Malzeme hazır tarihi<input type="date" value={form.material_ready_date || ""} onChange={(e) => set("material_ready_date", e.target.value || null)} /></label>
+        <label title="Bekleniyor için tarih zorunludur. Hazır seçildiğinde gelecek tarih kabul edilmez.">Malzeme hazır tarihi<input type="date" value={form.material_ready_date || ""} onChange={(e) => set("material_ready_date", e.target.value || null)} /></label>
         <label>Malzeme notu<input value={form.material_note || ""} onChange={(e) => set("material_note", e.target.value)} /></label>
         <button onClick={submit} disabled={!valid || busy}>{initial ? "Kaydet" : "Ekle"}</button>
         <button className="secondary" onClick={onCancel}>Vazgeç</button>

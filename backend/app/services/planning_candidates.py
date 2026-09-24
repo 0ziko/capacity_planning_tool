@@ -155,8 +155,7 @@ def _candidate_from_order(
     produced_map: dict[WorkKey, float],
 ) -> PlanningCandidate | None:
     rem_h = remaining_required_hours(db, o, wc_by_id, sched_ctx, produced_map)
-    if rem_h <= 1e-6:
-        return None
+    # Zero hours can mean missing route times; placement diagnoses remaining quantities.
     warnings: list[str] = []
     gross_h = _gross_hours_order(db, o, wc_by_id)
     gross_rev = o.quantity * (o.unit_price or 0.0)
@@ -196,8 +195,7 @@ def _candidate_from_batch(
     if not anchor or not batch.item:
         return None
     rem_h = remaining_required_hours(db, anchor, wc_by_id, sched_ctx, produced_map, batch=batch)
-    if rem_h <= 1e-6:
-        return None
+    # Zero hours can mean missing route times; placement diagnoses remaining quantities.
     warnings: list[str] = []
     gross_h = _gross_hours_batch(batch, wc_by_id)
     gross_rev = sum(l.quantity * (l.order.unit_price or 0.0) for l in batch.orders if l.order)
@@ -248,7 +246,8 @@ def build_planning_candidates(
 
 
 def due_date_sort_key(c: PlanningCandidate) -> tuple:
-    return (c.effective_due_date, c.display_code.upper(), c.kind, c.candidate_id)
+    # Termin sırası; aynı günde kalan satış değeri yüksek olan önce (mesai/kapasite kotası önce ona gider).
+    return (c.effective_due_date, -float(c.remaining_sales_value or 0.0), c.display_code.upper(), c.kind, c.candidate_id)
 
 
 def revenue_sort_key(c: PlanningCandidate) -> tuple:

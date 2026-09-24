@@ -55,6 +55,7 @@ CapacitySource = Literal["work_center", "machines"]
 
 
 class MachineIn(BaseModel):
+    required_crew_size: int | None = Field(default=None, ge=1, strict=True)
     code: str = Field(min_length=1)
     name: str = ""
     description: str = ""
@@ -67,7 +68,13 @@ class MachineOut(MachineIn, ORM):
     employee_count: int = 0  # atanmis aktif personel
 
 
+class MachineWeekIn(BaseModel):
+    working_hours: float | None = Field(default=None, ge=0, le=168, allow_inf_nan=False)
+
+
 class WorkCenterIn(BaseModel):
+    planning_mode: Literal["labor", "line"] = "labor"
+    required_crew_size: int = Field(default=1, ge=1, strict=True)
     code: str
     name: str
     description: str = ""
@@ -87,7 +94,7 @@ class WorkCenterOut(WorkCenterIn, ORM):
     machines: list[MachineOut] = []
     employee_count: int = 0  # is merkezine bagli aktif personel
     machine_employee_count: int = 0  # aktif makinelere atanmis aktif personel
-    capacity_headcount: int = 0  # kapasite hesabinda kullanilan kisi (vardiya kisi sayisi haric)
+    capacity_headcount: int = Field(default=0, deprecated=True, description="Eski personel kaydı özeti; kapasite için haftalık iş gücü API alanlarını kullanın.")
 
 
 # ---- Employees ----
@@ -120,12 +127,15 @@ class OperationStationOut(ORM):
     machine_code: str
     machine_name: str = ""
     is_primary: bool = False
+    units_per_cycle: int | None = None  # istasyon konveyör dizilimi (saha tablosu)
 
 
 TimeBasisLiteral = Literal["labor_seconds_per_unit", "machine_seconds_per_cycle", "legacy_unspecified"]
 
 
 class OperationOut(ORM):
+    line_interval_sec: float | None = None
+    planning_mode: Literal["labor", "line"] = "labor"
     id: int
     seq: int
     operation_name: str
@@ -145,13 +155,20 @@ class OperationOut(ORM):
     stations: list[OperationStationOut] = []
 
 
+class ConveyorRecipeIn(BaseModel):
+    annealing_units: int = Field(default=1, ge=1, strict=True)
+    washing_units: int = Field(default=1, ge=1, strict=True)
+    apply_to_group: bool = False
+
+
 class OperationPatchIn(BaseModel):
+    line_interval_sec: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     time_basis: TimeBasisLiteral | None = None
     crew_size: int | None = None
     machine_cycle_time_sec: float | None = None
     setup_labor_minutes: float | None = None
     setup_machine_minutes: float | None = None
-    units_per_cycle: int | None = None
+    units_per_cycle: int = Field(default=1, ge=1, strict=True)
     cycle_time_sec: float | None = None
     setup_time_min: float | None = None
 
@@ -184,6 +201,13 @@ class ChildWipOut(BaseModel):
     operation_count: int = 0
 
 
+class WipLimitsIn(BaseModel):
+    """Yarımamül ara stok sınırı: azami adet ve/veya azami gün (boş = sınır yok)."""
+
+    max_wip_qty: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    max_wip_days: int | None = Field(default=None, ge=0, le=365)
+
+
 class ItemOut(ORM):
     id: int
     code: str
@@ -192,6 +216,8 @@ class ItemOut(ORM):
     sub_group: str = ""
     product_group: str
     unit: str
+    max_wip_qty: float | None = None
+    max_wip_days: int | None = None
 
 
 class ItemDetail(ItemOut):
@@ -242,7 +268,7 @@ class OrderOut(ORM):
     status: str
     merged_into_id: int | None = None
     note: str = ""
-    plan_status: str = ""  # unplanned / partial / late / on_time / no_ops / closed
+    plan_status: str = ""  # unplanned / partial / late / on_time / no_ops / finish_unknown / closed
     reservation_status: str = ""  # none / partial / full
     reserved_qty: float = 0.0
     material_status: str = "unknown"
@@ -280,10 +306,19 @@ class OrderAnalysisOut(BaseModel):
     due_to: date | None = None
 
 
+class CompletionWeek(BaseModel):
+    week_start: date
+    planned_end: date
+    quantity: float
+
+
 class OrderScheduleOut(BaseModel):
     """Plan sonucuna gore siparisin tahmini uretim bitisi."""
 
     order_id: int
+    material_note: str = ""
+    conditional_line_count: int = 0
+    unknown_material_line_count: int = 0
     order_no: str
     position_no: str = ""
     customer: str
@@ -299,12 +334,20 @@ class OrderScheduleOut(BaseModel):
     planned_start: date | None = None  # ilk plan haftasi (Pazartesi)
     planned_end_week: date | None = None  # son plan haftasi (Pazartesi)
     planned_end: date | None = None  # tahmini bitis gunu
+    completion_weeks: list[CompletionWeek] = []
     last_work_center_code: str = ""
     lateness_days: int | None = None  # + gec, - erken
-    plan_status: str  # unplanned / partial / late / on_time / no_ops
+    slack_days: int | None = None  # termine kalan gun = etkin termin - tahmini bitis (+ erken, - gec)
+    target_date: date | None = None  # hedef bitis = etkin termin - teslim tamponu (2 gun)
+    buffer_ok: bool | None = None  # tahmini bitis hedef tarihi gecmiyor
+    plan_status: str  # unplanned / partial / late / on_time / no_ops / finish_unknown
 
 
 class OrderProgressOp(BaseModel):
+    operation_id: int | None = None
+    item_code: str = ""
+    required_qty: float | None = None
+    remaining_qty: float | None = None
     operation_seq: int
     operation_name: str
     work_center_code: str
@@ -317,6 +360,12 @@ class OrderProgressOp(BaseModel):
 
 
 class OrderProgressOut(BaseModel):
+    production_source: str = "legacy"
+    reserved_qty: float = 0.0
+    shipped_qty: float = 0.0
+    unfulfilled_qty: float = 0.0
+    planned_share_qty: float = 0.0
+    remaining_hours: float = 0.0
     order_id: int
     order_no: str
     position_no: str = ""
@@ -479,7 +528,10 @@ class RequirementQuery(BaseModel):
 
 # ---- Planning ----
 PlanMode = Literal["due_date", "revenue"]
+SlipMode = Literal["chain", "defer"]
 PlanningGranularity = Literal["weekly", "daily_detailed"]
+# asap: en erken · jit: termine yakın · flow: akış (bitiş en erken = maksimum çıktı, öncüller ardıla yaslanır = minimum ara stok)
+Placement = Literal["asap", "jit", "flow"]
 
 
 class CoShipmentSelection(BaseModel):
@@ -516,6 +568,7 @@ class CoShipmentResultOut(BaseModel):
 
 
 class AutoPlanRequest(BaseModel):
+    missing_headcount_ack: str | None = None
     start_week: date  # herhangi bir gun; pazartesiye yuvarlanir
     weeks: int = 12
     work_center_ids: list[int] | None = None  # None => is_planned olanlar
@@ -523,6 +576,16 @@ class AutoPlanRequest(BaseModel):
     mode: PlanMode = "due_date"  # due_date: termine gore; revenue: ufuk icinde maksimum ciro
     planning_granularity: PlanningGranularity = "weekly"
     material_policy: MaterialPolicy = "conditional"
+    # asap: en erken uygun hafta (mevcut davranis); jit: son operasyon "termin - tampon gun" haftasina,
+    # onculler ardila dogru geriye kaydirilir (kapasite izin verdigi olcude).
+    placement: Placement = "flow"
+    jit_buffer_days: int = Field(default=2, ge=0, le=60)
+    # Kayan adet: chain = hedef tarihe sığmayan adet sonraya dengeli yerleşir (zincir etkisi görünür);
+    # defer = plana yazılmaz, tahmini bitişle raporlanır. use_overtime: hedefi kurtarmak için fazla mesai önerilsin.
+    slip_mode: SlipMode = "chain"
+    use_overtime: bool = True
+    # Termin işleri yerleştikten sonra kalan normal kapasiteye, bitmiş ürüne dönüşemeyen siparişlerin yarımamülleri (son operasyon hariç) 'hazırlık' olarak yazılır.
+    prep_fill: bool = True
     co_shipment: CoShipmentOptions | None = None  # null / enabled=false => mevcut akis
 
 
@@ -541,6 +604,15 @@ class PreflightNoCapacity(BaseModel):
     capacity_hours: float
     headcount: int
     detail: str
+    week_start: date | None = None
+
+
+class PreflightLaborWeek(BaseModel):
+    work_center_id: int
+    work_center_code: str
+    week_start: date
+    missing_fields: list[str]
+    capacity_hours: float
 
 
 class PreflightWipIssue(BaseModel):
@@ -579,10 +651,12 @@ class PlanPreflightScopeOut(BaseModel):
 
 
 class PlanPreflightOut(BaseModel):
+    missing_headcount_token: str | None = None
     can_plan: bool
     order_count: int
     no_routing: list[PreflightNoRouting]
     no_capacity: list[PreflightNoCapacity]
+    missing_labor_weeks: list[PreflightLaborWeek] = Field(default_factory=list)
     daily_data: list[DataFreshnessCheckpoint]
     today: str
     needs_capacity_ack: bool
@@ -598,9 +672,13 @@ class DataFreshnessOut(BaseModel):
 
 
 class PlanCompareRequest(BaseModel):
+    material_policy: MaterialPolicy = "conditional"
     start_week: date
     weeks: int = 12
     work_center_ids: list[int] | None = None
+    slip_mode: SlipMode = "chain"
+    use_overtime: bool = True
+    prep_fill: bool = True
 
 
 class PlanEvaluationRequest(AutoPlanRequest):
@@ -623,6 +701,8 @@ class PeriodRevenue(BaseModel):
 
 
 class RevenueOut(BaseModel):
+    conditional_orders: int = 0
+    unknown_material_orders: int = 0
     start: date
     end: date
     total_open_revenue: float  # tum acik siparisler
@@ -677,6 +757,7 @@ class PlanCompareOut(BaseModel):
 
 
 class ManualPlanLineIn(BaseModel):
+    machine_id: int | None = None
     order_id: int
     operation_id: int
     week_start: date
@@ -684,7 +765,21 @@ class ManualPlanLineIn(BaseModel):
     planned_qty: float | None = None
 
 
+class PlanBatchMember(BaseModel):
+    order_id: int
+    order_no: str
+    position_no: str = ""
+    customer: str = ""
+    quantity: float
+    due_date: date
+
+
 class PlanLineOut(ORM):
+    tag: str = ""  # overtime | slip | prep
+    machine_code: str = ""
+    machine_id: int | None = None
+    material_unverified: bool | None = None
+    material_note: str = ""
     id: int
     order_id: int
     order_no: str = ""
@@ -692,17 +787,20 @@ class PlanLineOut(ORM):
     production_batch_id: int | None = None
     batch_no: str = ""
     batch_order_nos: list[str] = []
+    batch_members: list[PlanBatchMember] = []
     customer: str = ""
     due_date: date | None = None
     item_code: str = ""
     operation_id: int
     operation_seq: int = 0
+    operation_name: str = ""
     work_center_id: int
     work_center_code: str = ""
     week_start: date
     planned_hours: float
     planned_qty: float
     semi_finished_code: str = ""
+    semi_finished_name: str = ""
     mode: str
     strategy: str = ""
     revision_id: int | None = None
@@ -725,6 +823,7 @@ class WeekLoad(BaseModel):
     plan_matched_output_hours: float = 0.0
     remaining_days: float = 0.0  # kalan saat / gunluk verimli kapasite
     idle_hours: float = 0.0  # planlanabilir kapasite - plan (atil)
+    overtime_hours: float = 0.0  # kapasitenin fazla mesaiden gelen kismi (verimli saat)
     capacity_units: float
     planned_units: float
     actual_units: float = 0.0
@@ -736,13 +835,33 @@ class ForecastLoadDetail(BaseModel):
     hours: float
 
 
+class MachineWeekLoad(BaseModel):
+    week_start: date
+    capacity_hours: float
+    planned_hours: float
+    idle_hours: float
+    utilization: float
+
+
+class MachineLoad(BaseModel):
+    machine_id: int
+    machine_code: str
+    machine_name: str = ""
+    weeks: list[MachineWeekLoad]
+
+
 class WorkCenterLoad(BaseModel):
+    machines: list[MachineLoad] = []  # hat (line) merkezlerinde istasyon bazlı doluluk
+    conditional_line_count: int = 0
+    unknown_material_line_count: int = 0
     work_center_id: int
     work_center_code: str
     weeks: list[WeekLoad]
 
 
 class GanttBar(BaseModel):
+    material_unverified: bool | None = None
+    material_note: str = ""
     plan_line_id: int
     order_id: int
     order_no: str
@@ -752,6 +871,7 @@ class GanttBar(BaseModel):
     batch_order_nos: list[str] = []
     item_code: str
     semi_finished_code: str = ""
+    semi_finished_name: str = ""
     operation_seq: int
     operation_name: str
     planned_start: date
@@ -795,7 +915,13 @@ class GanttOut(BaseModel):
     distribution_note: str = "Haftalik plandan yaklasik gun dagilimi; kesin gunluk cizelge degildir."
 
 
-class LeadTimeRequest(BaseModel):
+class MaterialPlanningInputs(BaseModel):
+    material_status: Literal["ready", "expected", "unknown"] = "unknown"
+    material_ready_date: date | None = None
+    material_policy: Literal["conditional", "strict"] = "conditional"
+
+
+class LeadTimeRequest(MaterialPlanningInputs):
     item_code: str
     quantity: float
     start: date
@@ -818,7 +944,9 @@ class LeadTimeStep(BaseModel):
     reason: str = ""
 
 
-class LeadTimeOut(BaseModel):
+class LeadTimeOut(MaterialPlanningInputs):
+    material_unverified: bool = False
+    material_note: str = ""
     item_code: str
     quantity: float
     total_hours: float
@@ -833,7 +961,7 @@ class LeadTimeOut(BaseModel):
     )
 
 
-class ForecastFromLeadTimeIn(BaseModel):
+class ForecastFromLeadTimeIn(MaterialPlanningInputs):
     item_code: str
     quantity: float
     label: str = ""
@@ -842,6 +970,9 @@ class ForecastFromLeadTimeIn(BaseModel):
 
 
 class ForecastSummaryOut(BaseModel):
+    material_status: str = "unknown"
+    material_ready_date: date | None = None
+    material_note: str = ""
     order_id: int
     order_no: str
     item_code: str
@@ -966,17 +1097,43 @@ class OrderImportPreview(BaseModel):
     file_row_count: int
     system_open_count: int
     missing_item_codes: list[str] = []
+    no_routing_item_codes: list[str] = []  # rota tanımı eksik olduğu için aktarımı reddedilen ürün kodları
 
 
 # ---- Haftalik is gucu (WorkCenterWeek) ----
 class WcWeekIn(BaseModel):
+    line_hours_per_day: float | None = Field(default=None, ge=0, le=24, allow_inf_nan=False)
     headcount: int | None = None
     efficient_hours_per_person: float | None = None
     working_days: int | None = Field(default=None, ge=0, le=7)
     note: str = ""
+    # Fazla mesai (18:00-21:00): kişi, gün (None => çalışma günleri), kişi başı nominal saat (≤ 2,5)
+    overtime_headcount: int | None = Field(default=None, ge=0)
+    overtime_days: int | None = Field(default=None, ge=0, le=7)
+    overtime_hours_per_person: float | None = Field(default=None, ge=0, le=2.5, allow_inf_nan=False)
+    # Hafta sonu fazla mesaisi (Cmt/Paz 08:00-18:00): kişi, gün (0..2), kişi başı nominal saat (≤ 8,5)
+    weekend_overtime_headcount: int | None = Field(default=None, ge=0)
+    weekend_overtime_days: int | None = Field(default=None, ge=0, le=2)
+    weekend_overtime_hours_per_person: float | None = Field(default=None, ge=0, le=8.5, allow_inf_nan=False)
+    overtime_proposed: bool = False  # False => onaylı (elle giriş); True => plan önerisi, onay bekliyor
+    overtime_extra_headcount: int | None = Field(default=None, ge=0)  # mesaiye alınabilecek ek kişi (komşu merkez)
+
+
+class OvertimeCellRef(BaseModel):
+    work_center_id: int
+    week_start: date
+
+
+class OvertimeDecisionIn(BaseModel):
+    decision: Literal["approve", "reject"]
+    cells: list[OvertimeCellRef]
 
 
 class WcWeekOut(BaseModel):
+    planning_mode: Literal["labor", "line"] = "labor"
+    required_crew_size: int = 1
+    line_hours_per_day: float | None = None
+    required_labor_hours: float = 0
     work_center_id: int
     week_start: date
     # etkin degerler (istisna varsa o, yoksa varsayilan)
@@ -994,6 +1151,29 @@ class WcWeekOut(BaseModel):
     ov_efficient_hours_per_person: float | None = None
     ov_working_days: int | None = None
     note: str = ""
+    # fazla mesai (etkin değerler + istisna kaydı)
+    overtime_headcount: int = 0
+    overtime_days: int = 0
+    overtime_hours_per_person: float = 0.0
+    overtime_efficiency_ratio: float = 0.0
+    overtime_capacity_hours: float = 0.0
+    base_capacity_hours: float = 0.0
+    ov_overtime_headcount: int | None = None
+    ov_overtime_days: int | None = None
+    ov_overtime_hours_per_person: float | None = None
+    # hafta sonu fazla mesaisi + kişi başı birikim
+    weekend_overtime_headcount: int = 0
+    weekend_overtime_days: int = 0
+    weekend_overtime_hours_per_person: float = 0.0
+    weekend_overtime_capacity_hours: float = 0.0
+    ov_weekend_overtime_headcount: int | None = None
+    ov_weekend_overtime_days: int | None = None
+    ov_weekend_overtime_hours_per_person: float | None = None
+    overtime_person_hours_week: float = 0.0  # fazla mesai yapan kişinin bu haftaki nominal saati
+    overtime_person_hours_ytd: float = 0.0  # yıl başından bu haftaya birikim (kişi başı)
+    overtime_legal_yearly_hours: float = 270.0
+    overtime_proposed: bool = False
+    overtime_extra_headcount: int = 0
 
 
 # ---- Senaryo matrisi ----
@@ -1215,6 +1395,12 @@ REVISION_REASON_CODES = (
 class PlanRevisionCreate(BaseModel):
     reason_codes: list[str]
     note: str = ""
+    material_policy: MaterialPolicy = "conditional"
+    placement: Placement = "flow"
+    jit_buffer_days: int = Field(default=2, ge=0, le=60)
+    slip_mode: SlipMode = "chain"
+    use_overtime: bool = True
+    prep_fill: bool = True
     start_week: date
     weeks: int = 8
     mode: PlanMode = "due_date"
@@ -1259,6 +1445,12 @@ class PlanRevisionChangesBulkIn(BaseModel):
     changes: list[PlanRevisionChangeIn]
 
 
+class PlanRevisionChangesRemoveIn(BaseModel):
+    """Taslaktan toplu girdi çıkarma (ör. karşılanamayan talepleri geri çekme)."""
+
+    change_ids: list[int] = Field(min_length=1)
+
+
 class PlanRevisionChangeOut(BaseModel):
     id: int
     entity_type: str
@@ -1286,6 +1478,136 @@ class PlanRevisionKpis(BaseModel):
     partial: int = 0
 
 
+class PlanRevisionOrderDiff(BaseModel):
+    """Canlı plan ile önerilen plan arasında sipariş bazlı önce/sonra satırı."""
+
+    order_id: int
+    order_no: str
+    position_no: str = ""
+    customer: str = ""
+    item_code: str = ""
+    quantity: float = 0.0
+    due_date: date | None = None  # ilk termin
+    due_before: date | None = None  # canlı planın esas aldığı (etkin) termin
+    due_after: date | None = None  # önerilen planın esas aldığı termin (talep varsa yeni)
+    end_before: date | None = None  # canlı plan tahmini bitiş
+    end_after: date | None = None  # önerilen tahmini bitiş
+    delta_days: int | None = None  # bitiş kayması: + geriye, - öne
+    status_before: str = ""
+    status_after: str = ""
+    lateness_before: int | None = None
+    lateness_after: int | None = None
+    change_kind: str = ""  # revised_due_date / job_move / ""
+    change_id: int | None = None
+    requested: bool = False  # bu revizyonda talep girilen sipariş
+    met: bool | None = None  # talep: yeni termine yetişiyor mu
+    pushed: bool = False  # bitişi geriye kaydı
+    pulled_forward: bool = False  # bitişi öne geldi
+    newly_late: bool = False  # canlıda geç değilken öneride geç
+    bumped: bool = False  # iş taşıma yolunda kaydırılan (çakışan) iş
+
+
+class PullForwardMove(BaseModel):
+    order_id: int
+    order_no: str
+    position_no: str = ""
+    customer: str = ""
+    item_code: str = ""
+    operation_seq: int
+    work_center_code: str
+    from_week: date
+    to_week: date
+    hours: float
+    due_date: date
+
+
+class PullForwardPlanOut(BaseModel):
+    """Tüm ufuk öne çekme planı: atıl hücreler ve sipariş başına tek taşıma."""
+
+    start_week: date
+    weeks: int
+    idle_hours_total: float = 0.0
+    idle_cells: int = 0
+    moves: list[PullForwardMove] = []
+    moved_hours: float = 0.0
+
+
+class IdleSuggestionRow(BaseModel):
+    """Atıl haftaya öne çekilebilir iş (sonraki haftada planlı satır)."""
+
+    order_id: int
+    order_no: str
+    position_no: str = ""
+    customer: str = ""
+    item_code: str = ""
+    operation_seq: int
+    operation_name: str = ""
+    semi_finished_code: str = ""
+    from_week: date
+    hours: float
+    qty: float = 0.0
+    due_date: date
+    plan_line_id: int
+    eligible: bool = True  # öncül ve malzeme uygun
+    fits: bool = False  # atıl saate sığıyor (termin sırasıyla kümülatif)
+    blocker: str = ""
+
+
+class IdleSuggestionOut(BaseModel):
+    work_center_id: int
+    work_center_code: str
+    week_start: date
+    capacity_hours: float = 0.0
+    planned_hours: float = 0.0
+    idle_hours: float = 0.0
+    eligible_count: int = 0
+    fits_hours: float = 0.0
+    rows: list[IdleSuggestionRow] = []
+    notes: list[str] = []
+
+
+class OvertimeSuggestionRow(BaseModel):
+    """Darboğaz haftası için fazla mesai önerisi (18:00-21:00, kişi başı ≤ 2,5 sa)."""
+
+    work_center_id: int
+    work_center_code: str
+    week_start: date
+    headcount: int
+    current_overtime_headcount: int = 0
+    suggested_overtime_headcount: int
+    overtime_days: int
+    overtime_hours_per_person: float
+    efficiency_ratio: float
+    added_capacity_hours: float
+    utilization: float = 0.0
+    shortfall_hours_before: float = 0.0
+    shortfall_hours_after: float = 0.0
+    order_nos: list[str] = []
+    explanation: str = ""
+
+
+class OvertimeSuggestionOut(BaseModel):
+    revision_id: int
+    total_shortfall_hours: float = 0.0
+    covered_hours: float = 0.0
+    uncovered_hours: float = 0.0
+    suggestions: list[OvertimeSuggestionRow] = []
+    notes: list[str] = []
+    window: str = "18:00-21:00"
+    max_hours_per_person: float = 2.5
+
+
+class PlanRevisionDiffSummary(BaseModel):
+    requested: int = 0
+    met: int = 0
+    unmet: int = 0
+    pushed: int = 0
+    newly_late: int = 0
+    pulled_forward: int = 0
+    unchanged: int = 0
+    bumped: int = 0
+
+
 class PlanRevisionCompareOut(BaseModel):
     baseline: PlanRevisionKpis
     proposed: PlanRevisionKpis
@@ -1293,6 +1615,8 @@ class PlanRevisionCompareOut(BaseModel):
     bumped_orders: list[str] = []
     insert_notes: list[str] = []
     unplanned: list[dict] = []
+    order_diffs: list[PlanRevisionOrderDiff] = []
+    diff_summary: PlanRevisionDiffSummary = PlanRevisionDiffSummary()
 
 
 class PlanRevisionOut(BaseModel):
@@ -1301,6 +1625,12 @@ class PlanRevisionOut(BaseModel):
     status: str
     reason_codes: list[str]
     note: str
+    material_policy: MaterialPolicy = "conditional"
+    placement: Placement = "flow"
+    jit_buffer_days: int = 2
+    slip_mode: str = "chain"
+    use_overtime: bool = True
+    prep_fill: bool = True
     start_week: date
     weeks: int
     mode: str

@@ -1,20 +1,20 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { api, fmt, type ImportKind, type ImportResult, type OrderImportPreview } from "../api";
+import { api, type LineDizilimPreview, type LineDizilimResult, fmt, type ImportKind, type ImportResult, type OrderImportPreview } from "../api";
 import { useAuth } from "../auth";
 import { ErrorText, useAsync } from "../components";
 
 interface LogRow { id: number; kind: string; filename: string; username: string; inserted: number; updated: number; errors: string[]; created_at: string }
 
-const ORDER = ["workcenters", "istasyonlar", "machines", "production_bom", "shifts", "wc_weeks", "employees", "items", "bom", "routing", "op_rules", "orders", "production", "downtime", "stock_receipts"];
+const ORDER = ["workcenters", "istasyonlar", "machines", "production_bom", "laser_times", "shifts", "wc_weeks", "items", "bom", "routing", "op_rules", "orders", "production", "downtime", "stock_receipts"];
 const HINT: Record<string, string> = {
-  workcenters: "Önce iş merkezleri. Alan Kodu/Adı ile gruplanır; Kapasite Kaynağı: İM (personel/vardiya) veya Makine (makine atamaları).",
+  workcenters: "Önce iş merkezleri. Alan Kodu/Adı ile gruplanır. İş gücü kapasitesi haftalık kişi girişinden hesaplanır; eski Kapasite Kaynağı alanı bu hesabı değiştirmez.",
   istasyonlar: "İstasyonlar.xlsx formatı: istasyon kodu, tanım, bağlı iş merkezi adı. Listedeki olmayan istasyonlar pasif yapılır.",
   machines: "İş merkezi altındaki istasyon/makine listesi. Kod benzersizdir; wc_code veya iş merkezi adı ile eşleşir.",
   production_bom: "ERP RECETELER (BOM.xlsx): tüm mamul rotası ve BOM tek seferde yüklenir. Önce istasyon import önerilir.",
-  shifts: "Günler: 0=Pzt … 6=Paz (örn. 0,1,2,3,4). Kişi sayısı 0 ise personel listesinden sayılır.",
-  wc_weeks: "Haftaya özel iş gücü: Hafta = Pazartesi tarihi ya da 2026-W37. Boş bırakılan alan varsayılanı korur; tüm alanlar boşsa istisna silinir.",
-  employees: "Kimin hangi iş merkezinde (ve isteğe bağlı hangi makinede) çalıştığı → verimli kapasite.",
+  laser_times: "Yarı mamul lazer operasyonu (örn. 5909828-12) başına çevrim süresi (sn/adet) ve setup (dk/iş). ERP SURE ve 1,6 çarpanı yerine bu değerler kullanılır; reçeteler yeniden yüklendiğinde de korunur.",
+  shifts: "Günler: 0=Pzt … 6=Paz (örn. 0,1,2,3,4). Kişi sayısı haftalık iş gücünden alınır; eski vardiya kişi alanı kapasiteyi değiştirmez.",
+  wc_weeks: "Haftaya özel iş gücü: Hafta = Pazartesi tarihi ya da 2026-W37. Boş kişi sayısı eksik giriştir; planlama öncesinde düzeltme veya sıfır kapasite onayı gerekir. Saat/gün boşsa varsayılan kullanılır; tüm alanlar boşsa haftalık kayıt silinir.",
   items: "Stok kodları (BOM/rota yüklerken bilinmeyen kodlar otomatik oluşturulur).",
   bom: "Hammadde satırları.",
   routing: "Aşamalı tezgah sırası + çevrim süresi (sn/adet). Kapasite ihtiyacının kaynağı.",
@@ -73,7 +73,7 @@ export default function Imports() {
     await upload("orders", file, removeMissing);
   };
 
-  const sorted = [...(kinds.data ?? [])].sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind));
+  const sorted = [...(kinds.data ?? [])].filter((k) => k.kind !== "employees").sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind));
 
   useEffect(() => {
     if (!highlightKind) return;
@@ -89,6 +89,7 @@ export default function Imports() {
         <span className="muted">Import şablonlarıyla uyumlu alan aktarımı; eksiksiz veritabanı geri dönüşü değildir. Tam yedek için <code>backend/scripts/backup_postgres.ps1</code> (pg_dump). Partiler ve revizyonlar referans sayfalar — otomatik geri yükleme vaadi yok.</span>
       </div>
       <ErrorText err={kinds.err || orderPreviewErr} />
+      {can("poweruser") && <LineDizilimCard onApplied={() => { log.reload(); window.dispatchEvent(new Event("data-imported")); }} />}
       <div className="grid">
         {sorted.map((k, i) => {
           const r = results[k.kind];
@@ -206,6 +207,12 @@ function OrderImportDialog({
             )}.
             Önce <b>Stok Kodları</b> importu ile eksik kodları ekleyin veya Excel raporundaki <b>Hatalar</b> sayfasında kodları düzeltin.
           </p>
+          {(preview.no_routing_item_codes?.length ?? 0) > 0 && (
+            <p style={{ margin: "6px 0" }}>
+              <b>Rota tanımı eksik ürünler ({preview.no_routing_item_codes!.length}):</b> {preview.no_routing_item_codes!.slice(0, 10).join(", ")}{preview.no_routing_item_codes!.length > 10 ? "…" : ""}.
+              Bu ürünlerin siparişi rota tanımlanmadan aktarılmaz; <b>Rota / Çevrim Süreleri</b> importu ile rotayı ekleyip dosyayı yeniden yükleyin.
+            </p>
+          )}
           <ul className="errors">
             {errShow.map((e, i) => <li key={i}>{e}</li>)}
             {errMore > 0 && <li className="muted">… ve {errMore} hata daha (tam listeyi Excel raporunda görün)</li>}
@@ -296,6 +303,84 @@ function PreviewTable({ rows, showRow }: { rows: OrderImportPreview["only_in_sys
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+
+/** Saha tablosu: yıkama makinesi uygunluğu + konveyör dizilimi, tavlama dizilimi. Önce ön izleme, sonra uygula. */
+function LineDizilimCard({ onApplied }: { onApplied: () => void }) {
+  const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState<LineDizilimPreview | null>(null);
+  const [result, setResult] = useState<LineDizilimResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const pick = async (f: File | undefined) => {
+    if (!f) return;
+    setFile(f); setPreview(null); setResult(null); setErr(""); setBusy(true);
+    try { setPreview(await api.uploadLong<LineDizilimPreview>("/api/imports/line-dizilim/preview", f)); } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
+  };
+  const apply = async () => {
+    if (!file) return;
+    setBusy(true); setErr("");
+    try { setResult(await api.uploadLong<LineDizilimResult>("/api/imports/line-dizilim/apply", file)); onApplied(); } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
+  };
+  const p = preview;
+  return (
+    <div className="panel" id="import-kind-line-dizilim">
+      <h2 style={{ marginTop: 0 }}>Hat dizilimi — saha tablosu (Tavlama / Yıkama)</h2>
+      <div className="muted" style={{ marginBottom: 6 }}>
+        "YIKAMA ÖNCELİK" sayfasında yk2/yk3/yk4 sütunları YK-02/YK-03/YK-04 makinelerinin konveyörüne tek seferde konan parça adedidir; boş hücre "bu makinede yıkanamaz". YK-05, YK-03 ile aynı kabul edilir. "TAVLAMA ÖNCELİK" dizilimi iki fırına yazılır. Saha tablosu geçerlidir: ilgili operasyonların istasyon bağları ve dizilimi bu dosyayla değiştirilir. BOM aktarımından SONRA çalıştırın.
+      </div>
+      <div className="row"><input type="file" accept=".xlsx" disabled={busy} onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; void pick(f); }} /></div>
+      {busy && <p className="muted">Çalışıyor…</p>}
+      {err && <div className="error">{err}</div>}
+      {result ? (
+        <div className="success">Uygulandı: {result.operations} operasyon ({result.washing} yıkama, {result.annealing} tavlama). Çakışma {result.conflict_count}, stok kartı yok {result.not_found_count}, operasyonu yok {result.no_ops_count}. Etki için otomatik planı yeniden çalıştırın.</div>
+      ) : p && (
+        <>
+          {p.missing_sheets.length > 0 && <div className="error">Eksik sayfa: {p.missing_sheets.join(", ")}</div>}
+          {p.missing_machines.length > 0 && <div className="error">Programda tanımlı olmayan makine: {p.missing_machines.join(", ")} (önce İş Merkezleri &gt; İstasyonlar)</div>}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 8 }}>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th colSpan={2}>Dosya</th></tr></thead>
+                <tbody>
+                  <tr><td>Yıkama ürünü</td><td>{p.file.washing_items}</td></tr>
+                  <tr><td>Tavlama ürünü</td><td>{p.file.annealing_items}</td></tr>
+                  {p.file.washing_combos.map((c) => <tr key={c.machines}><td className="muted">Yıkanabildiği makineler: {c.machines}</td><td>{c.items}</td></tr>)}
+                  <tr><td>Stok kartı olmayan kod</td><td style={{ color: p.not_found_count ? "var(--warn)" : undefined }}>{p.not_found_count}</td></tr>
+                  <tr><td>Programda operasyonu olmayan</td><td style={{ color: p.no_ops_count ? "var(--warn)" : undefined }}>{p.no_ops_count}</td></tr>
+                  <tr><td>Paylaşılan yarımamülde çakışma</td><td style={{ color: p.conflict_count ? "var(--warn)" : undefined }}>{p.conflict_count}</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th colSpan={2}>Programda değişecek</th></tr></thead>
+                <tbody>
+                  <tr><td>Yıkama operasyonu</td><td>{p.operations.washing}</td></tr>
+                  <tr><td>Tavlama operasyonu</td><td>{p.operations.annealing}</td></tr>
+                  <tr><td>İstasyon bağı değişen</td><td>{p.operations.station_links_changed}</td></tr>
+                  <tr><td>Dizilimi değişen</td><td>{p.operations.units_changed}</td></tr>
+                  <tr><td>Birincil istasyonu değişen</td><td>{p.operations.primary_changed}</td></tr>
+                  <tr><td>Açık sipariş hat-saati: yıkama</td><td>{fmt(p.open_order_hours.before.washing ?? 0)} → {fmt(p.open_order_hours.after.washing ?? 0)}</td></tr>
+                  <tr><td>Açık sipariş hat-saati: tavlama</td><td>{fmt(p.open_order_hours.before.annealing ?? 0)} → {fmt(p.open_order_hours.after.annealing ?? 0)}</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          {(p.conflicts.length > 0 || p.no_ops.length > 0 || p.not_found.length > 0 || p.bad_rows.length > 0) && (
+            <ul className="muted" style={{ fontSize: 12, maxHeight: 160, overflow: "auto" }}>
+              {p.conflicts.slice(0, 20).map((x, i) => <li key={"c" + i}>{x}</li>)}
+              {p.no_ops.slice(0, 20).map((x, i) => <li key={"n" + i}>Operasyon yok: {x}</li>)}
+              {p.not_found.slice(0, 20).map((x, i) => <li key={"u" + i}>Stok kartı yok: {x}</li>)}
+              {p.bad_rows.slice(0, 20).map((x, i) => <li key={"b" + i}>{x}</li>)}
+            </ul>
+          )}
+          <button type="button" disabled={busy || p.missing_machines.length > 0 || (p.operations.washing + p.operations.annealing) === 0} onClick={() => void apply()} style={{ marginTop: 8 }}>Uygula</button>
+        </>
+      )}
     </div>
   );
 }

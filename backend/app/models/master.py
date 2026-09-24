@@ -31,6 +31,8 @@ class WorkCenter(Base):
     capacity_source: Mapped[str] = mapped_column(String(16), default="work_center")
     # Planlamada bos birakilacak kapasite payi (0=%%100 doluluk hedefi, 10=plan en fazla kapasitenin %%90'i)
     planning_reserve_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    planning_mode: Mapped[str] = mapped_column(String(16), default="labor")
+    required_crew_size: Mapped[int] = mapped_column(Integer, default=1)
 
     shifts: Mapped[list["WorkCenterShift"]] = relationship(
         back_populates="work_center", cascade="all, delete-orphan", order_by="WorkCenterShift.id"
@@ -53,7 +55,22 @@ class WorkCenterWeek(Base):
     headcount: Mapped[int | None] = mapped_column(Integer, nullable=True)
     efficient_hours_per_person: Mapped[float | None] = mapped_column(Float, nullable=True)
     working_days: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 0..7; None => vardiya gunleri
+    line_hours_per_day: Mapped[float | None] = mapped_column(Float, nullable=True)
     note: Mapped[str] = mapped_column(String(256), default="")
+    # Fazla mesai (18:00-21:00 penceresi): kisi sayisi, uygulanan gun sayisi (None => haftanin calisma gunleri),
+    # kisi basi nominal saat (None => 2.5; ust sinir 2.5). Kapasiteye vardiya verim oraniyla eklenir.
+    overtime_headcount: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    overtime_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    overtime_hours_per_person: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Hafta sonu fazla mesaisi (Cmt/Paz 08:00-18:00, mavi yaka onayiyla): kisi, gun (0..2: once Cmt sonra Paz),
+    # kisi basi nominal saat (None => 8.5; ust sinir 8.5). Vardiya verim oraniyla kapasiteye eklenir.
+    weekend_overtime_headcount: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    weekend_overtime_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    weekend_overtime_hours_per_person: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Plan onerisi (onay bekliyor): planlayici termini kurtarmak icin yazdi; haftalik is gucunde onaylanınca False olur.
+    overtime_proposed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # Mesaiye alınabilecek ek kişi (komşu merkezden destek): fazla mesai kişi sınırı = hafta kişi + ek kişi
+    overtime_extra_headcount: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     work_center: Mapped[WorkCenter] = relationship()
 
@@ -73,6 +90,17 @@ class Machine(Base):
 
     work_center: Mapped[WorkCenter] = relationship(back_populates="machines")
     employees: Mapped[list["Employee"]] = relationship(back_populates="machine")
+    required_crew_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    weeks: Mapped[list["MachineWeek"]] = relationship(cascade="all, delete-orphan")
+
+
+class MachineWeek(Base):
+    __tablename__ = "machine_weeks"
+    __table_args__ = (UniqueConstraint("machine_id", "week_start", name="uq_machine_week"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id", ondelete="CASCADE"), index=True)
+    week_start: Mapped[date] = mapped_column(Date, index=True)
+    working_hours: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class WorkCenterShift(Base):
@@ -132,6 +160,10 @@ class Item(Base):
     sub_group: Mapped[str] = mapped_column(String(64), default="", index=True)
     product_group: Mapped[str] = mapped_column(String(64), default="")
     unit: Mapped[str] = mapped_column(String(16), default="AD")
+    # Ara stok siniri (yarimamul kartlari icin): oncul operasyon ardilin tuketiminden en fazla
+    # bu kadar adet / gun once uretilebilir. Bos = sinir yok.
+    max_wip_qty: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_wip_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     bom_lines: Mapped[list["BomLine"]] = relationship(back_populates="item", cascade="all, delete-orphan")
     operations: Mapped[list["RoutingOperation"]] = relationship(
@@ -182,6 +214,7 @@ class RoutingOperation(Base):
     setup_labor_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
     setup_machine_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
     units_per_cycle: Mapped[int] = mapped_column(Integer, default=1)
+    line_interval_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
     setup_family: Mapped[str] = mapped_column(String(64), default="")
     semi_finished_code: Mapped[str] = mapped_column(String(64), default="", index=True)  # operasyon sonu yarımamül
     primary_machine_id: Mapped[int | None] = mapped_column(
@@ -199,6 +232,21 @@ class RoutingOperation(Base):
         from app.services.routing_resource import planning_load_hours
 
         return planning_load_hours(self, quantity, setup_required=True)
+
+
+class LaserTimeStandard(Base):
+    """Yari mamul lazer operasyonu icin olculmus/tahmini standart sure (ERP SURE yerine gecer).
+
+    Degerler dogrudan yazilir; ERP BOM aktarimindaki bom_cycle_factor (1.6) bu surelere uygulanmaz.
+    ERP receteleri yeniden yuklendiginde de eslesen operasyonlarda bu degerler korunur."""
+
+    __tablename__ = "laser_time_standards"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    semi_finished_code: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # orn. 5909828-12
+    cycle_time_sec: Mapped[float] = mapped_column(Float, default=0.0)
+    setup_time_min: Mapped[float] = mapped_column(Float, default=0.0)
+    note: Mapped[str] = mapped_column(String(256), default="")
 
 
 class MachineCalendarEntry(Base):
@@ -256,6 +304,8 @@ class RoutingOperationStation(Base):
     operation_id: Mapped[int] = mapped_column(ForeignKey("routing_operations.id", ondelete="CASCADE"), index=True)
     machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id", ondelete="CASCADE"), index=True)
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Bu istasyonun konveyörüne tek seferde konan parça (dizilim); None => operasyonun units_per_cycle değeri
+    units_per_cycle: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     operation: Mapped[RoutingOperation] = relationship(back_populates="alt_stations")
     machine: Mapped[Machine] = relationship()

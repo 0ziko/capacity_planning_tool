@@ -2,7 +2,7 @@
 
 from datetime import date, timedelta
 
-from tests.test_capacity_flow import WEEK, _upload
+from tests.test_capacity_flow import WEEK, _upload, _weekly_staffing
 
 
 def _wc_setup(client, auth, code: str, reserve_pct: float = 0.0):
@@ -27,6 +27,7 @@ def _wc_setup(client, auth, code: str, reserve_pct: float = 0.0):
         ["İş Merkezi Kodu", "Vardiya", "Günler (Pzt=0..Paz=6)", "Başlangıç", "Bitiş", "Kişi Sayısı", "Kişi Başı Verimli Saat"],
         [[code, "Gündüz", "0,1,2,3,4", "08:00", "18:00", 1, 8]],
     )
+    _weekly_staffing(client, auth, [[code, 1, 8, 5]])
     return wc
 
 
@@ -35,7 +36,7 @@ def test_planning_reserve_pct_limits_utilization(client, auth):
     _upload(client, auth, "items", ["Stok Kodu", "Stok Adı", "Ürün Grubu"], [["RSV-M", "Rezerve", "G"]])
     _upload(client, auth, "routing", ["Stok Kodu", "Sıra", "Operasyon", "İş Merkezi Kodu", "Çevrim Süresi (sn)"], [["RSV-M", 10, "Op", "RSV-1", 288]])  # 8 sa/adet
     _upload(client, auth, "orders", ["Sipariş No", "Termin", "Stok Kodu", "Miktar"], [["RSV-O1", "2026-12-01", "RSV-M", 5]])  # 40 sa
-    client.post("/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 2, "work_center_ids": [wc["id"]]})
+    _plan_with_ack(client, "/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 2, "work_center_ids": [wc["id"]]})
     load = client.get("/api/plan/load", headers=auth, params={"start": WEEK.isoformat(), "weeks": 1, "work_center_ids": [wc["id"]]}).json()
     w0 = load[0]["weeks"][0]
     assert w0["capacity_hours"] == 40
@@ -48,7 +49,7 @@ def test_forecast_respects_capacity(client, auth):
     _upload(client, auth, "items", ["Stok Kodu", "Stok Adı", "Ürün Grubu"], [["FC-M", "Forecast", "G"]])
     _upload(client, auth, "routing", ["Stok Kodu", "Sıra", "Operasyon", "İş Merkezi Kodu", "Çevrim Süresi (sn)"], [["FC-M", 10, "Op", "FC-1", 360]])  # 10 sa/adet
     _upload(client, auth, "orders", ["Sipariş No", "Termin", "Stok Kodu", "Miktar"], [["FC-FILL", "2026-12-01", "FC-M", 4]])  # 40 sa = dolu hafta
-    client.post("/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 1, "work_center_ids": [wc["id"]]})
+    _plan_with_ack(client, "/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 1, "work_center_ids": [wc["id"]]})
     before = client.get("/api/plan/load", headers=auth, params={"start": WEEK.isoformat(), "weeks": 4, "work_center_ids": [wc["id"]]}).json()[0]["weeks"][0]["utilization"]
     assert before <= 1.001
     lt = client.post("/api/plan/leadtime", headers=auth, json={"item_code": "FC-M", "quantity": 5, "start": WEEK.isoformat()}).json()
@@ -114,7 +115,7 @@ def test_merge_impact_preview(client, auth):
             json={"order_no": f"MI-{i}", "due_date": (base + timedelta(days=i * 2)).isoformat(), "item_code": "MI-M", "quantity": 10},
         ).json()
         ids.append(o["id"])
-    client.post("/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 4, "work_center_ids": [wc["id"]]})
+    _plan_with_ack(client, "/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 4, "work_center_ids": [wc["id"]]})
     r = client.post(
         "/api/plan/merge/impact",
         headers=auth,
@@ -145,7 +146,7 @@ def test_merge_impact_shows_delays(client, auth):
             json={"order_no": no, "due_date": (base + timedelta(days=off)).isoformat(), "item_code": "MID-M", "quantity": qty},
         ).json()
         ids[no] = o["id"]
-    client.post("/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 8, "work_center_ids": [wc["id"]]})
+    _plan_with_ack(client, "/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 8, "work_center_ids": [wc["id"]]})
     r = client.post(
         "/api/plan/merge/impact",
         headers=auth,
@@ -163,9 +164,11 @@ def test_leadtime_skips_full_weeks(client, auth):
     _upload(client, auth, "routing", ["Stok Kodu", "Sıra", "Operasyon", "İş Merkezi Kodu", "Çevrim Süresi (sn)"], [["LT-M", 10, "Op", "LT-FULL", 3600]])
     # Haftayi doldur (~40 sa)
     _upload(client, auth, "orders", ["Sipariş No", "Termin", "Stok Kodu", "Miktar"], [["LT-FILL", "2026-12-01", "LT-M", 40]])
-    client.post("/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 1, "work_center_ids": [wc["id"]]})
+    _plan_with_ack(client, "/api/plan/auto", headers=auth, json={"start_week": WEEK.isoformat(), "weeks": 1, "work_center_ids": [wc["id"]]})
     load0 = client.get("/api/plan/load", headers=auth, params={"start": WEEK.isoformat(), "weeks": 2, "work_center_ids": [wc["id"]]}).json()[0]["weeks"][0]
     assert load0["utilization"] >= 0.99
     lt = client.post("/api/plan/leadtime", headers=auth, json={"item_code": "LT-M", "quantity": 5, "start": WEEK.isoformat()}).json()
     start_day = lt["start"][:10]
     assert start_day >= (date.fromisoformat(WEEK.isoformat()) + timedelta(days=7)).isoformat(), f"Baslangic dolu haftada: {start_day}"
+
+from tests.test_capacity_flow import _plan_with_ack

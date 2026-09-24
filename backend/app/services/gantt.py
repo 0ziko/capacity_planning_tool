@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.models import Item, Order, PlanLine, ProductionActual, ProductionBatch, ProductionBatchOrder, WorkCenter
 from app.schemas import GanttBar, GanttOut, PlanSegmentOut
+from app.core.config import get_settings
 from app.services import capacity as cap
 from app.services.orders import effective_due, plan_line_priority_key
 from app.services.wip import resolve_wip, wip_index
@@ -18,6 +19,13 @@ def actual_hours_by_week(db: Session, wc_ids: list[int], start: date, end: date)
     """Is merkezi x hafta (Pzt) -> kazanilan saat toplami."""
     if not wc_ids:
         return {}
+    if get_settings().production_source == "mes":
+        from app.services.mes_actuals import measure
+        out = defaultdict(float)
+        for (wc, day), hours in measure(db, end + timedelta(days=6))["daily"].items():
+            if wc in wc_ids and start <= cap.week_start(day) <= end:
+                out[(wc, cap.week_start(day))] += hours
+        return dict(out)
     rows = (
         db.query(
             ProductionActual.work_center_id,
@@ -38,25 +46,11 @@ def actual_hours_by_week(db: Session, wc_ids: list[int], start: date, end: date)
     return out
 
 
-def _line_window_in_week(db: Session, wc: WorkCenter, wk: date, line_id: int, lines_in_week: list[PlanLine]) -> tuple[date, date]:
-    """Haftadaki plan satirlari kumulatif dagitilir; hedef satirin baslangic/bitis gunu."""
-    wdays = cap.working_days(wc, wk, wk + timedelta(days=6), cap.Overrides(db, wc.id))
-    if not wdays:
-        return wk, wk + timedelta(days=4)
-    capacity = cap.week_capacity_hours(db, wc, wk)
-    ordered = sorted(lines_in_week, key=plan_line_priority_key)
-    cum = 0.0
-    for p in ordered:
-        if p.id == line_id:
-            if capacity <= 0:
-                return wdays[0], wdays[-1]
-            start_frac = cum / capacity
-            end_frac = min((cum + p.planned_hours) / capacity, 1.0)
-            si = max(min(int(start_frac * len(wdays)), len(wdays) - 1), 0)
-            ei = max(min(ceil(end_frac * len(wdays)) - 1, len(wdays) - 1), si)
-            return wdays[si], wdays[ei]
-        cum += p.planned_hours
-    return wdays[0], wdays[-1]
+def _line_window_in_week(db: Session, wc: WorkCenter, wk: date, line_id: int, lines_in_week: list[PlanLine], *, cache: dict | None = None) -> tuple[date, date]:
+    """cache: (wc_id, week) -> takvim/kapasite; ayni hafta icin satir basina tekrar sorgu yapilmaz."""
+    from app.services.orders import plan_line_window
+    target = next((line for line in lines_in_week if line.id == line_id), None)
+    return plan_line_window(db, wc, wk, target, lines_in_week, cache=cache)
 
 
 def _timeline_days(db: Session, wc: WorkCenter, start: date, end: date) -> list[date]:
@@ -150,7 +144,8 @@ def _production_map(db: Session, wc_id: int, orders_by_id: dict[int, Order], as_
     return out
 
 
-def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: date | None = None) -> GanttOut:
+def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: date | None = None, selection_kind: str | None = None, selection_codes: list[str] | None = None) -> GanttOut:
+    from app.services.material_schedule import recorded_material_note
     wc = db.get(WorkCenter, work_center_id)
     if not wc:
         raise ValueError("Is merkezi bulunamadi")
@@ -175,6 +170,24 @@ def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: 
         .all()
     )
 
+    selected_ids = None
+    if selection_kind:
+        if selection_kind not in {"order", "item", "wip"}:
+            raise ValueError("Gecersiz Gantt arama turu")
+        codes = {c.strip() for c in (selection_codes or []) if c.strip()}
+        def selected(pl):
+            if selection_kind == "item":
+                return pl.order.item.code in codes
+            if selection_kind == "wip":
+                return bool(pl.operation and pl.operation.semi_finished_code in codes)
+            orders = [l.order for l in pl.production_batch.orders if l.order] if pl.production_batch else [pl.order]
+            return (bool(pl.production_batch and pl.production_batch.batch_no in codes) or
+                    any(o.order_no in codes or f"{o.order_no}/{o.position_no or ''}" in codes for o in orders))
+        selected_ids = {pl.id for pl in lines if selected(pl)}
+        if not selected_ids:
+            return GanttOut(work_center_id=wc.id, work_center_code=wc.code, range_start=start,
+                            range_end=end, as_of=as_of, timeline_days=[], bars=[])
+
     order_ids = {pl.order_id for pl in lines}
     orders_by_id = {
         o.id: o
@@ -186,16 +199,26 @@ def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: 
         )
     } if order_ids else {}
 
-    prod_map = _production_map(db, work_center_id, orders_by_id, as_of)
+    mes_matches = None
+    if get_settings().production_source == "mes":
+        from app.services.mes_actuals import measure
+        mes_matches = measure(db, as_of)["matches"]
+    prod_map = {} if mes_matches is not None else _production_map(db, work_center_id, orders_by_id, as_of)
     by_week: dict[date, list[PlanLine]] = defaultdict(list)
     for pl in lines:
         by_week[pl.week_start].append(pl)
 
+    wip_codes = {pl.operation.semi_finished_code for pl in lines if pl.operation and pl.operation.semi_finished_code}
+    wip_names = dict(db.query(Item.code, Item.name).filter(Item.code.in_(wip_codes)).all()) if wip_codes else {}
+
     bars: list[GanttBar] = []
+    window_cache: dict = {}
     for wk in sorted(by_week):
         week_lines = by_week[wk]
         for pl in sorted(week_lines, key=plan_line_priority_key):
-            ps, pe = _line_window_in_week(db, wc, wk, pl.id, week_lines)
+            if selected_ids is not None and pl.id not in selected_ids:
+                continue
+            ps, pe = _line_window_in_week(db, wc, wk, pl.id, week_lines, cache=window_cache)
             if pe < start or ps > end:
                 continue
             if pl.production_batch:
@@ -210,7 +233,7 @@ def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: 
                 batch_nos = []
                 display_no = pl.order.order_no
                 display_pos = pl.order.position_no or ""
-            pr = prod_map.get((pl.order_id, pl.operation_id), {"qty": 0.0, "hours": 0.0, "last_date": None})
+            pr = (mes_matches.get(pl.id) if mes_matches is not None else prod_map.get((pl.order_id, pl.operation_id))) or {"qty": 0., "hours": 0., "last_date": None}
             produced = float(pr["qty"])
             remaining = max(target_qty - produced, 0.0)
             if remaining <= 1e-6:
@@ -222,6 +245,8 @@ def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: 
             op = pl.operation
             bars.append(
                 GanttBar(
+                    material_unverified=pl.material_unverified,
+                    material_note=recorded_material_note(pl.material_unverified),
                     plan_line_id=pl.id,
                     order_id=pl.order_id,
                     order_no=display_no,
@@ -231,6 +256,7 @@ def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: 
                     batch_order_nos=batch_nos,
                     item_code=pl.order.item.code,
                     semi_finished_code=(op.semi_finished_code if op else "") or "",
+                    semi_finished_name=wip_names.get(op.semi_finished_code, "") if op else "",
                     operation_seq=op.seq if op else 0,
                     operation_name=op.operation_name if op else "",
                     planned_start=max(ps, start),
@@ -253,7 +279,7 @@ def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: 
 
     from app.services.daily_scheduler import segments_for_gantt
 
-    seg_rows = segments_for_gantt(db, work_center_id, start, end)
+    seg_rows = [] if selection_kind else segments_for_gantt(db, work_center_id, start, end)
     segments = [
         PlanSegmentOut(
             id=s.id,
@@ -276,6 +302,8 @@ def plan_gantt(db: Session, work_center_id: int, start: date, end: date, as_of: 
     if segments:
         note = "Gunluk kaynak segmentleri (plan_operation_segments); cubuklar haftalik ozet."
 
+    if mes_matches is not None:
+        note += " MES miktari guncel plan satirina bir kez eslenir; musteri rezervasyonu degildir."
     return GanttOut(
         work_center_id=wc.id,
         work_center_code=wc.code,

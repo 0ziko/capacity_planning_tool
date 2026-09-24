@@ -2,7 +2,7 @@
 
 from datetime import date
 
-from tests.test_capacity_flow import _upload
+from tests.test_capacity_flow import _upload, _weekly_staffing
 from tests.test_plan_preflight import _seed_daily_imports
 
 WEEK = date(2026, 9, 8)
@@ -30,6 +30,8 @@ def test_owner_records_and_select_purge(client, auth):
     for st in ("open", "closed", "merged"):
         client.delete("/api/orders", headers=auth, params={"status": st})
     _upload(client, auth, "items", ["Stok Kodu", "Stok Adı", "Ürün Grubu"], [["OD-ITEM", "Test", "G"]])
+    _upload(client, auth, "workcenters", ["İş Merkezi Kodu", "İş Merkezi Adı", "Planlanıyor (E/H)", "Birim Saat", "Kişi Başı Verimli Saat"], [["OD-WC", "Owner WC", "E", 10, 4]])
+    _upload(client, auth, "routing", ["Stok Kodu", "Sıra", "Operasyon", "İş Merkezi Kodu", "Çevrim Süresi (sn)"], [["OD-ITEM", 10, "Op", "OD-WC", 60]])  # giris kapisi: rota sart
     _upload(client, auth, "orders", ["Sipariş No", "Termin", "Stok Kodu", "Miktar"], [["OD-R1", "2026-11-01", "OD-ITEM", 1], ["OD-R2", "2026-11-02", "OD-ITEM", 2]])
 
     rec = client.get("/api/owner/records", headers=oh, params={"target": "orders", "limit": 50}).json()
@@ -51,6 +53,7 @@ def test_preflight_daily_data_in_preflight(client, auth):
     wc = next(w for w in client.get("/api/workcenters", headers=auth).json() if w["code"] == "PF-W")
     _upload(client, auth, "employees", ["Sicil No", "Ad Soyad", "İş Merkezi Kodu"], [["PFW1", "Ali", "PF-W"]])
     _upload(client, auth, "shifts", ["İş Merkezi Kodu", "Vardiya", "Günler (Pzt=0..Paz=6)", "Başlangıç", "Bitiş", "Kişi Sayısı", "Kişi Başı Verimli Saat"], [["PF-W", "G", "0,1,2,3,4", "08:00", "18:00", 1, 4]])
+    _weekly_staffing(client, auth, [['PF-W', 1, 4, 5]])
     _upload(client, auth, "items", ["Stok Kodu", "Stok Adı", "Ürün Grubu"], [["PF-WIP", "M", "G"]])
     _upload(client, auth, "routing", ["Stok Kodu", "Sıra", "Operasyon", "İş Merkezi Kodu", "Çevrim Süresi (sn)"], [["PF-WIP", 10, "Op", "PF-W", 360]])
     _upload(client, auth, "orders", ["Sipariş No", "Termin", "Stok Kodu", "Miktar"], [["PF-W1", "2026-10-01", "PF-WIP", 1]])

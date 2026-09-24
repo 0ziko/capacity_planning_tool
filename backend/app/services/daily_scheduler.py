@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import Literal
 
+from sqlalchemy import and_, not_
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import (
@@ -24,11 +25,13 @@ from app.models import (
 from app.schemas import AutoPlanRequest
 from app.services import capacity as cap
 from app.services import scenarios as scen
-from app.services.calendar_capacity import TimeRange, machine_work_intervals, work_center_crew_pool_size
-from app.services.material_schedule import MATERIAL_READY, MATERIAL_UNKNOWN
-from app.services.operation_constraints import leadtime_earliest_datetime
+from app.services.calendar_capacity import TimeRange, machine_work_intervals, work_center_crew_pool_size, daily_labor_capacity_hours
+from app.services.material_schedule import MATERIAL_READY, MATERIAL_EXPECTED, material_gate_for_order
+from app.services.operation_constraints import max_successor_qty, assembly_cap_qty
+from app.services.bom_tree import explode_order, fg_has_wip_structure, is_wip_asm_link
+from app.services.remaining_work import produced_qty_map
 from app.services.orders import effective_due
-from app.services.routing_resource import compute_operation_need, eligible_machine_ids, missing_resource_definition
+from app.services.routing_resource import compute_operation_need, eligible_machine_ids, missing_resource_definition, conveyor_kind, conveyor_units
 
 SegmentKind = Literal["setup", "process"]
 
@@ -73,7 +76,7 @@ def _max_crew_in_window(uses: list[_CrewUse], start: datetime, end: datetime) ->
             continue
         events.append((max(u.start, start), u.crew))
         events.append((min(u.end, end), -u.crew))
-    events.sort(key=lambda x: (x[0], -x[1]))
+    events.sort(key=lambda x: (x[0], x[1]))
     cur = peak = 0
     for _, d in events:
         cur += d
@@ -81,15 +84,93 @@ def _max_crew_in_window(uses: list[_CrewUse], start: datetime, end: datetime) ->
     return peak
 
 
+def _labor_free_slots(db, wc, slots, uses, crew, ovl):
+    """Intersect machine openings with crew availability and remaining daily labor."""
+    result = []
+    budgets = {}
+    for slot in slots:
+        start = slot.start
+        while start < slot.end:
+            day = start.date()
+            end = min(slot.end, datetime.combine(day + timedelta(days=1), time.min))
+            pool = work_center_crew_pool_size(wc, day, ovl.get(day))
+            if day not in budgets:
+                midnight = datetime.combine(day, time.min)
+                tomorrow = midnight + timedelta(days=1)
+                used = sum(max(0.0, (min(u.end, tomorrow) - max(u.start, midnight)).total_seconds()) / 3600 * u.crew for u in uses)
+                budgets[day] = max(0.0, cap.apply_planning_reserve(wc, daily_labor_capacity_hours(db, wc, day, 0, ovl)) - used)
+            boundaries = sorted({start, end} | {t for u in uses for t in (u.start, u.end) if start < t < end})
+            for a, b in zip(boundaries, boundaries[1:]):
+                if pool < crew or _max_crew_in_window(uses, a, b) + crew > pool:
+                    continue
+                hours = min((b - a).total_seconds() / 3600, budgets[day] / crew)
+                if hours > 1e-9:
+                    result.append(TimeRange(a, a + timedelta(hours=hours)))
+                    budgets[day] -= hours * crew
+            start = end
+    return result
+
+
 def _material_earliest(order: Order) -> datetime | None:
     st = (order.material_status or "unknown").lower()
-    if st == MATERIAL_UNKNOWN:
-        return None
-    if st != MATERIAL_READY:
+    if st not in (MATERIAL_READY, MATERIAL_EXPECTED):
         return None
     if order.material_ready_date:
         return datetime.combine(order.material_ready_date, time.min)
     return datetime.combine(date.today(), time.min)
+
+
+def _process_outputs(pred, segments):
+    """Quantity becomes available at actual cycle completion, including locked intervals."""
+    cycle_hours = float((pred.machine_cycle_time_sec if pred.time_basis == "labor_seconds_per_unit" else pred.cycle_time_sec) or 0) / 3600
+    units = 1 if pred.time_basis == "labor_seconds_per_unit" else max(int(pred.units_per_cycle or 1), 1)
+    if conveyor_kind(pred):
+        cycle_hours /= conveyor_units(pred)
+        units = 1
+    events = []
+    for seg in segments:
+        if seg.segment_kind != "process" or cycle_hours <= 0:
+            continue
+        for index in range(int(math.ceil(float(seg.good_qty) / units - 1e-9))):
+            ready = seg.start_at + timedelta(hours=(index + 1) * cycle_hours)
+            if getattr(seg, "is_locked", False):
+                ready = seg.end_at
+            events.append((ready, min(units, float(seg.good_qty) - index * units), seg))
+    return sorted(events, key=lambda event: event[0])
+
+
+def _successor_releases(rule, pred, required, successor_qty, segments, successor_cycle_hours=0.0):
+    """Actual cycle completion events, using the shared transition quantity rule."""
+    output = 0.0
+    releases = []
+    for ready, quantity, seg in _process_outputs(pred, segments):
+        output += quantity
+        ready += timedelta(minutes=rule.wait_minutes)
+        if rule.rule == "cycles" and rule.lag_cycles == 0 and not getattr(seg, "is_locked", False):
+            ready = max(seg.start_at + timedelta(minutes=rule.wait_minutes), ready - timedelta(hours=successor_cycle_hours))
+        allowed = max_successor_qty(rule, required, output, successor_qty, 0)
+        if allowed > 1e-9:
+            releases.append((ready, allowed))
+    return sorted(releases)
+
+
+def _assembly_releases(jobs, order, ledger, produced, start, finished_before=0.0):
+    """Use the weekly assembly ratio rule at each WIP completion event."""
+    outputs, requirements, events = {}, [], []
+    for job in jobs.wip_jobs:
+        last = max(job.item.operations, key=lambda op: op.seq)
+        code = job.semi_finished_code
+        outputs[code] = float(produced.get((order.id, last.id), 0))
+        requirements.append((code, job.quantity))
+        for ready, quantity, _ in _process_outputs(last, ledger.get((order.id, last.id), [])):
+            events.append((ready, code, quantity))
+    def available():
+        return max(0.0, assembly_cap_qty(outputs, requirements, order.quantity) - finished_before)
+    releases = [(start, available())]
+    for ready, code, quantity in sorted(events):
+        outputs[code] += quantity
+        releases.append((max(start, ready), available()))
+    return releases
 
 
 def resolve_setup_minutes(
@@ -155,37 +236,6 @@ def _machine_free_slots(
     return sorted(free, key=lambda r: r.start)
 
 
-def _pick_machine(
-    db: Session,
-    machines: list[Machine],
-    process_hours: float,
-    setup_minutes: float,
-    earliest: datetime,
-    horizon_end: datetime,
-    machine_books: dict[int, _MachineBook],
-    ovl: cap.Overrides,
-) -> tuple[Machine | None, datetime | None]:
-    best_m: Machine | None = None
-    best_finish: datetime | None = None
-    for m in sorted(machines, key=lambda x: x.code):
-        book = machine_books.setdefault(m.id, _MachineBook())
-        booked = list(book.segments)
-        slots = _machine_free_slots(db, m, earliest, horizon_end, booked, ovl)
-        need_h = process_hours + (setup_minutes / 60.0 if setup_minutes > 0 else 0.0)
-        need_sec = need_h * 3600.0
-        for slot in slots:
-            if slot.start < earliest:
-                continue
-            dur = (slot.end - slot.start).total_seconds()
-            if dur + 1e-6 >= need_sec:
-                finish = slot.start + timedelta(seconds=need_sec)
-                if best_finish is None or finish < best_finish:
-                    best_finish = finish
-                    best_m = m
-                break
-    return best_m, best_finish
-
-
 def _needs_setup(book: _MachineBook, batch_key: str, to_family: str) -> bool:
     if book.last_batch_key != batch_key:
         return True
@@ -209,21 +259,24 @@ def build_daily_schedule(
     horizon_start = datetime.combine(start, time.min)
     horizon_end = datetime.combine(end, time(23, 59, 59))
 
+    replace_filter = and_(
+        PlanOperationSegment.is_locked.is_(False),
+        PlanOperationSegment.start_at >= horizon_start,
+        PlanOperationSegment.start_at <= horizon_end,
+    )
+    if req.work_center_ids:
+        replace_filter = and_(replace_filter, PlanOperationSegment.work_center_id.in_(req.work_center_ids))
     locked = (
         db.query(PlanOperationSegment)
         .filter(
-            PlanOperationSegment.is_locked.is_(True),
+            not_(replace_filter),
             PlanOperationSegment.start_at < horizon_end,
             PlanOperationSegment.end_at > horizon_start,
         )
         .all()
     )
 
-    db.query(PlanOperationSegment).filter(
-        PlanOperationSegment.is_locked.is_(False),
-        PlanOperationSegment.start_at >= horizon_start,
-        PlanOperationSegment.start_at <= horizon_end,
-    ).delete(synchronize_session=False)
+    db.query(PlanOperationSegment).filter(replace_filter).delete(synchronize_session="fetch")
 
     ver = PlanScheduleVersion(
         horizon_start=start,
@@ -255,6 +308,13 @@ def build_daily_schedule(
         batch_by_op_order[key] = pl.production_batch_id
 
     order_ids = {pl.order_id for pl in plan_lines}
+    # Read predecessor requirements outside the selected centers, without replanning them.
+    dependency_qty = {}
+    for line in db.query(PlanLine).filter(PlanLine.order_id.in_(order_ids),
+                                        PlanLine.week_start >= start, PlanLine.week_start <= end).all():
+        key = (line.order_id, line.operation_id)
+        dependency_qty[key] = dependency_qty.get(key, 0.0) + float(line.planned_qty or 0)
+    dependency_qty.update(qty_by_op_order)
     orders = {
         o.id: o
         for o in db.query(Order).options(joinedload(Order.item)).filter(Order.id.in_(order_ids)).all()
@@ -282,55 +342,103 @@ def build_daily_schedule(
     skipped: list[dict] = []
     remaining: list[dict] = []
     created = 0
-    op_start_by_order: dict[tuple[int, int], datetime] = {}
-    op_end_by_order: dict[tuple[int, int], datetime] = {}
+    process_by_order: dict[tuple[int, int], list[PlanOperationSegment]] = {}
+    for seg in locked:
+        if seg.segment_kind == "process":
+            process_by_order.setdefault((seg.order_id, seg.operation_id), []).append(seg)
 
     rules = scen.RuleLookup(db)
+    produced = produced_qty_map(db, as_of=date.today())[0] if any(fg_has_wip_structure(o.item) for o in order_list) else {}
 
     for o in order_list:
         if not o.item:
             continue
-        item_ops = sorted(o.item.operations, key=lambda x: x.seq) if o.item.operations else []
-        prev_op: RoutingOperation | None = None
+        jobs = explode_order(db, o) if fg_has_wip_structure(o.item) else None
+        routes = [job.item for job in jobs.wip_jobs] if jobs else []
+        if o.item.operations:
+            routes.append(o.item)
+        # Keep each WIP route separate: equal sequence numbers do not join branches.
+        predecessors = {}
+        item_ops = []
+        for item in routes:
+            route = sorted(item.operations, key=lambda operation: operation.seq)
+            for index, operation in enumerate(route):
+                predecessors[operation.id] = route[index - 1] if index else None
+            item_ops.extend(route)
+        declared_wips = {(bl.component_code or "").strip() for bl in o.item.bom_lines
+                         if is_wip_asm_link(bl.component_code, bl.source_wip, bl.recipe_seq)} if jobs else set()
+        missing_wips = declared_wips - {job.semi_finished_code for job in jobs.wip_jobs} if jobs else set()
+        first_finish = min(o.item.operations, key=lambda operation: operation.seq) if o.item.operations else None
         for op in item_ops:
+            prev_op = predecessors[op.id]
             key = (o.id, op.id)
-            qty = qty_by_op_order.get(key, 0.0)
+            preserved_qty = sum(seg.good_qty for seg in process_by_order.get(key, []))
+            qty = max(0.0, qty_by_op_order.get(key, 0.0) - preserved_qty)
             if qty <= 1e-6:
                 prev_op = op
                 continue
+            if getattr(op.work_center, "planning_mode", "labor") == "line":
+                skipped.append({"order_no": o.order_no, "operation_seq": op.seq, "operation_id": op.id, "item_code": op.item.code,
+                                "reason": "weekly_line_capacity_only"})
+                continue
             if missing_resource_definition(op):
-                skipped.append({"order_no": o.order_no, "operation_seq": op.seq, "reason": "missing_resource_definition"})
+                skipped.append({"order_no": o.order_no, "operation_seq": op.seq, "operation_id": op.id, "item_code": op.item.code, "reason": "missing_resource_definition"})
                 prev_op = op
                 continue
             mat_earliest = _material_earliest(o)
-            if mat_earliest is None and req.material_policy == "strict":
-                skipped.append({"order_no": o.order_no, "operation_seq": op.seq, "reason": "material_unknown"})
+            material_gate = material_gate_for_order(o, policy=req.material_policy)
+            if material_gate.blocks_planning:
+                reason = "material_date_missing" if material_gate.status == MATERIAL_EXPECTED else "material_unknown"
+                skipped.append({"order_no": o.order_no, "operation_seq": op.seq, "operation_id": op.id, "item_code": op.item.code, "reason": reason})
                 prev_op = op
                 continue
 
-            need = compute_operation_need(op, qty, setup_required=True)
+            need = compute_operation_need(op, qty, setup_required=False)
             m_hours = need.machine_hours
             if m_hours is None or m_hours <= 0:
-                skipped.append({"order_no": o.order_no, "operation_seq": op.seq, "reason": "no_machine_hours"})
+                skipped.append({"order_no": o.order_no, "operation_seq": op.seq, "operation_id": op.id, "item_code": op.item.code, "reason": "no_machine_hours"})
                 prev_op = op
                 continue
 
             mids = eligible_machine_ids(op)
             machines = [machines_by_id[mid] for mid in mids if mid in machines_by_id]
             if not machines:
-                skipped.append({"order_no": o.order_no, "operation_seq": op.seq, "reason": "no_eligible_machine"})
+                skipped.append({"order_no": o.order_no, "operation_seq": op.seq, "operation_id": op.id, "item_code": op.item.code, "reason": "no_eligible_machine"})
                 prev_op = op
                 continue
 
             earliest = horizon_start
             if mat_earliest and mat_earliest > earliest:
                 earliest = mat_earliest
+            releases = None
             if prev_op:
                 pred_key = (o.id, prev_op.id)
-                pred_start = op_start_by_order.get(pred_key, horizon_start)
-                pred_end = op_end_by_order.get(pred_key, horizon_start)
-                rule = rules.get(o.item, prev_op, op)
-                earliest = max(earliest, leadtime_earliest_datetime(rule, qty, pred_start, pred_end, qty))
+                pred_required = dependency_qty.get(pred_key, 0)
+                if pred_required > 1e-6:
+                    rule = rules.get(op.item, prev_op, op)
+                    successor_cycle = float((op.machine_cycle_time_sec if op.time_basis == "labor_seconds_per_unit" else op.cycle_time_sec) or 0) / 3600
+                    successor_cycle /= conveyor_units(op)
+                    releases = _successor_releases(rule, prev_op, pred_required, qty + preserved_qty, process_by_order.get(pred_key, []), successor_cycle)
+                    releases = [(ready, max(0.0, amount - preserved_qty)) for ready, amount in releases if amount > preserved_qty + 1e-9]
+                    if not releases:
+                        remaining.append({"order_no": o.order_no, "operation_seq": op.seq, "operation_id": op.id, "item_code": op.item.code, "remaining_qty": qty, "reason": "predecessor_incomplete"})
+                        prev_op = op
+                        continue
+                    earliest = max(earliest, releases[0][0])
+
+            if jobs and first_finish and op.id == first_finish.id:
+                if missing_wips:
+                    remaining.append({"order_no": o.order_no, "operation_seq": op.seq, "operation_id": op.id, "item_code": op.item.code, "remaining_qty": qty,
+                                      "reason": "missing_wip_routing", "wip_codes": sorted(missing_wips)})
+                    continue
+                releases = _assembly_releases(jobs, o, process_by_order, produced, horizon_start,
+                                               float(produced.get(key, 0)) + preserved_qty)
+                releases = [(ready, amount) for ready, amount in releases if amount > 1e-9]
+                if not releases:
+                    remaining.append({"order_no": o.order_no, "operation_seq": op.seq, "operation_id": op.id, "item_code": op.item.code, "remaining_qty": qty,
+                                      "reason": "predecessor_incomplete"})
+                    continue
+                earliest = max(earliest, releases[0][0])
 
             wc = op.work_center or db.get(WorkCenter, op.work_center_id)
             if wc is None:
@@ -342,46 +450,48 @@ def build_daily_schedule(
             bkey = _batch_key(batch_id, o.id, op.id)
             to_family = (op.setup_family or op.operation_name or "").strip()
 
-            setup_min = 0.0
-            chosen, finish = _pick_machine(db, machines, m_hours, 0.0, earliest, horizon_end, machine_books, ovl)
-            if chosen is None:
-                remaining.append({"order_no": o.order_no, "operation_seq": op.seq, "remaining_qty": qty})
-                prev_op = op
-                continue
-
-            book = machine_books.setdefault(chosen.id, _MachineBook())
-            if book.last_batch_key and book.last_batch_key != bkey:
-                book.interrupted_by_other = True
-            from_family = book.last_family or ""
-            if _needs_setup(book, bkey, to_family):
-                sm = resolve_setup_minutes(db, op, chosen.id, from_family, to_family)
+            # Choose using the same labor limits used for actual placement.
+            candidates = []
+            setup_unknown = False
+            uses = crew_by_wc.setdefault(wc.id, [])
+            for machine in sorted(machines, key=lambda m: m.code):
+                candidate_book = machine_books.setdefault(machine.id, _MachineBook())
+                sm = resolve_setup_minutes(db, op, machine.id, candidate_book.last_family or "", to_family) if _needs_setup(candidate_book, bkey, to_family) else 0.0
                 if sm is None:
-                    skipped.append({"order_no": o.order_no, "operation_seq": op.seq, "reason": "setup_unknown"})
-                    prev_op = op
+                    setup_unknown = True
                     continue
-                setup_min = sm
-
-            chosen, finish = _pick_machine(db, machines, m_hours, setup_min, earliest, horizon_end, machine_books, ovl)
-            if chosen is None or finish is None:
-                remaining.append({"order_no": o.order_no, "operation_seq": op.seq, "remaining_qty": qty})
+                openings = _labor_free_slots(db, wc, _machine_free_slots(db, machine, earliest, horizon_end, candidate_book.segments, ovl), uses, crew_need, ovl)
+                # Setup is indivisible and must fit inside an open slot.
+                openings = [r for r in openings if r.duration_hours() > 1e-9]
+                first = next((i for i, r in enumerate(openings) if r.duration_hours() + 1e-9 >= sm / 60.0), None)
+                if first is None:
+                    continue
+                openings = openings[first:]
+                available = sum(r.duration_hours() for r in openings) - sm / 60.0
+                if available <= 1e-9:
+                    continue
+                left = m_hours + sm / 60.0
+                finish = openings[-1].end
+                for r in openings:
+                    if left <= r.duration_hours():
+                        finish = r.start + timedelta(hours=left)
+                        break
+                    left -= r.duration_hours()
+                candidates.append((available + 1e-9 < m_hours, finish, machine.code, machine, sm, openings[0]))
+            if not candidates:
+                remaining.append({"order_no": o.order_no, "operation_seq": op.seq, "operation_id": op.id, "item_code": op.item.code, "remaining_qty": qty, "reason": "setup_unknown" if setup_unknown else "insufficient_capacity"})
                 prev_op = op
                 continue
-
-            booked = list(book.segments)
-            slots = _machine_free_slots(db, chosen, earliest, horizon_end, booked, ovl)
-            slot = next((s for s in slots if s.start >= earliest), None)
-            if slot is None:
-                remaining.append({"order_no": o.order_no, "operation_seq": op.seq, "remaining_qty": qty})
-                prev_op = op
-                continue
-
+            _, _, _, chosen, setup_min, slot = min(candidates, key=lambda c: c[:3])
+            book = machine_books.setdefault(chosen.id, _MachineBook())
+            from_family = book.last_family or ""
             cursor = slot.start
             pool = work_center_crew_pool_size(wc, cursor.date(), ovl.get(cursor.date()))
 
             if setup_min > 0 and _needs_setup(book, bkey, to_family):
                 setup_end = cursor + timedelta(minutes=setup_min)
                 if _max_crew_in_window(crew_by_wc.setdefault(wc.id, []), cursor, setup_end) + crew_need > pool:
-                    remaining.append({"order_no": o.order_no, "operation_seq": op.seq, "remaining_qty": qty})
+                    remaining.append({"order_no": o.order_no, "operation_seq": op.seq, "operation_id": op.id, "item_code": op.item.code, "remaining_qty": qty})
                     prev_op = op
                     continue
                 seg = PlanOperationSegment(
@@ -412,28 +522,49 @@ def build_daily_schedule(
             placed_qty = 0.0
             upc = max(int(op.units_per_cycle or 1), 1)
             cycle_h = float(op.cycle_time_sec or 0) / 3600.0
-            total_cycles = int(math.ceil(qty / upc - 1e-12))
+            if op.time_basis == "labor_seconds_per_unit":
+                upc = 1
+                cycle_h = float(op.machine_cycle_time_sec or 0) / 3600.0
+            if conveyor_kind(op):
+                upc = 1
+                cycle_h /= conveyor_units(op)
 
             while proc_left_h > 1e-9 and cursor < horizon_end:
-                slots = _machine_free_slots(db, chosen, cursor, horizon_end, book.segments, ovl)
+                slots = _labor_free_slots(db, wc, _machine_free_slots(db, chosen, cursor, horizon_end, book.segments, ovl), crew_by_wc[wc.id], crew_need, ovl)
                 slot = next((s for s in slots if s.end > cursor), None)
                 if slot is None:
                     break
                 cursor = max(cursor, slot.start)
+                pool = work_center_crew_pool_size(wc, cursor.date(), ovl.get(cursor.date()))
                 slot_sec = (slot.end - cursor).total_seconds()
                 if slot_sec <= 1e-6:
                     break
                 if _max_crew_in_window(crew_by_wc.setdefault(wc.id, []), cursor, min(cursor + timedelta(seconds=slot_sec), slot.end)) + crew_need > pool:
                     break
+                available_qty = qty - placed_qty
+                if releases is not None:
+                    released = max((amount for ready, amount in releases if ready <= cursor), default=0.0)
+                    available_qty = min(available_qty, max(0.0, released - placed_qty))
+                    # A full cycle needs its feed before it starts (the final short cycle may use the remaining demand).
+                    minimum = min(upc, qty - placed_qty)
+                    if available_qty + 1e-6 < minimum:
+                        next_ready = next((ready for ready, amount in releases if ready > cursor and amount - placed_qty + 1e-6 >= minimum), None)
+                        if next_ready is None:
+                            break
+                        cursor = next_ready
+                        continue
                 take_h = min(proc_left_h, slot_sec / 3600.0)
-                seg_end = cursor + timedelta(hours=take_h)
-                cycles_in_seg = int(take_h / cycle_h) if cycle_h > 1e-9 else 0
-                if cycles_in_seg < 1 and proc_left_h > take_h - 1e-9:
-                    cycles_in_seg = 1 if take_h + 1e-9 >= cycle_h else 0
-                good = min(cycles_in_seg * upc, qty - placed_qty)
-                if good <= 0 and take_h + 1e-9 < cycle_h:
+                cycles_in_seg = int(math.floor((take_h + 1e-9) / cycle_h)) if cycle_h > 1e-9 else 0
+                feed_cycles = int(math.floor((available_qty + 1e-6) / upc))
+                if available_qty + 1e-6 >= qty - placed_qty:
+                    feed_cycles = int(math.ceil((qty - placed_qty) / upc - 1e-9))
+                cycles_in_seg = min(cycles_in_seg, feed_cycles)
+                if cycles_in_seg < 1:
                     cursor = slot.end
                     continue
+                take_h = min(proc_left_h, cycles_in_seg * cycle_h)
+                seg_end = cursor + timedelta(hours=take_h)
+                good = min(cycles_in_seg * upc, qty - placed_qty)
                 seg = PlanOperationSegment(
                     schedule_version_id=ver.id,
                     order_id=o.id,
@@ -451,6 +582,7 @@ def build_daily_schedule(
                 book.segments.append(TimeRange(cursor, seg_end))
                 crew_by_wc[wc.id].append(_CrewUse(cursor, seg_end, crew_need))
                 created += 1
+                process_by_order.setdefault(key, []).append(seg)
                 placed_qty += good
                 proc_left_h -= take_h
                 cursor = seg_end
@@ -458,11 +590,9 @@ def build_daily_schedule(
                 book.last_family = to_family
 
             if placed_qty + 1e-6 < qty:
-                remaining.append({"order_no": o.order_no, "operation_seq": op.seq, "remaining_qty": round(qty - placed_qty, 4)})
+                remaining.append({"order_no": o.order_no, "operation_seq": op.seq, "operation_id": op.id, "item_code": op.item.code, "remaining_qty": round(qty - placed_qty, 4),
+                                  "reason": "predecessor_incomplete" if releases is not None and max(amount for _, amount in releases) + 1e-6 < qty else "insufficient_capacity"})
 
-            if key not in op_start_by_order:
-                op_start_by_order[key] = earliest
-            op_end_by_order[key] = cursor
             prev_op = op
 
     db.flush()

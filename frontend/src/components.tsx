@@ -367,20 +367,22 @@ export function ErrorText({ err }: { err: string }) {
   return err ? <div className="error">{err}</div> : null;
 }
 
-export function useAsync<T>(fn: () => Promise<T>, deps: unknown[]) {
+export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], enabled = true) {
   const [data, setData] = useState<T | null>(null);
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
   const run = () => {
+    if (!enabled) return Promise.resolve();
     setLoading(true);
     setErr("");
-    fn()
+    return fn()
       .then(setData)
       .catch((e) => setErr((e as Error).message))
       .finally(() => setLoading(false));
   };
   useEffect(() => {
     let cancelled = false;
+    if (!enabled) { setLoading(false); return; }
     setLoading(true);
     setErr("");
     fn()
@@ -399,6 +401,6 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[]) {
     return () => {
       cancelled = true;
     };
-  }, deps); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [...deps, enabled]); // eslint-disable-line react-hooks/exhaustive-deps
   return { data, err, loading, reload: run };
 }

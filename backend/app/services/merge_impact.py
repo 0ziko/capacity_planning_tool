@@ -88,7 +88,13 @@ def _sim_batch_map(virtual: list[VirtualBatch]) -> dict[int, tuple[float, list[i
     return {b.id: (b.quantity, [link.order_id for link in b.orders]) for b in virtual}
 
 
-def preview_merge_impact(db: Session, groups: list[MergePreviewGroup], req: AutoPlanRequest) -> MergeImpactOut:
+def preview_merge_impact(db: Session, groups: list[MergePreviewGroup], req: AutoPlanRequest, *, on_phase=None) -> MergeImpactOut:
+    from app.services.merge_snapshot import read_snapshot
+    with read_snapshot(db):
+        return _preview_merge_impact(db, groups, req, on_phase=on_phase)
+
+
+def _preview_merge_impact(db: Session, groups: list[MergePreviewGroup], req: AutoPlanRequest, *, on_phase=None) -> MergeImpactOut:
     """Birlestirme + otomatik plan yenileme sonrasi termin kaymasi ve haftalik yuk farki."""
     virtual = _virtual_batches(db, [g.order_ids for g in groups])
     if not virtual:
@@ -108,8 +114,14 @@ def preview_merge_impact(db: Session, groups: list[MergePreviewGroup], req: Auto
         replace_existing=True,
         mode=req.mode,
     )
+    if on_phase:
+        on_phase("Birleştirme öncesi plan hesaplanıyor")
     sim_before = plan.simulate(db, sim_req)
+    if on_phase:
+        on_phase("Birleştirme sonrası plan hesaplanıyor")
     sim_after = plan.simulate(db, sim_req, extra_batches=virtual)
+    if on_phase:
+        on_phase("Termin ve kapasite farkları karşılaştırılıyor")
     batch_map = _sim_batch_map(virtual)
 
     before_load = _load_from_sim(db, wc_ids, start, end, sim_before.lines)
